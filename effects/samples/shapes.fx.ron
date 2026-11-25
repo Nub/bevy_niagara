@@ -1,0 +1,107 @@
+// Shapes: Shape Location with each primitive, in a row from left to right:
+// sphere (with a box-shaped bite taken out by Kill Particles in Volume),
+// box surface, cylinder, torus, cone and a ring filled half-way to a disc.
+// Particles do not move; they fade in and out so the shapes stay steady.
+(
+    name: "Shapes",
+    emitters: [
+        (
+            name: "Sphere",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.5), "Color": Color((1.5, 0.4, 0.3, 1.0)), "Sprite Size": Vec2((0.03, 0.03)) }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Sphere, "Sphere Radius": Float(0.45), "Offset": Vec3((-2.5, 1.3, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Kill Particles in Volume", inputs: {
+                    "Volume Shape": Box, "Volume Center": Vec3((-2.3, 1.5, 0.3)), "Box Size": Vec3((0.5, 0.5, 0.5)),
+                }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Box",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.5), "Color": Color((1.4, 0.9, 0.2, 1.0)), "Sprite Size": Vec2((0.03, 0.03)) }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Box, "Surface Only": Bool(true), "Box Size": Vec3((0.7, 0.9, 0.5)), "Offset": Vec3((-1.5, 1.3, 0.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Cylinder",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.5), "Color": Color((0.4, 1.4, 0.4, 1.0)), "Sprite Size": Vec2((0.03, 0.03)) }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Cylinder, "Surface Only": Bool(true), "Cylinder Height": Float(1.0), "Cylinder Radius": Float(0.3),
+                    "Offset": Vec3((-0.5, 1.3, 0.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Torus",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.5), "Color": Color((0.3, 1.2, 1.5, 1.0)), "Sprite Size": Vec2((0.03, 0.03)) }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Torus, "Large Radius": Float(0.35), "Handle Radius": Float(0.1), "Offset": Vec3((0.5, 1.3, 0.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Cone",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.5), "Color": Color((0.5, 0.5, 1.6, 1.0)), "Sprite Size": Vec2((0.03, 0.03)) }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Cone, "Cone Length": Float(0.9), "Cone Angle": Float(25.0), "Offset": Vec3((1.5, 0.85, 0.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Ring",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.5), "Color": Color((1.5, 0.4, 1.3, 1.0)), "Sprite Size": Vec2((0.03, 0.03)) }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Ring, "Ring Radius": Float(0.4), "Disc Coverage": Float(0.5), "Offset": Vec3((2.5, 1.3, 0.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

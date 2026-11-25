@@ -1,0 +1,105 @@
+// Forces: Niagara's force modules side by side. Left, a vortex: particles
+// from a ring swirl around a vertical axis (Vortex Force), are drawn to a
+// point (Point Attraction Force, killed at its centre), blown by Wind Force,
+// coloured and stretched by speed; a ribbon swirls with them, narrowing as
+// it ages (Scale Ribbon Width). Right, a fountain pushed outwards by Point
+// Force, lifted by Linear Force, pulled down by Acceleration Force, its total
+// force capped by Limit Force and inheriting the owner's velocity.
+(
+    name: "Forces",
+    emitters: [
+        (
+            name: "Vortex",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(600.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.0), Float(3.0)),
+                    "Color": Color((0.3, 0.7, 1.5, 1.0)),
+                    "Sprite Size": Vec2((0.04, 0.04)),
+                }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Ring, "Ring Radius": Float(1.1), "Offset": Vec3((-1.6, 0.3, 0.0)),
+                }),
+                (module: "Vortex Velocity", inputs: { "Vortex Origin": Vec3((-1.6, 0.0, 0.0)), "Velocity Amount": Float(1.5) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Vortex Force", inputs: {
+                    "Vortex Origin": Vec3((-1.6, 0.0, 0.0)), "Vortex Force Amount": Float(2.0), "Origin Pull Amount": Float(1.0),
+                }),
+                (module: "Point Attraction Force", inputs: {
+                    "Attractor Position": Vec3((-1.6, 2.2, 0.0)), "Attraction Strength": Float(3.0),
+                    "Attraction Radius": Float(3.0), "Falloff Exponent": Float(0.5), "Kill Radius": Float(0.15),
+                }),
+                (module: "Wind Force", inputs: { "Wind Velocity": Vec3((0.5, 0.0, 0.0)), "Air Resistance": Float(0.3) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color by Speed", inputs: {
+                    "Velocity Threshold": Float(3.0),
+                    "Min Scale Factor": Color((0.4, 0.4, 0.4, 1.0)), "Max Scale Factor": Color((1.6, 1.2, 1.0, 1.0)),
+                }),
+                (module: "Scale Sprite Size by Speed", inputs: {
+                    "Velocity Threshold": Float(3.0), "Max Scale Factor": Vec2((1.0, 4.0)),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+        (
+            name: "Vortex Ribbon",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.5),
+                    "Position": Vec3((-0.5, 0.3, 0.0)),
+                    "Color": Color((1.4, 0.5, 1.2, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.12) }),
+                (module: "Vortex Velocity", inputs: { "Vortex Origin": Vec3((-1.6, 0.0, 0.0)), "Velocity Amount": Float(2.0) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 0.6, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Vortex Force", inputs: {
+                    "Vortex Origin": Vec3((-1.6, 0.0, 0.0)), "Vortex Force Amount": Float(0.0), "Origin Pull Amount": Float(3.5),
+                }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Ribbon Width", inputs: {
+                    "Ribbon Width Scale": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+        (
+            name: "Pushed Fountain",
+            max_particles: 3000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(500.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.5), Float(2.0)),
+                    "Position": Vec3((1.6, 0.1, 0.0)),
+                    "Color": Color((1.5, 0.7, 0.2, 1.0)),
+                    "Sprite Size": Vec2((0.05, 0.05)),
+                    "Mass": RandomRange(Float(0.5), Float(1.5)),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(8.0), "Velocity Strength": Float(4.5) }),
+                (module: "Inherit Velocity"),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Point Force", inputs: {
+                    "Point Position": Vec3((1.6, 1.4, 0.0)), "Point Force Strength": Float(40.0),
+                    "Falloff Radius": Float(0.8), "Falloff Exponent": Float(1.0),
+                }),
+                (module: "Linear Force", inputs: { "Linear Force": Vec3((0.0, 1.0, 0.0)) }),
+                (module: "Acceleration Force", inputs: { "Acceleration": Vec3((0.0, -6.0, 0.0)) }),
+                (module: "Limit Force", inputs: { "Force Limit": Float(25.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.8, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

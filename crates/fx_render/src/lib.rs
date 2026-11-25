@@ -971,7 +971,14 @@ fn prepare_effects(
                 .mesh
                 .as_ref()
                 .and_then(|h| state.meshes.get(&h.id()));
-            write_uniform(rd, em, &inst.world_from_local, mesh.map_or(1.0, |m| m.radius));
+            let sub_index = inst.gpu.system.emitters[rd.emitter].sets_sub_image_index();
+            write_uniform(
+                rd,
+                em,
+                &inst.world_from_local,
+                mesh.map_or(1.0, |m| m.radius),
+                sub_index,
+            );
             queue.write_buffer(&rd.uniform, 0, &rd.scratch);
             let loaded = rd.assets.texture.as_ref().and_then(|h| images.get(h));
             let [cols, rows] = match &rd.settings {
@@ -1122,6 +1129,7 @@ fn write_uniform(
     em: &fx_gpu::GpuEmitter,
     world_from_local: &Mat4,
     mesh_radius: f32,
+    sub_image_from_index: bool,
 ) {
     let b = &mut rd.scratch;
     let mut put = |w: usize, v: u32| b[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
@@ -1143,6 +1151,7 @@ fn write_uniform(
             put(25, s.pivot_in_uv_space[1].to_bits());
             put(26, (s.sub_image_size[0].max(1) as f32).to_bits());
             put(27, (s.sub_image_size[1].max(1) as f32).to_bits());
+            put(39, sub_image_from_index as u32);
             put(
                 29,
                 match s.facing_mode {

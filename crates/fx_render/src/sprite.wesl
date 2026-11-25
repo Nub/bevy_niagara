@@ -5,7 +5,7 @@
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::prepass::utils;
 import fx_render::particle_io::{
-    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sub_uv,
+    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sprite_sub_uv,
     sample_particle_texture, scene_light, finish_faded,
 };
 import fx_render::particle_surface::{sprite_corner, sprite_texel};
@@ -42,7 +42,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     out.normal = corner.normal;
     out.world_position = corner.world;
     out.dynamic_param = particle_dynamic_param(i);
-    set_sub_uv(&out, nage, uv);
+    set_sprite_sub_uv(&out, i, nage, uv);
     return out;
 }
 

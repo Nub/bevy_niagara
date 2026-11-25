@@ -22,7 +22,7 @@ Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: 
 | `alignment` | `Unaligned`, `VelocityAligned`, `CustomAlignment` | `Unaligned` |
 | `custom_alignment_vector` | `(x, y, z)` | `(0.0, 1.0, 0.0)` |
 | `pivot_in_uv_space` | `(u, v)` | `(0.5, 0.5)` |
-| `sub_image_size` | `(columns, rows)` flipbook, whole numbers >= 1 | `(1, 1)` |
+| `sub_image_size` | `(columns, rows)` flipbook, whole numbers >= 1; played over each particle's life, or as `SubUV Animation` sets `Particles.SubImageIndex` | `(1, 1)` |
 | `sub_uv_blending` | `true`, `false` | `false` |
 | `sort_mode` | `None`, `ViewDepth`, `ViewDistance` | `None` |
 | `soft_particle_fade_distance` | metres >= 0 (0 = off) | `0.0` |
@@ -75,6 +75,7 @@ Every input states its type:
 | parameter link | `Link(Vec3, "User.Wind")`, `Link(Float, "Engine.DeltaTime")`, `Link(Vec3, "Particles.Position")` |
 | random range | `RandomRange(Float(1.0), Float(2.0))` (per component, uniform) |
 | curve over normalised age | `CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)]))` (particle stages only, linear keys) |
+| static switch (enum) | `"Shape Primitive": Box`, `"SubUV Animation Mode": InfiniteLoop` (a bare name; `fxc modules` lists the choices) |
 
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.

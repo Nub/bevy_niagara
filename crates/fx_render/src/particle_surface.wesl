@@ -21,8 +21,14 @@ fn flipbook_cell_uv(frame: f32, uv: vec2<f32>, sub_image: vec2<f32>) -> vec2<f32
 
 // The flipbook frame at normalized age `nage` for quad UV `uv`.
 fn flipbook(nage: f32, uv: vec2<f32>, sub_image: vec2<f32>, blending: bool) -> Flipbook {
+    return flipbook_frame(clamp(nage, 0.0, 0.99999) * sub_image.x * sub_image.y, uv, sub_image, blending);
+}
+
+// Flipbook frame `frame` (fractional between frames, wrapping past the last)
+// for quad UV `uv`: Particles.SubImageIndex.
+fn flipbook_frame(frame: f32, uv: vec2<f32>, sub_image: vec2<f32>, blending: bool) -> Flipbook {
     let frames = sub_image.x * sub_image.y;
-    let f = clamp(nage, 0.0, 0.99999) * frames;
+    let f = frame - frames * floor(frame / frames);
     let f0 = floor(f);
     let f1 = min(f0 + 1.0, frames - 1.0);
     return Flipbook(

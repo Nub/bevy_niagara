@@ -245,6 +245,10 @@ fn gpu_matches_cpu_reference() {
     systems.push(("common modules", common_modules_system(), WORDS_PER_PARTICLE_EXTENDED));
     // The reference effect library (effects/library); words per particle vary
     // by emitter there, so 0 skips that check.
+    // Samples of the common modules (forces, shapes, rotation, sub-UV).
+    for n in ["forces.fx.ron", "shapes.fx.ron", "rotation.fx.ron", "subuv.fx.ron"] {
+        systems.push((n, sample(n), 0));
+    }
     for n in LIBRARY {
         systems.push((n, library(n), 0));
     }

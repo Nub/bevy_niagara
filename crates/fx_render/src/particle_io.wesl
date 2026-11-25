@@ -16,7 +16,7 @@
 //     }
 
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
-import fx_render::particle_surface::{flipbook, flipbook_cell_uv};
+import fx_render::particle_surface::{flipbook, flipbook_cell_uv, flipbook_frame};
 
 struct FxRenderer {
     world_from_local: mat4x4<f32>,
@@ -35,7 +35,7 @@ struct FxRenderer {
     tiling_length: f32,         // ribbon: metres per U for uv_mode 2
     link_from_end: u32,         // ribbon: U starts at the last sorted particle (the newest)
     mesh_radius: f32,
-    _pad: u32,
+    sub_image_from_index: u32,  // sprite: show Particles.SubImageIndex (SubUV Animation), not the flipbook over life
 }
 
 @group(1) @binding(0) var<uniform> fx: FxRenderer;
@@ -66,7 +66,8 @@ struct FxVertexOutput {
     @location(7) normalized_age: f32,
     // The quad, ribbon or mesh UV before flipbook mapping.
     @location(8) uv: vec2<f32>,
-    // Flipbook frame (fractional when blending) over the particle's life.
+    // Flipbook frame (fractional when blending): over the particle's life, or
+    // Particles.SubImageIndex for sprites with SubUV Animation.
     @location(9) sub_image_index: f32,
 }
 
@@ -85,6 +86,22 @@ fn particle_dynamic_param(i: u32) -> vec4<f32> {
 // Fills the flipbook fields of `out` for normalized age `nage` and quad UV `uv`.
 fn set_sub_uv(out: ptr<function, FxVertexOutput>, nage: f32, uv: vec2<f32>) {
     let f = flipbook(nage, uv, fx.sub_image, fx.sub_uv_blending != 0u);
+    (*out).uv = uv;
+    (*out).uv0 = f.uv0;
+    (*out).uv1 = f.uv1;
+    (*out).sub_uv_blend = f.blend;
+    (*out).sub_image_index = f.index;
+    (*out).normalized_age = nage;
+}
+
+// Sprites: the flipbook frame is Particles.SubImageIndex when SubUV Animation
+// sets it, otherwise played over the particle's life.
+fn set_sprite_sub_uv(out: ptr<function, FxVertexOutput>, i: u32, nage: f32, uv: vec2<f32>) {
+    if (fx.sub_image_from_index == 0u) {
+        set_sub_uv(out, nage, uv);
+        return;
+    }
+    let f = flipbook_frame(pw(44u, i), uv, fx.sub_image, fx.sub_uv_blending != 0u);
     (*out).uv = uv;
     (*out).uv0 = f.uv0;
     (*out).uv1 = f.uv1;

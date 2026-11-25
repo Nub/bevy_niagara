@@ -1,0 +1,64 @@
+// SubUV: the 4x4 clock-wedge test flipbook (frame 0 top left: red, one
+// sixteenth filled; frame 15: blue, full) played three ways, left to right:
+// Linear over each particle's life with frame blending, one Random frame per
+// particle, and an Infinite Loop at 8 frames per second. The middle column's
+// colour is set over life by the Color module.
+(
+    name: "SubUV",
+    emitters: [
+        (
+            name: "Linear",
+            max_particles: 100,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(2.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(3.0), "Position": Vec3((-1.6, 0.2, 0.0)), "Sprite Size": Vec2((0.5, 0.5)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 0.8, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "SubUV Animation"),
+            ],
+            renderers: [Sprite((sub_image_size: (4, 4), sub_uv_blending: true, texture: "materials/flipbook_4x4.png"))],
+        ),
+        (
+            name: "Random",
+            max_particles: 100,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(2.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(3.0), "Position": Vec3((0.0, 0.2, 0.0)), "Sprite Size": Vec2((0.5, 0.5)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 0.8, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "SubUV Animation", inputs: { "SubUV Animation Mode": Random }),
+                (module: "Color", inputs: {
+                    "Color": CurveOverAge(Color([(0.0, (1.0, 1.0, 1.0, 0.0)), (0.15, (1.0, 1.0, 1.0, 1.0)), (0.85, (1.0, 1.0, 1.0, 1.0)), (1.0, (1.0, 1.0, 1.0, 0.0))])),
+                }),
+            ],
+            renderers: [Sprite((sub_image_size: (4, 4), texture: "materials/flipbook_4x4.png"))],
+        ),
+        (
+            name: "Infinite Loop",
+            max_particles: 100,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(2.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(3.0), "Position": Vec3((1.6, 0.2, 0.0)), "Sprite Size": Vec2((0.5, 0.5)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 0.8, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "SubUV Animation", inputs: { "SubUV Animation Mode": InfiniteLoop, "Frames Per Second": Float(8.0) }),
+            ],
+            renderers: [Sprite((sub_image_size: (4, 4), texture: "materials/flipbook_4x4.png"))],
+        ),
+    ],
+)
