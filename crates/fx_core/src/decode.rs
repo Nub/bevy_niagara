@@ -16,6 +16,7 @@ pub const SYSTEM_FIELDS: &[&str] = &[
     "system_spawn",
     "system_update",
     "emitters",
+    "custom_modules",
 ];
 pub const EMITTER_FIELDS: &[&str] = &[
     "name",
@@ -27,6 +28,8 @@ pub const EMITTER_FIELDS: &[&str] = &[
     "particle_update",
     "event_handlers",
     "renderers",
+    "grids",
+    "simulation_stages",
 ];
 pub const MODULE_FIELDS: &[&str] = &["module", "enabled", "inputs"];
 
@@ -54,6 +57,13 @@ pub fn decode_system(v: &SValue, d: &mut Diags) -> Option<SystemSource> {
             .collect(),
         None => Vec::new(),
     };
+    let custom_modules = match f.take("custom_modules") {
+        Some(v) => list(v, "`custom_modules`", d)
+            .iter()
+            .filter_map(|m| decode_custom_module(m, d))
+            .collect(),
+        None => Vec::new(),
+    };
     f.finish(d);
     Some(SystemSource {
         name,
@@ -61,6 +71,7 @@ pub fn decode_system(v: &SValue, d: &mut Diags) -> Option<SystemSource> {
         system_spawn,
         system_update,
         emitters,
+        custom_modules,
         span: v.span,
     })
 }
@@ -130,6 +141,20 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
             .collect(),
         None => Vec::new(),
     };
+    let grids = match f.take("grids") {
+        Some(v) => list(v, "`grids`", d)
+            .iter()
+            .filter_map(|g| decode_grid(g, d))
+            .collect(),
+        None => Vec::new(),
+    };
+    let simulation_stages = match f.take("simulation_stages") {
+        Some(v) => list(v, "`simulation_stages`", d)
+            .iter()
+            .filter_map(|s| decode_sim_stage(s, d))
+            .collect(),
+        None => Vec::new(),
+    };
     f.finish(d);
     Some(EmitterSource {
         name,
@@ -141,6 +166,8 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
         particle_update,
         event_handlers,
         renderers,
+        grids,
+        simulation_stages,
         span: v.span,
     })
 }
@@ -1391,4 +1418,214 @@ fn decode_data_interface(
         }
     }
     Some(src)
+}
+
+// ---- custom modules, grids and simulation stages (crate::custom) ----
+
+pub const CUSTOM_MODULE_FIELDS: &[&str] = &["name", "inputs", "outputs", "wgsl"];
+pub const GRID_FIELDS: &[&str] = &["name", "cells", "min", "max", "attributes"];
+pub const SIM_STAGE_FIELDS: &[&str] = &["name", "iterate", "iterations", "modules"];
+
+const CUSTOM_HELP: &str = "write a custom module as `(name: \"Swirl\", inputs: { \"Strength\": Float(1.0) }, outputs: [\"Particles.Velocity\"], wgsl: r#\"Velocity += ...;\"#)`";
+
+fn decode_custom_module(v: &SValue, d: &mut Diags) -> Option<crate::custom::CustomModuleSource> {
+    let mut f = Fields::new(v, "a custom module", CUSTOM_MODULE_FIELDS, d)?;
+    let name = f.required_string("name", d).unwrap_or_default();
+    let inputs = f.take("inputs").map(|v| decode_params(v, d)).unwrap_or_default();
+    for di in &inputs.1 {
+        d.error(
+            di.span,
+            format!("custom module input \"{}\" cannot be a data interface", di.name),
+            Some("declare it with a typed default such as `Float(1.0)`".into()),
+        );
+    }
+    let mut outputs = Vec::new();
+    if let Some(o) = f.take("outputs") {
+        for item in list(o, "`outputs`", d) {
+            match &item.kind {
+                SKind::Str(s) => outputs.push(crate::custom::Named {
+                    name: s.clone(),
+                    span: item.span,
+                }),
+                other => d.error(
+                    item.span,
+                    format!("`outputs` lists attribute names as strings, found {}", other.describe()),
+                    Some("write e.g. `outputs: [\"Particles.Velocity\"]`".into()),
+                ),
+            }
+        }
+    }
+    let (wgsl, wgsl_span, wgsl_exact) = match f.take("wgsl") {
+        Some(SValue {
+            kind: SKind::RawStr(s, start),
+            ..
+        }) => (s.clone(), *start, true),
+        Some(SValue {
+            kind: SKind::Str(s),
+            span,
+        }) => (s.clone(), Span { line: span.line, col: span.col + 1 }, !s.contains('\n')),
+        Some(other) => {
+            d.error(
+                other.span,
+                format!("`wgsl` must be a string, found {}", other.kind.describe()),
+                Some(CUSTOM_HELP.into()),
+            );
+            (String::new(), other.span, false)
+        }
+        None => {
+            d.error(
+                v.span,
+                "a custom module is missing the `wgsl` field",
+                Some(CUSTOM_HELP.into()),
+            );
+            (String::new(), v.span, false)
+        }
+    };
+    f.finish(d);
+    Some(crate::custom::CustomModuleSource {
+        name,
+        inputs,
+        outputs,
+        wgsl,
+        wgsl_span,
+        wgsl_exact,
+        span: v.span,
+    })
+}
+
+const GRID_HELP: &str = "write a grid as `Grid2D(name: \"Smoke\", cells: (64, 64), min: (-1.0, 0.0), max: (1.0, 2.0), attributes: { \"Velocity\": Vec2, \"Density\": Float })` (or `Grid3D` with 3 numbers each)";
+
+fn decode_grid(v: &SValue, d: &mut Diags) -> Option<crate::custom::GridSource> {
+    let dims = match &v.kind {
+        SKind::Struct(Some(t), _) if t == "Grid2D" => 2,
+        SKind::Struct(Some(t), _) if t == "Grid3D" => 3,
+        other => {
+            d.error(
+                v.span,
+                format!("a grid must be `Grid2D(...)` or `Grid3D(...)`, found {}", other.describe()),
+                Some(GRID_HELP.into()),
+            );
+            return None;
+        }
+    };
+    let mut f = Fields::new(v, "a grid", GRID_FIELDS, d)?;
+    let name = f.required_string("name", d).unwrap_or_default();
+    let nums = |f: &mut Fields, field: &str, whole: bool, d: &mut Diags| -> Option<Vec<f64>> {
+        let Some(x) = f.take(field) else {
+            d.error(v.span, format!("the grid is missing `{field}`"), Some(GRID_HELP.into()));
+            return None;
+        };
+        let items = match &x.kind {
+            SKind::Tuple(None, items) | SKind::List(items) => items,
+            _ => &Vec::new(),
+        };
+        let ok: Option<Vec<f64>> = items
+            .iter()
+            .map(|i| match i.kind {
+                SKind::Number(n, int) if int || !whole => Some(n),
+                _ => None,
+            })
+            .collect();
+        match ok {
+            Some(v) if v.len() == dims => Some(v),
+            _ => {
+                d.error(
+                    x.span,
+                    format!(
+                        "`{field}` of a Grid{dims}D must be {dims} {}, found {}",
+                        if whole { "whole numbers" } else { "numbers" },
+                        x.kind.describe()
+                    ),
+                    Some(GRID_HELP.into()),
+                );
+                None
+            }
+        }
+    };
+    let cells = nums(&mut f, "cells", true, d);
+    let min = nums(&mut f, "min", false, d);
+    let max = nums(&mut f, "max", false, d);
+    let mut attributes = Vec::new();
+    if let Some(a) = f.take("attributes") {
+        for (k, t) in map(a, "`attributes`", d) {
+            let Some(aname) = key_string(k, d) else { continue };
+            let ty = match &t.kind {
+                SKind::Ident(i) => ValueType::from_name(i),
+                _ => None,
+            };
+            match ty {
+                Some(ty @ (ValueType::Float | ValueType::Vec2 | ValueType::Vec3 | ValueType::Vec4)) => {
+                    attributes.push(crate::custom::GridAttributeSource { name: aname, ty, span: k.span })
+                }
+                _ => d.error(
+                    t.span,
+                    format!("grid attribute \"{aname}\" must be Float, Vec2, Vec3 or Vec4, found {}", t.kind.describe()),
+                    Some("write e.g. `\"Density\": Float`".into()),
+                ),
+            }
+        }
+    }
+    f.finish(d);
+    let (cells, min, max) = (cells?, min?, max?);
+    let pad = |v: &[f64], fill: f64| -> [f64; 3] { std::array::from_fn(|i| v.get(i).copied().unwrap_or(fill)) };
+    let (c, lo, hi) = (pad(&cells, 1.0), pad(&min, 0.0), pad(&max, 1.0));
+    Some(crate::custom::GridSource {
+        name,
+        dims: dims as u32,
+        cells: c.map(|x| x.clamp(0.0, u32::MAX as f64) as u32),
+        min: lo.map(|x| x as f32),
+        max: hi.map(|x| x as f32),
+        attributes,
+        span: v.span,
+    })
+}
+
+const STAGE_HELP: &str = "write a stage as `(name: \"Advect\", iterate: Grid(\"Smoke\"), iterations: 1, modules: [ ... ])`; `iterate: Particles` runs over the particles";
+
+fn decode_sim_stage(v: &SValue, d: &mut Diags) -> Option<crate::custom::SimStageSource> {
+    use crate::custom::Iterate;
+    let mut f = Fields::new(v, "a simulation stage", SIM_STAGE_FIELDS, d)?;
+    let name = f.required_string("name", d).unwrap_or_default();
+    let iterate = match f.take("iterate") {
+        Some(SValue { kind: SKind::Ident(i), .. }) if i == "Particles" => Iterate::Particles,
+        Some(SValue { kind: SKind::Tuple(Some(t), items), .. })
+            if t == "Grid" && matches!(items.as_slice(), [SValue { kind: SKind::Str(_), .. }]) =>
+        {
+            let SKind::Str(g) = &items[0].kind else { unreachable!() };
+            Iterate::Grid(g.clone())
+        }
+        Some(other) => {
+            d.error(
+                other.span,
+                format!("`iterate` must be `Particles` or `Grid(\"Name\")`, found {}", other.kind.describe()),
+                Some(STAGE_HELP.into()),
+            );
+            Iterate::Particles
+        }
+        None => {
+            d.error(v.span, "a simulation stage is missing `iterate`", Some(STAGE_HELP.into()));
+            Iterate::Particles
+        }
+    };
+    let iterations = f
+        .take("iterations")
+        .and_then(|x| {
+            whole_in_range(
+                x,
+                "iterations",
+                1..=crate::custom::MAX_ITERATIONS,
+                "write e.g. `iterations: 20`",
+                d,
+            )
+        })
+        .unwrap_or(1);
+    let modules = f.take("modules").map(|m| decode_stack(m, d)).unwrap_or_default();
+    f.finish(d);
+    Some(crate::custom::SimStageSource {
+        name,
+        iterate,
+        iterations,
+        modules,
+        span: v.span,
+    })
 }

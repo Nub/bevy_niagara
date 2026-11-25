@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 bevy_math.workspace = true
 rkyv.workspace = true
+naga = { version = "30", features = ["wgsl-in"] }
 serde.workspace = true
 
 [dev-dependencies]

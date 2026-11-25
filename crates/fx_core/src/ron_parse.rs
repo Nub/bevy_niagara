@@ -3,7 +3,7 @@
 //!
 //! It accepts the RON subset effect files use: structs and tuples (optionally
 //! named, `Name(...)`), lists, maps, strings, numbers, booleans, unit
-//! identifiers (also raw, `r#None`), `//` and `/* */` comments, trailing commas and a leading
+//! identifiers (also raw, `r#None`), raw strings (`r#"..."#`, multi-line), `//` and `/* */` comments, trailing commas and a leading
 //! `#![enable(...)]` attribute.
 
 use crate::model::Span;
@@ -26,6 +26,8 @@ pub enum SKind {
     /// The number and whether it was written as an integer.
     Number(f64, bool),
     Str(String),
+    /// `r#"..."#` (any number of `#`, may span lines) and where its text starts.
+    RawStr(String, Span),
     Bool(bool),
     /// A bare identifier, e.g. a unit enum variant `Gpu`.
     Ident(String),
@@ -44,6 +46,7 @@ impl SKind {
             SKind::Number(n, true) => format!("the integer {n}"),
             SKind::Number(n, false) => format!("the number {n}"),
             SKind::Str(s) => format!("the string \"{s}\""),
+            SKind::RawStr(..) => "a raw string".into(),
             SKind::Bool(b) => format!("`{b}`"),
             SKind::Ident(i) => format!("`{i}`"),
             SKind::Tuple(Some(n), _) | SKind::Struct(Some(n), _) => format!("`{n}(...)`"),
@@ -204,6 +207,10 @@ impl Parser<'_> {
             }
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
                 let mut id = self.ident();
+                if id == "r" && self.raw_string_ahead() {
+                    let (text, start) = self.raw_string()?;
+                    return Ok(SValue { kind: SKind::RawStr(text, start), span });
+                }
                 // A raw identifier, e.g. `r#None` (how `ron` writes a variant named `None`).
                 let raw = id == "r"
                     && self.peek() == Some(b'#')
@@ -293,6 +300,47 @@ impl Parser<'_> {
                 message: format!("`{text}` is not a valid number"),
                 help: Some("write numbers like `1`, `-2.5` or `1e-3`".into()),
             })
+    }
+
+    /// After an `r`: `"` or `#...#"` follows.
+    fn raw_string_ahead(&self) -> bool {
+        let mut n = 0;
+        while self.peek_at(n) == Some(b'#') {
+            n += 1;
+        }
+        self.peek_at(n) == Some(b'"')
+    }
+
+    /// A raw string after its `r`; returns the text and where it starts.
+    fn raw_string(&mut self) -> Result<(String, Span), ParseError> {
+        let open = self.span();
+        let mut hashes = 0;
+        while self.peek() == Some(b'#') {
+            self.bump();
+            hashes += 1;
+        }
+        self.bump(); // opening quote
+        let start = self.span();
+        let from = self.pos;
+        loop {
+            match self.bump() {
+                None => {
+                    return Err(ParseError {
+                        span: open,
+                        message: "raw string is never closed".into(),
+                        help: Some(format!("end it with `\"{}`", "#".repeat(hashes))),
+                    });
+                }
+                Some(b'"') if (0..hashes).all(|k| self.peek_at(k) == Some(b'#')) => {
+                    let text = String::from_utf8_lossy(&self.src[from..self.pos - 1]).into_owned();
+                    for _ in 0..hashes {
+                        self.bump();
+                    }
+                    return Ok((text, start));
+                }
+                Some(_) => {}
+            }
+        }
     }
 
     fn string(&mut self) -> Result<String, ParseError> {

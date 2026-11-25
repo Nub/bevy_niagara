@@ -110,6 +110,39 @@ effect.bind_texture("User.Pattern", asset_server.load("pattern.png"));
 
 Meshes and images must keep their main-world data (`RenderAssetUsages::MAIN_WORLD`, the default for loaded assets). `samples/skeletal_mesh.fx.ron` (embers off the running fox) and `samples/texture_color.fx.ron` (a picture dissolving into coloured particles) use them.
 
+**Custom WGSL modules** (Niagara's scratch pad / custom HLSL) are declared once in the effect and placed in stacks by name like built-in modules:
+
+```ron
+custom_modules: [
+    (
+        name: "Swirl",
+        inputs: { "Spin": Float(2.0), "Center": Vec3((0.0, 0.0, 0.0)) },   // typed, with defaults
+        outputs: ["Particles.Velocity"],                                    // attributes it writes
+        wgsl: r#"
+    let r = Position - Center;
+    Velocity += vec3<f32>(-r.z, 0.0, r.x) * Spin * DeltaTime;
+"#,
+    ),
+],
+// in an emitter: particle_update: [ ..., (module: "Swirl", inputs: { "Spin": Link(Float, "User.Spin") }) ]
+```
+
+The body is a WGSL function body. It sees its inputs by name, every particle attribute by its name without `Particles.` (dots become `_`: `Initial_Color`; the `outputs` are `var`s written back, the rest read-only), `DeltaTime`, `Time`, `EmitterAge`, `rand(slot)` (uniform in [0, 1), per particle, module and step) and the helper library (`curl_noise(p)`, `noise_grad(p, channel)`, `euler_quat`, `quat_mul`, `quat_normalize`, `unit_or_y`, ...). Call inputs take every input form (links, random ranges, curves, dynamic inputs). Bodies are validated with naga when the effect is checked: errors give the line and column in the `.fx.ron` file (write bodies as raw strings `r#"..."#` so lines match). Custom modules, grids and simulation stages run on the GPU only (`sim_target: Gpu`); the CPU reference simulation skips them.
+
+**Grids and simulation stages** (Niagara's Grid2D/Grid3D collections and simulation stages) are per emitter:
+
+```ron
+grids: [Grid2D(name: "Smoke", cells: (64, 96), min: (-1.0, 0.0), max: (1.0, 3.0),
+               attributes: { "Velocity": Vec2, "Density": Float })],   // Grid3D: 3 numbers each
+simulation_stages: [
+    (name: "Advect", iterate: Grid("Smoke"), modules: [(module: "Advect")]),
+    (name: "Pressure", iterate: Grid("Smoke"), iterations: 24, modules: [(module: "Jacobi Pressure")]),
+    (name: "Relax", iterate: Particles, modules: [(module: "My Particle Module")]),
+],
+```
+
+A 2D grid lies in the world XY plane. Stages run each step after the spawn, in order, each `iterations` times (1..=64). A grid stage runs custom modules once per cell; the body sees `Cell` (`vec2<i32>`/`vec3<i32>`), `CellPosition` (world) and every attribute of the grid as a `var`; it reads the previous values (stages ping-pong two copies), so neighbour reads are race-free. Every body of the emitter can read its grids: `Smoke_Density(cell)` (clamped to the grid), `Smoke_sample_Velocity(pos)` (bilinear/trilinear at a world position), `Smoke_cell(pos)`, `Smoke_cell_position(cell)` and the constants `Smoke_NumCells`, `Smoke_Min`, `Smoke_CellSize`. Particle stages run built-in and custom particle modules in place (no kills, collisions or events there). `samples/wgsl_swirl.fx.ron` (a custom particle module) and `samples/grid_smoke.fx.ron` (a 64x96 stable-fluids smoke grid moving the particles) use them.
+
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.
 

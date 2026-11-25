@@ -1,0 +1,21 @@
+// expect: 12: WGSL error in custom module "Push"
+(
+    name: "Broken",
+    custom_modules: [
+        (
+            name: "Push",
+            inputs: { "Amount": Float(1.0) },
+            outputs: ["Particles.Velocity"],
+            wgsl: r#"
+    // A typo: `Velocty` is not defined.
+    let up = vec3<f32>(0.0, Amount, 0.0);
+    Velocity += Velocty * DeltaTime;
+"#,
+        ),
+    ],
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_update: [(module: "Particle State"), (module: "Push")],
+    )],
+)

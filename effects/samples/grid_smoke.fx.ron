@@ -1,0 +1,131 @@
+// 2D grid smoke (Niagara Grid2D + simulation stages): a 64x96 velocity /
+// density grid in the XY plane runs a small stable-fluids solver each step
+// (source and buoyancy, semi-Lagrangian advection, divergence, 24 Jacobi
+// pressure iterations, projection). The particles carry no physics of their
+// own: they move with the grid's velocity and fade with its density.
+(
+    name: "Grid Smoke",
+    user_parameters: {
+        "User.Buoyancy": Float(6.0),
+    },
+    custom_modules: [
+        (
+            name: "Smoke Source",
+            inputs: {
+                "Source": Vec2((0.0, 0.25)),
+                "Radius": Float(0.16),
+                "Rate": Float(6.0),
+                "Buoyancy": Float(4.0),
+                "Turbulence": Float(1.5),
+            },
+            wgsl: r#"
+    let sway = vec2<f32>(0.25 * sin(Time * 1.3), 0.0);
+    let d = length(CellPosition - (Source + sway));
+    if (d < Radius) {
+        let w = 1.0 - d / Radius;
+        Density += Rate * w * DeltaTime;
+        Velocity.y += 2.0 * w * DeltaTime * 10.0;
+    }
+    // Hot smoke rises; a little curl noise breaks the symmetry.
+    Velocity.y += Buoyancy * Density * DeltaTime;
+    let n = curl_noise(vec3<f32>(CellPosition * 2.0, Time * 0.4));
+    Velocity += n.xy * Turbulence * DeltaTime;
+"#,
+        ),
+        (
+            name: "Advect",
+            inputs: { "Dissipation": Float(0.25) },
+            wgsl: r#"
+    // Semi-Lagrangian: fetch what flowed here from upstream.
+    let back = CellPosition - Velocity * DeltaTime;
+    Velocity = Smoke_sample_Velocity(back);
+    Density = Smoke_sample_Density(back) * exp(-Dissipation * DeltaTime);
+"#,
+        ),
+        (
+            name: "Divergence",
+            wgsl: r#"
+    let h = Smoke_CellSize.x;
+    let l = Smoke_Velocity(Cell - vec2<i32>(1, 0)).x;
+    let r = Smoke_Velocity(Cell + vec2<i32>(1, 0)).x;
+    let b = Smoke_Velocity(Cell - vec2<i32>(0, 1)).y;
+    let t = Smoke_Velocity(Cell + vec2<i32>(0, 1)).y;
+    Divergence = 0.5 * ((r - l) + (t - b)) / h;
+"#,
+        ),
+        (
+            name: "Jacobi Pressure",
+            wgsl: r#"
+    let h = Smoke_CellSize.x;
+    let sum = Smoke_Pressure(Cell - vec2<i32>(1, 0)) + Smoke_Pressure(Cell + vec2<i32>(1, 0))
+        + Smoke_Pressure(Cell - vec2<i32>(0, 1)) + Smoke_Pressure(Cell + vec2<i32>(0, 1));
+    Pressure = (sum - Divergence * h * h) * 0.25;
+"#,
+        ),
+        (
+            name: "Project",
+            wgsl: r#"
+    let h = Smoke_CellSize.x;
+    let gx = Smoke_Pressure(Cell + vec2<i32>(1, 0)) - Smoke_Pressure(Cell - vec2<i32>(1, 0));
+    let gy = Smoke_Pressure(Cell + vec2<i32>(0, 1)) - Smoke_Pressure(Cell - vec2<i32>(0, 1));
+    Velocity -= 0.5 * vec2<f32>(gx, gy) / h;
+    // Closed box: no flow through the walls.
+    if (Cell.x == 0 || Cell.x == Smoke_NumCells.x - 1) { Velocity.x = 0.0; }
+    if (Cell.y == 0 || Cell.y == Smoke_NumCells.y - 1) { Velocity.y = 0.0; }
+"#,
+        ),
+        (
+            name: "Follow Smoke",
+            outputs: ["Particles.Velocity", "Particles.Color"],
+            wgsl: r#"
+    let v = Smoke_sample_Velocity(Position.xy);
+    Velocity = vec3<f32>(v, 0.0);
+    let density = Smoke_sample_Density(Position.xy);
+    Color = vec4<f32>(Color.rgb, clamp(density * 0.6, 0.0, 0.5));
+"#,
+        ),
+    ],
+    emitters: [
+        (
+            name: "Smoke",
+            sim_target: Gpu,
+            max_particles: 12000,
+            grids: [
+                Grid2D(
+                    name: "Smoke",
+                    cells: (64, 96),
+                    min: (-1.0, 0.0),
+                    max: (1.0, 3.0),
+                    attributes: { "Velocity": Vec2, "Density": Float, "Divergence": Float, "Pressure": Float },
+                ),
+            ],
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(2500.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(3.0), Float(4.5)),
+                    "Position": RandomRange(Vec3((-0.4, 0.1, -0.05)), Vec3((0.4, 0.45, 0.05))),
+                    "Color": Color((0.75, 0.75, 0.8, 0.0)),
+                    "Sprite Size": RandomRange(Vec2((0.08, 0.08)), Vec2((0.14, 0.14))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Follow Smoke"),
+                (module: "Solve Forces and Velocity"),
+            ],
+            simulation_stages: [
+                (name: "Source", iterate: Grid("Smoke"), modules: [
+                    (module: "Smoke Source", inputs: { "Buoyancy": Link(Float, "User.Buoyancy") }),
+                ]),
+                (name: "Advect", iterate: Grid("Smoke"), modules: [(module: "Advect")]),
+                (name: "Divergence", iterate: Grid("Smoke"), modules: [(module: "Divergence")]),
+                (name: "Pressure", iterate: Grid("Smoke"), iterations: 24, modules: [(module: "Jacobi Pressure")]),
+                (name: "Project", iterate: Grid("Smoke"), modules: [(module: "Project")]),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, sort_mode: ViewDepth))],
+        ),
+    ],
+)

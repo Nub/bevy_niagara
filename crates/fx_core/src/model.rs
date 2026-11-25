@@ -90,6 +90,9 @@ pub struct SystemSource {
     pub system_spawn: Vec<ModuleCall>,
     pub system_update: Vec<ModuleCall>,
     pub emitters: Vec<EmitterSource>,
+    /// Modules written in WGSL ([`crate::custom`]), usable in any emitter.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_modules: Vec<crate::custom::CustomModuleSource>,
     #[serde(skip)]
     pub span: Span,
 }
@@ -118,6 +121,12 @@ pub struct EmitterSource {
     /// How particles are drawn; empty means the emitter draws nothing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub renderers: Vec<RendererSource>,
+    /// Grid collections (Grid2D / Grid3D) the simulation stages and custom modules use.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grids: Vec<crate::custom::GridSource>,
+    /// Extra passes per step over the particles or a grid, after the update.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub simulation_stages: Vec<crate::custom::SimStageSource>,
     #[serde(skip)]
     pub span: Span,
 }

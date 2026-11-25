@@ -116,6 +116,8 @@ struct Pipelines {
     finish: wgpu::ComputePipeline,
     /// Sorts the emitter's events (emitters that write events).
     event_rank: Option<wgpu::ComputePipeline>,
+    /// Simulation stage kernels, in order.
+    stages: Vec<(wgpu::ComputePipeline, codegen::StageKernel)>,
     /// The update and spawn read the data interfaces (group 1) and the scene (group 2).
     uses_scene: bool,
 }
@@ -128,6 +130,8 @@ pub struct GpuEmitter {
     pub words: u32,
     /// Ping-pong particle buffers; `particles[current]` holds the living ones.
     pub particles: [wgpu::Buffer; 2],
+    /// Grid collections ([`fx_core::custom`]): each grid twice, ping-pong.
+    pub grids: wgpu::Buffer,
     /// Counts, ids and indirect dispatch arguments ([`STATE_WORDS`] u32s).
     pub state: wgpu::Buffer,
     frame_ubo: wgpu::Buffer,
@@ -167,6 +171,9 @@ pub struct GpuEffect {
     ray_tracing_scene: Option<wgpu::BindGroup>,
     slot: u32,
     scratch: [u8; FRAME_BYTES],
+    /// Bytes between the slots of the stage iteration uniform.
+    iteration_stride: u64,
+    _iterations: wgpu::Buffer,
 }
 
 /// What the host offers the simulation beyond the effect itself.
@@ -348,6 +355,17 @@ impl GpuEffect {
                 storage_entry(3, false),
                 storage_entry(4, false),
                 storage_entry(5, false),
+                storage_entry(6, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
             ],
         });
         let args_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -384,6 +402,18 @@ impl GpuEffect {
             })
         });
 
+        // Iteration j of a simulation stage reads slot j (`it.j` in sim_common.wgsl).
+        let iteration_stride = device.limits().min_uniform_buffer_offset_alignment.max(16) as u64;
+        let mut iteration_bytes = vec![0u8; (iteration_stride * fx_core::custom::MAX_ITERATIONS as u64) as usize];
+        for j in 0..fx_core::custom::MAX_ITERATIONS as u64 {
+            let at = (j * iteration_stride) as usize;
+            iteration_bytes[at..at + 4].copy_from_slice(&(j as u32).to_le_bytes());
+        }
+        let iterations = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fx stage iterations"),
+            contents: &iteration_bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let event_layout = EventLayout::new(system);
         let event_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fx event counts"),
@@ -440,8 +470,8 @@ impl GpuEffect {
             // Kernels running module code read the data interfaces and the scene when used.
             let modules_read = shader.uses_scene || shader.uses_data;
             let pipe = |entry: &str| {
-                let writes_args = entry == "begin" || entry == "spawn_prep";
-                let runs_modules = entry == "update" || entry == "spawn";
+                let writes_args = entry == "begin" || entry == "spawn_prep" || entry == "finish";
+                let runs_modules = entry == "update" || entry == "spawn" || entry.starts_with("stage_");
                 make(
                     &module,
                     entry,
@@ -479,6 +509,11 @@ impl GpuEffect {
                 spawn: pipe("spawn"),
                 finish: pipe("finish"),
                 event_rank: shader.writes_events.then(|| pipe("event_rank")),
+                stages: shader
+                    .stages
+                    .iter()
+                    .map(|k| (pipe(&k.entry), k.clone()))
+                    .collect(),
                 uses_scene: modules_read,
             };
             let particle_buffer = |i: usize| {
@@ -496,6 +531,20 @@ impl GpuEffect {
                 })
             };
             let particles = [particle_buffer(0), particle_buffer(1)];
+            // Grid collections: two copies of each, zeroed.
+            let grid_words: u64 = e.grids.iter().map(|g| 2 * g.half_words() as u64).sum();
+            let grid_bytes = (grid_words * 4).max(16);
+            if grid_bytes > limit {
+                return Err(format!(
+                    "emitter \"{}\": its grids need {grid_bytes} bytes, over this GPU's storage binding limit of {limit}",
+                    e.name
+                ));
+            }
+            let grids = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx grids"),
+                contents: &vec![0u8; grid_bytes as usize],
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
             let state = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("fx emitter state"),
                 contents: &[0u8; STATE_WORDS as usize * 4],
@@ -506,7 +555,7 @@ impl GpuEffect {
             });
             let args = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("fx sim dispatch args"),
-                size: 48,
+                size: 64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
                 mapped_at_creation: false,
             });
@@ -557,6 +606,18 @@ impl GpuEffect {
                             binding: 5,
                             resource: event_data.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: grids.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &iterations,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(16),
+                            }),
+                        },
                     ],
                 })
             };
@@ -566,6 +627,7 @@ impl GpuEffect {
                 capacity,
                 words,
                 particles,
+                grids,
                 state,
                 frame_ubo,
                 bind_groups,
@@ -594,6 +656,8 @@ impl GpuEffect {
             ray_tracing_scene: None,
             slot: 0,
             scratch: [0; FRAME_BYTES],
+            iteration_stride,
+            _iterations: iterations,
         })
     }
 
@@ -855,7 +919,7 @@ impl GpuEffect {
                 label: Some("fx sim"),
                 timestamp_writes: None,
             });
-            pass.set_bind_group(0, bg, &[offset as u32]);
+            pass.set_bind_group(0, bg, &[offset as u32, 0]);
             pass.set_bind_group(1, &em.args_bind_group, &[]);
             pass.set_pipeline(&p.begin);
             pass.dispatch_workgroups(1, 1, 1);
@@ -864,7 +928,7 @@ impl GpuEffect {
                 label: Some("fx sim update"),
                 timestamp_writes: None,
             });
-            pass.set_bind_group(0, bg, &[offset as u32]);
+            pass.set_bind_group(0, bg, &[offset as u32, 0]);
             match (&p.update_rt, &self.ray_tracing_scene) {
                 (Some(update_rt), Some(rt)) => {
                     pass.set_bind_group(1, &self.data.bind_group, &[]);
@@ -886,7 +950,7 @@ impl GpuEffect {
                 label: Some("fx sim spawn prep"),
                 timestamp_writes: None,
             });
-            pass.set_bind_group(0, bg, &[offset as u32]);
+            pass.set_bind_group(0, bg, &[offset as u32, 0]);
             pass.set_bind_group(1, &em.args_bind_group, &[]);
             pass.set_pipeline(&p.spawn_prep);
             pass.dispatch_workgroups(1, 1, 1);
@@ -896,7 +960,7 @@ impl GpuEffect {
                     label: Some("fx sim event rank"),
                     timestamp_writes: None,
                 });
-                pass.set_bind_group(0, bg, &[offset as u32]);
+                pass.set_bind_group(0, bg, &[offset as u32, 0]);
                 pass.set_pipeline(rank);
                 pass.dispatch_workgroups_indirect(&em.args, 32);
             }
@@ -904,16 +968,37 @@ impl GpuEffect {
                 label: Some("fx sim spawn"),
                 timestamp_writes: None,
             });
-            pass.set_bind_group(0, bg, &[offset as u32]);
+            pass.set_bind_group(0, bg, &[offset as u32, 0]);
             if p.uses_scene {
                 pass.set_bind_group(1, &self.data.bind_group, &[]);
                 pass.set_bind_group(2, &self.scene.bind_group, &[]);
             }
             pass.set_pipeline(&p.spawn);
             pass.dispatch_workgroups_indirect(&em.args, 16);
+            pass.set_bind_group(1, &em.args_bind_group, &[]);
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
             drop(pass);
+            if !p.stages.is_empty() {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("fx sim stages"),
+                    timestamp_writes: None,
+                });
+                if p.uses_scene {
+                    pass.set_bind_group(1, &self.data.bind_group, &[]);
+                    pass.set_bind_group(2, &self.scene.bind_group, &[]);
+                }
+                for (pipeline, k) in &p.stages {
+                    pass.set_pipeline(pipeline);
+                    for j in 0..k.iterations as u64 {
+                        pass.set_bind_group(0, bg, &[offset as u32, (j * self.iteration_stride) as u32]);
+                        match k.groups {
+                            Some([x, y, z]) => pass.dispatch_workgroups(x, y, z),
+                            None => pass.dispatch_workgroups_indirect(&em.args, 48),
+                        }
+                    }
+                }
+            }
 
             em.current = 1 - em.current;
             em.age += dt;
@@ -995,7 +1080,7 @@ impl GpuEffect {
     pub fn gpu_bytes(&self) -> u64 {
         self.emitters
             .iter()
-            .map(|e| e.particles[0].size() * 2 + e.state.size() + e.frame_ubo.size())
+            .map(|e| e.particles[0].size() * 2 + e.state.size() + e.frame_ubo.size() + e.grids.size())
             .sum::<u64>()
             + self.event_counts.size()
             + self.event_data.size()

@@ -1,0 +1,63 @@
+// A custom module written in WGSL (Niagara's scratch pad): "Swirl" pulls
+// particles round a vertical axis and inward, with a wobble from curl noise.
+// The body sees its inputs, the particle attributes by name (outputs are vars)
+// and the helper library (curl_noise, rand, ...).
+(
+    name: "WGSL Swirl",
+    user_parameters: {
+        "User.Spin": Float(3.0),
+    },
+    custom_modules: [
+        (
+            name: "Swirl",
+            inputs: {
+                "Center": Vec3((0.0, 0.0, 0.0)),
+                "Spin": Float(2.0),
+                "Pull": Float(1.0),
+                "Lift": Float(0.4),
+                "Wobble": Float(0.5),
+            },
+            outputs: ["Particles.Velocity", "Particles.Color"],
+            wgsl: r#"
+    let r = Position - Center;
+    let radial = vec3<f32>(r.x, 0.0, r.z);
+    let dist = max(length(radial), 0.05);
+    let tangent = vec3<f32>(-r.z, 0.0, r.x) / dist;
+    let target_v = tangent * (Spin / sqrt(dist)) - radial / dist * Pull + vec3<f32>(0.0, Lift, 0.0)
+        + curl_noise(Position * 1.5 + vec3<f32>(0.0, Time * 0.5, 0.0)) * Wobble;
+    // Ease the velocity towards the swirl (frame-rate independent).
+    Velocity = mix(Velocity, target_v, 1.0 - exp(-4.0 * DeltaTime));
+    // Faster particles burn hotter.
+    let heat = clamp(length(Velocity) / 4.0, 0.0, 1.0);
+    Color = vec4<f32>(mix(vec3<f32>(0.2, 0.5, 1.0), vec3<f32>(1.0, 0.6, 0.2), heat), Color.a);
+"#,
+        ),
+    ],
+    emitters: [
+        (
+            name: "Swirl",
+            sim_target: Gpu,
+            max_particles: 6000,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(1500.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.5), Float(4.0)),
+                    "Position": RandomRange(Vec3((-1.2, 0.0, -1.2)), Vec3((1.2, 0.1, 1.2))),
+                    "Sprite Size": RandomRange(Vec2((0.03, 0.03)), Vec2((0.06, 0.06))),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                // Scale Color resets Color from Initial.Color, so it runs before Swirl tints it.
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.1, 1.0), (0.8, 1.0), (1.0, 0.0)])),
+                }),
+                (module: "Swirl", inputs: { "Spin": Link(Float, "User.Spin"), "Pull": Float(1.6) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

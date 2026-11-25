@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 7;
+pub const COOKED_FORMAT_VERSION: u32 = 8;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -26,6 +26,9 @@ pub struct CookedSystem {
     /// them by index.
     pub data_interfaces: Vec<crate::data::CookedDataInterface>,
     pub emitters: Vec<CookedEmitter>,
+    /// Modules written in WGSL; a [`CookedModule`] whose id is
+    /// [`crate::custom::custom_id`]`(i)` calls entry `i`.
+    pub custom_modules: Vec<crate::custom::CookedCustomModule>,
 }
 
 #[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -47,6 +50,12 @@ pub struct CookedEmitter {
     pub renderers: Vec<CookedRenderer>,
     /// Event handlers, in source order.
     pub event_handlers: Vec<CookedEventHandler>,
+    /// Grid collections, in source order.
+    pub grids: Vec<crate::custom::CookedGrid>,
+    /// Simulation stages, run after the spawn in source order.
+    pub stages: Vec<crate::custom::CookedSimStage>,
+    /// A custom module writes an extended attribute (see [`Self::uses_extended_attributes`]).
+    pub custom_extended: bool,
 }
 
 /// An event handler with its source resolved.
@@ -101,7 +110,7 @@ impl CookedEmitter {
                     if r.ns == Namespace::Particles && r.index >= attr::FIRST_EXTENDED)
             })
         };
-        renders || self.particle_modules().any(module)
+        renders || self.custom_extended || self.particle_modules().any(module)
     }
 
     /// Every particle-stage module: spawn, update and the event handlers'.
@@ -110,6 +119,7 @@ impl CookedEmitter {
             .iter()
             .chain(&self.particle_update)
             .chain(self.event_handlers.iter().flat_map(|h| h.modules.iter()))
+            .chain(crate::custom::particle_stage_modules(&self.stages))
     }
 
     /// Whether a Collision module reads the scene (SceneDepth or RayTraced).
@@ -521,9 +531,11 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
     }
 
     let data_interfaces = cook_data_interfaces(src, &user_params, d);
+    let custom_modules = crate::custom::cook_declarations(src, d);
     let cx = Ctx {
         user: &user_params,
         dis: &data_interfaces,
+        custom: &custom_modules,
     };
     if src.name.trim().is_empty() {
         d.error(
@@ -581,10 +593,18 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             particle_update: pu,
             renderers: e.renderers.iter().map(|r| cook_renderer(r, d)).collect(),
             event_handlers: Vec::new(),
+            grids: Vec::new(),
+            stages: Vec::new(),
+            custom_extended: false,
         });
     }
     for (e, ce) in src.emitters.iter().zip(emitters.iter_mut()) {
         ce.event_handlers = cx.handlers(src, e, d);
+    }
+    for (e, ce) in src.emitters.iter().zip(emitters.iter_mut()) {
+        ce.grids = crate::custom::cook_grids(e, d);
+        ce.stages = cx.sim_stages(e, &ce.grids, d);
+        crate::custom::check_emitter(src, e, ce, &custom_modules, d);
     }
     if !d.has_errors() {
         for (e, ce) in src.emitters.iter().zip(&emitters) {
@@ -600,6 +620,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
         user_params,
         data_interfaces,
         emitters,
+        custom_modules,
     })
 }
 
@@ -898,6 +919,7 @@ const MAX_DYNAMICS: usize = 4096;
 struct Ctx<'a> {
     user: &'a [CookedParam],
     dis: &'a [crate::data::CookedDataInterface],
+    custom: &'a [crate::custom::CookedCustomModule],
 }
 
 impl Ctx<'_> {
@@ -974,6 +996,14 @@ impl Ctx<'_> {
     fn stack(&self, stage: Stage, calls: &[ModuleCall], d: &mut Diags) -> Vec<CookedModule> {
         let mut out = Vec::new();
         for call in calls {
+            if self.custom.iter().any(|c| c.name == call.module) {
+                if let Some(m) = self.custom_call(stage, call, d) {
+                    if call.enabled {
+                        out.push(m);
+                    }
+                }
+                continue;
+            }
             let Some(def) = self.module_def(stage, call, d) else {
                 continue;
             };
@@ -1611,5 +1641,136 @@ impl Ctx<'_> {
             ns,
             index: index as u16,
         })
+    }
+}
+
+impl Ctx<'_> {
+    /// A call of custom module `call.module` in `stage` (`EmitterUpdate` for
+    /// grid stages: no particle reads there).
+    fn custom_call(&self, stage: Stage, call: &ModuleCall, d: &mut Diags) -> Option<CookedModule> {
+        let ci = self.custom.iter().position(|c| c.name == call.module)?;
+        let def = &self.custom[ci];
+        if !stage.is_particle() && stage != Stage::EmitterUpdate {
+            d.error(
+                call.span,
+                format!("custom module \"{}\" cannot be used in `{}`", def.name, stage.field()),
+                Some("custom modules run per particle (`particle_spawn`, `particle_update`, event handlers, `iterate: Particles` stages) or per grid cell (`iterate: Grid(...)` stages)".into()),
+            );
+            return None;
+        }
+        let mut inputs: Vec<CookedInput> =
+            def.inputs.iter().map(|i| CookedInput::Const(i.default)).collect();
+        let mut dynamics = Vec::new();
+        for entry in &call.inputs.0 {
+            let Some(slot) = def.inputs.iter().position(|i| i.name == entry.name) else {
+                let names: Vec<&str> = def.inputs.iter().map(|i| i.name.as_str()).collect();
+                let help = match suggest(&entry.name, names.iter().copied()) {
+                    Some(s) => format!("did you mean \"{s}\"? Inputs: {}", names.join(", ")),
+                    None => format!("inputs of \"{}\": {}", def.name, names.join(", ")),
+                };
+                d.error(
+                    entry.span,
+                    format!("custom module \"{}\" has no input \"{}\"", def.name, entry.name),
+                    Some(help),
+                );
+                continue;
+            };
+            let want = def.inputs[slot].default.ty();
+            if let Some(c) =
+                self.input(stage, &def.name, &def.inputs[slot].name, want, entry, &mut dynamics, d)
+            {
+                inputs[slot] = c;
+            }
+        }
+        Some(CookedModule {
+            module: crate::custom::custom_id(ci),
+            inputs,
+            dynamics,
+        })
+    }
+
+    /// An emitter's simulation stages.
+    fn sim_stages(
+        &self,
+        e: &EmitterSource,
+        grids: &[crate::custom::CookedGrid],
+        d: &mut Diags,
+    ) -> Vec<crate::custom::CookedSimStage> {
+        use crate::custom::Iterate;
+        let mut out = Vec::new();
+        for (si, s) in e.simulation_stages.iter().enumerate() {
+            if s.name.trim().is_empty() {
+                d.error(s.span, "simulation stage `name` is empty", Some("name every stage, e.g. `name: \"Advect\"`".into()));
+            } else if e.simulation_stages[..si].iter().any(|o| o.name == s.name) {
+                d.error(s.span, format!("two simulation stages are named \"{}\"", s.name), Some("rename one".into()));
+            }
+            let (grid, modules) = match &s.iterate {
+                Iterate::Particles => {
+                    for call in &s.modules {
+                        if let Some(m) = modules::by_name(&call.module) {
+                            use ModuleKind::*;
+                            if matches!(
+                                m.kind,
+                                Collision
+                                    | KillParticles
+                                    | KillParticlesInVolume
+                                    | GenerateDeathEvent
+                                    | GenerateCollisionEvent
+                                    | GenerateLocationEvent
+                                    | ReceiveDeathEvent
+                                    | ReceiveCollisionEvent
+                                    | ReceiveLocationEvent
+                            ) {
+                                d.error(
+                                    call.span,
+                                    format!("module \"{}\" cannot run in a simulation stage", m.name),
+                                    Some("particle simulation stages update particles in place; collisions, kills and events go in `particle_update`".into()),
+                                );
+                            }
+                        }
+                    }
+                    (None, self.stack(Stage::ParticleUpdate, &s.modules, d))
+                }
+                Iterate::Grid(name) => {
+                    let Some(gi) = grids.iter().position(|g| &g.name == name) else {
+                        let names: Vec<&str> = grids.iter().map(|g| g.name.as_str()).collect();
+                        let help = if names.is_empty() {
+                            "declare it in the emitter's `grids: [ Grid2D(...) ]`".to_string()
+                        } else {
+                            match suggest(name, names.iter().copied()) {
+                                Some(x) => format!("did you mean \"{x}\"? Grids: {}", names.join(", ")),
+                                None => format!("grids of this emitter: {}", names.join(", ")),
+                            }
+                        };
+                        d.error(s.span, format!("stage \"{}\" iterates grid \"{name}\", which the emitter does not declare", s.name), Some(help));
+                        continue;
+                    };
+                    let mut ms = Vec::new();
+                    for call in &s.modules {
+                        if !self.custom.iter().any(|c| c.name == call.module) {
+                            d.error(
+                                call.span,
+                                format!("\"{}\" is not a custom module; grid stages run only custom WGSL modules", call.module),
+                                Some("declare it in the effect's `custom_modules: [ ... ]`".into()),
+                            );
+                            continue;
+                        }
+                        if let Some(m) = self.custom_call(Stage::EmitterUpdate, call, d) {
+                            if call.enabled {
+                                ms.push(m);
+                            }
+                        }
+                    }
+                    (Some(gi as u32), ms)
+                }
+            };
+            out.push(crate::custom::CookedSimStage {
+                name: s.name.clone(),
+                grid,
+                iterations: s.iterations,
+                modules,
+            });
+        }
+        out
     }
 }
