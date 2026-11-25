@@ -237,6 +237,18 @@ impl<'a> Ctx<'a> {
             path: Vec::new(),
         }
     }
+    pub(crate) fn text(&self, r: &mut Reader, owns_rest: bool) -> Result<Text> {
+        read_text(r, self, owns_rest)
+    }
+    pub(crate) fn push_path(&mut self, p: String) {
+        self.path.push(p);
+    }
+    pub(crate) fn pop_path(&mut self) {
+        self.path.pop();
+    }
+    pub(crate) fn fname_pub(&self, r: &mut Reader) -> Result<String> {
+        self.fname(r)
+    }
     fn fname(&self, r: &mut Reader) -> Result<String> {
         read_fname(r, self.names)
     }
@@ -414,6 +426,7 @@ fn top_value(r: &mut Reader, tag: &Tag, ctx: &mut Ctx) -> Value {
             "ByteProperty" => Value::Enum(ctx.fname(r)?),
             "StructProperty" => read_struct(r, tag.ty.inner_name(), tag.native, ctx)?,
             "ArrayProperty" => read_array(r, &tag.ty, tag.size, ctx)?,
+            "TextProperty" => Value::Text(read_text(r, ctx, true)?),
             "MapProperty" if ctx.v.ue5 < ue5::PROPERTY_TAG_COMPLETE_TYPE_NAME => read_map_guess(r, &tag.name, &tag.ty, ctx)?,
             _ => read_elem(r, &tag.ty, ctx, ElemHint::default())?,
         };
@@ -461,7 +474,7 @@ fn read_elem(r: &mut Reader, ty: &TypeName, ctx: &mut Ctx, hint: ElemHint) -> Re
         "EnumProperty" => Value::Enum(ctx.fname(r)?),
         "StrProperty" => Value::Str(r.fstring()?),
         "Utf8StrProperty" | "AnsiStrProperty" => Value::Str(r.utf8_string()?),
-        "TextProperty" => Value::Text(read_text(r, ctx)?),
+        "TextProperty" => Value::Text(read_text(r, ctx, false)?),
         "ObjectProperty" | "ClassProperty" | "WeakObjectProperty" | "InterfaceProperty" => {
             Value::Object(PackageIndex(r.i32()?))
         }
@@ -527,7 +540,7 @@ fn read_soft_path(r: &mut Reader, ctx: &Ctx) -> Result<SoftPath> {
     SoftPath::read_raw(r, ctx.names, ctx.v)
 }
 
-fn read_text(r: &mut Reader, ctx: &Ctx) -> Result<Text> {
+fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
     let _flags = r.u32()?;
     let history = r.i8()?;
     Ok(match history {
@@ -544,8 +557,9 @@ fn read_text(r: &mut Reader, ctx: &Ctx) -> Result<Text> {
             key: r.fstring()?,
             source: r.fstring()?,
         },
+        h if !owns_rest => return Err(r.err(format!("FText history type {h} is not supported here"))),
         h => {
-            // Only decodable when the text owns the rest of the reader.
+            // Kept raw: the text owns the rest of the reader.
             Text::Other {
                 history: h,
                 bytes: r.bytes(r.remaining())?.to_vec(),
@@ -935,6 +949,7 @@ pub fn read_pin_type(r: &mut Reader, ctx: &mut Ctx) -> Result<Vec<Property>> {
         let vo = PackageIndex(r.i32()?);
         let vconst = r.bool32()?;
         let vweak = r.bool32()?;
+        let vwrapper = r.bool32()?;
         f.push(field(
             "PinValueType",
             "StructProperty",
@@ -946,6 +961,7 @@ pub fn read_pin_type(r: &mut Reader, ctx: &mut Ctx) -> Result<Vec<Property>> {
                     field("TerminalSubCategoryObject", "ObjectProperty", Value::Object(vo)),
                     field("bTerminalIsConst", "BoolProperty", Value::Bool(vconst)),
                     field("bTerminalIsWeakPointer", "BoolProperty", Value::Bool(vweak)),
+                    field("bTerminalIsUObjectWrapper", "BoolProperty", Value::Bool(vwrapper)),
                 ],
             },
         ));
@@ -977,7 +993,7 @@ pub fn read_pin_type(r: &mut Reader, ctx: &mut Ctx) -> Result<Vec<Property>> {
         field("bIsConst", "BoolProperty", Value::Bool(is_const)),
         field("bIsUObjectWrapper", "BoolProperty", Value::Bool(is_uobject_wrapper)),
     ]);
-    if ctx.v.ue5 >= ue5::LARGE_WORLD_COORDINATES {
+    if !ctx.v.filter_editor_only && ctx.v.ue5_release_stream.unwrap_or(0) >= custom::UE5_RELEASE_PIN_SINGLE_PRECISION {
         f.push(field(
             "bSerializeAsSinglePrecisionFloat",
             "BoolProperty",

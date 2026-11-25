@@ -16,6 +16,7 @@
 
 pub mod dump;
 pub mod package;
+pub mod pins;
 pub mod property;
 pub mod reader;
 pub mod summary;
@@ -24,6 +25,7 @@ pub mod synth;
 
 pub use dump::{dump, DumpOptions};
 pub use package::{Export, Import, Object, Package, PackageIndex, Problem};
+pub use pins::{Direction, Pin, PinRef};
 pub use property::{find, Property, SoftPath, Text, TypeName, Value};
 pub use reader::{Error, Guid};
 pub use summary::Summary;

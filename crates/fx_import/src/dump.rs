@@ -98,6 +98,9 @@ pub fn dump(pkg: &Package, opts: &DumpOptions) -> String {
             for p in &e.object.properties {
                 write_prop(&mut out, pkg, p, depth + 2, opts);
             }
+            for pin in &e.object.pins {
+                write_pin(&mut out, pkg, pin, depth + 2);
+            }
             if e.object.native_size > 0 {
                 let _ = writeln!(out, "{pad}  <native data: {} bytes>", e.object.native_size);
             }
@@ -190,6 +193,12 @@ fn write_value(out: &mut String, pkg: &Package, v: &Value, depth: usize, opts: &
             let _ = write!(out, "{g}");
         }
         Value::Struct { name, fields } => {
+            if let [f] = fields.as_slice() {
+                if let Value::Guid(g) = &f.value {
+                    let _ = write!(out, "{g}");
+                    return;
+                }
+            }
             // Short native structs on one line.
             if fields.len() <= 4 && fields.iter().all(|f| f.value.as_f64().is_some()) {
                 let _ = write!(out, "{name}(");
@@ -307,4 +316,40 @@ fn write_bytes(out: &mut String, b: &[u8], opts: &DumpOptions) {
         }
     }
     out.push('>');
+}
+
+fn write_pin(out: &mut String, pkg: &Package, pin: &crate::pins::Pin, depth: usize) {
+    let pad = "  ".repeat(depth);
+    let dir = match pin.direction {
+        crate::pins::Direction::Input => "in ",
+        crate::pins::Direction::Output => "out",
+    };
+    let cat = pin.type_field("PinCategory").and_then(|v| v.as_str()).unwrap_or("");
+    let _ = write!(out, "{pad}pin {dir} {:?}: {cat}", pin.name);
+    let obj = pin.type_object();
+    if !obj.is_null() {
+        let _ = write!(out, " {}", pkg.path(obj));
+    }
+    if !pin.default_value.is_empty() {
+        let _ = write!(out, " = {:?}", pin.default_value);
+    }
+    if !pin.default_object.is_null() {
+        out.push_str(" = ");
+        write_ref(out, pkg, pin.default_object);
+    }
+    if let crate::property::Text::Base { source, .. } = &pin.default_text {
+        let _ = write!(out, " = text {source:?}");
+    }
+    for l in &pin.linked_to {
+        let node = l.node.export().map(|e| (e + 1).to_string()).unwrap_or_else(|| "?".into());
+        let other = l
+            .node
+            .export()
+            .and_then(|e| pkg.exports.get(e))
+            .and_then(|e| e.object.pins.iter().find(|p| p.id == l.pin))
+            .map(|p| p.name.as_str())
+            .unwrap_or("?");
+        let _ = write!(out, " -> [{node}].{other:?}");
+    }
+    out.push('\n');
 }

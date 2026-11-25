@@ -2,6 +2,7 @@
 //! export's tagged properties.
 
 use crate::property::{read_tagged_properties, Ctx, Property, SoftPath};
+use crate::pins::{is_graph_node_class, pins_supported, read_pins, Pin};
 use crate::reader::{Error, Guid, Reader, Result};
 use crate::summary::{custom, ue5, Summary};
 
@@ -56,6 +57,8 @@ pub const RF_CLASS_DEFAULT_OBJECT: u32 = 0x10;
 pub struct Object {
     pub properties: Vec<Property>,
     pub guid: Option<Guid>,
+    /// Graph node pins (UEdGraphNode subclasses), read from the native data.
+    pub pins: Vec<Pin>,
     /// Bytes after the tagged properties (and object GUID): the class's
     /// native serialization, not decoded here.
     pub native_size: usize,
@@ -262,6 +265,16 @@ impl Package {
                     obj.guid = Some(r.guid()?);
                 }
             }
+            if !is_cdo && is_graph_node_class(&class) && pins_supported(versions) && r.remaining() > 0 {
+                let mut rr = r.clone();
+                match read_pins(&mut rr, &mut ctx) {
+                    Ok(p) => {
+                        obj.pins = p;
+                        r = rr;
+                    }
+                    Err(err) => ctx.problems.push(("pins".into(), err.to_string())),
+                }
+            }
             Ok(())
         })();
         match res {
@@ -347,6 +360,9 @@ pub struct Versions {
     pub editor_object: Option<i32>,
     pub fortnite_main: Option<i32>,
     pub framework_object: Option<i32>,
+    pub blueprints_object: Option<i32>,
+    pub ue5_main_stream: Option<i32>,
+    pub ue5_release_stream: Option<i32>,
     pub filter_editor_only: bool,
 }
 
@@ -358,6 +374,9 @@ impl Versions {
             editor_object: s.custom_version(custom::EDITOR_OBJECT),
             fortnite_main: s.custom_version(custom::FORTNITE_MAIN),
             framework_object: s.custom_version(custom::FRAMEWORK_OBJECT),
+            blueprints_object: s.custom_version(custom::BLUEPRINTS_OBJECT),
+            ue5_main_stream: s.custom_version(custom::UE5_MAIN_STREAM),
+            ue5_release_stream: s.custom_version(custom::UE5_RELEASE_STREAM),
             filter_editor_only: s.filter_editor_only(),
         }
     }

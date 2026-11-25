@@ -42,3 +42,51 @@ fn every_test_file_reads_without_problems() {
         assert!(text.contains("NiagaraSystem"));
     }
 }
+
+/// One module input value per test file, read from a graph node pin
+/// (checked by hand against the dump).
+const KNOWN_PIN_DEFAULTS: &[(&str, &str, &str)] = &[
+    ("NS_Boids", "Mesh Scale Mode", "NewEnumerator3"),
+    ("NS_DestructibleRig", "Automatically Calculate Particle Radius", "true"),
+    ("NS_Fire", "DynamicMaterialParameters.Index0Param0Write", "true"),
+    ("NS_FireSmokeOnly", "AddVelocity.UseConeFalloff", "true"),
+    ("NS_Fish", "Color Mode", "NewEnumerator2"),
+    ("NS_FluidSimulation", "Accumulate_External_Forces.EnableGravity", "true"),
+    ("NS_GeyserEruption", "Cone Mode", "NewEnumerator1"),
+    ("NS_ShinyGlimmer", "Color Mode", "NewEnumerator1"),
+];
+
+#[test]
+fn graph_pins_hold_known_defaults_and_links_resolve() {
+    for f in files() {
+        let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+        let pkg = Package::read(&std::fs::read(&f).unwrap()).unwrap();
+        let pins = || pkg.exports.iter().flat_map(|e| e.object.pins.iter());
+        assert!(pins().count() > 50, "{stem}: few pins");
+
+        if let Some((_, pin, want)) = KNOWN_PIN_DEFAULTS.iter().find(|(n, _, _)| *n == stem) {
+            assert!(
+                pins().any(|p| p.name == *pin && p.default_value == *want),
+                "{stem}: no pin {pin:?} = {want:?}"
+            );
+        }
+
+        // Every link names a pin that exists on the linked node, and links
+        // are symmetric.
+        for (i, e) in pkg.exports.iter().enumerate() {
+            for p in &e.object.pins {
+                for l in &p.linked_to {
+                    let node = l.node.export().expect("link to an export");
+                    let other = pkg.exports[node].object.pins.iter().find(|q| q.id == l.pin);
+                    let other = other.unwrap_or_else(|| panic!("{stem}: dangling link from [{}] {:?}", i + 1, p.name));
+                    assert!(
+                        other.linked_to.iter().any(|b| b.pin == p.id && b.node.export() == Some(i)),
+                        "{stem}: one-way link {:?} -> {:?}",
+                        p.name,
+                        other.name
+                    );
+                }
+            }
+        }
+    }
+}

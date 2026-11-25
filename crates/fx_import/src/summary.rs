@@ -45,6 +45,15 @@ pub mod custom {
     pub const NIAGARA_VARIADIC_PARAMETERS_IN_GPU_FUNCTION_INFO: i32 = 77;
     /// FNiagaraCustomVersion::SerializeUsageBitMaskToGPUFunctionInfo.
     pub const NIAGARA_USAGE_BITMASK_IN_GPU_FUNCTION_INFO: i32 = 91;
+    pub const BLUEPRINTS_OBJECT: Guid = Guid([0xB0D832E4, 0x1F894F0D, 0xACCF7EB7, 0x36FD4AA2]);
+    /// FBlueprintsObjectVersion::EdGraphPinOptimized: pins saved by their node.
+    pub const BLUEPRINTS_EDGRAPH_PIN_OPTIMIZED: i32 = 4;
+    pub const UE5_MAIN_STREAM: Guid = Guid([0x697DD581, 0xE64F41AB, 0xAA4A51EC, 0xBEB7B628]);
+    /// FUE5MainStreamObjectVersion::EdGraphPinSourceIndex.
+    pub const UE5_MAIN_EDGRAPH_PIN_SOURCE_INDEX: i32 = 50;
+    pub const UE5_RELEASE_STREAM: Guid = Guid([0xD89B5E42, 0x24BD4D46, 0x8412ACA8, 0xDF641779]);
+    /// FUE5ReleaseStreamObjectVersion::SerializeFloatPinDefaultValuesAsSinglePrecision.
+    pub const UE5_RELEASE_PIN_SINGLE_PRECISION: i32 = 36;
     pub const EDITOR_OBJECT: Guid = Guid([0xE4B068ED, 0xF49442E9, 0xA231DA0B, 0x2E46BB41]);
     /// FEditorObjectVersion::CultureInvariantTextSerializationKeyStability.
     pub const EDITOR_CULTURE_INVARIANT_TEXT: i32 = 32;
