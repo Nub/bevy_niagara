@@ -1110,6 +1110,17 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
         depth: 0,
     };
     let emissive = g.material_input(*editor, "EmissiveColor").map(|x| cast(&x, 3));
+    // Unreal clamps Emissive at 0 (GetMaterialEmissive) unless the material
+    // sets bAllowNegativeEmissiveColor; erosion materials rely on it (mask -
+    // noise goes negative where the opacity is 0 too).
+    // A UMaterial property (the editor-only data export in UE5 does not hold it).
+    let allow_negative = l.pkg.exports.iter().any(|e| matches!(find(&e.object.properties, "bAllowNegativeEmissiveColor"), Some(Value::Bool(true))));
+    let emissive = emissive.map(|mut x| {
+        if !allow_negative {
+            x.code = format!("max({}, vec3<f32>(0.0))", x.code);
+        }
+        x
+    });
     let base = if m.unlit { None } else { g.material_input(*editor, "BaseColor").map(|x| cast(&x, 3)) };
     let alpha = match m.blend {
         Blend::Opaque => None,

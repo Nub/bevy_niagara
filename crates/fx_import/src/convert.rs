@@ -1312,9 +1312,9 @@ impl<'a> Cx<'a> {
                         .is_some_and(|x| matches!(x, crate::property::Value::Object(o) if !o.is_null()))
                 })
             };
-            let translucent = matches!(m.blend, mt::Blend::Translucent);
-            let refraction = translucent && wired("Refraction") && !wired("EmissiveColor") && !wired("BaseColor");
-            let refraction_lost = translucent && wired("Refraction") && !refraction;
+            // Any blend mode: an additive heat haze with no colour draws nothing useful.
+            let refraction = wired("Refraction") && !wired("EmissiveColor") && !wired("BaseColor");
+            let refraction_lost = wired("Refraction") && !refraction;
             let mut imgs = Vec::new();
             let mut missing = Vec::new();
             for t in &c.textures {
@@ -1767,6 +1767,10 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                 "Velocity Origin",
             ]);
             let speed_scale = lit_f(m.input("Velocity Speed Scale")).unwrap_or(1.0);
+            // UE4's per-axis multiplier: the identity changes nothing.
+            if matches!(m.input("Scale Added Velocity"), Some(NInput::Value(v)) if v.floats().is_some_and(|f| f.iter().all(|&c| c == 1.0))) {
+                used.push("Scale Added Velocity");
+            }
             // Velocity Mode as saved: 0 Linear, 1 From Point, 2 In Cone.
             let vmode = mode(m, "Velocity Mode").unwrap_or(if m.has("Cone Angle") || m.has("Cone Axis") {
                 2
@@ -2027,6 +2031,57 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                 let c = x.get("Color").cloned().unwrap_or(Fx::Lit(Lit::Color([1.0; 4])));
                 x.set("Color", mul_color(c, s));
             }
+            o.mods.push(x);
+        }
+        // UE4-era location and velocity modules (UE5 folded them into
+        // ShapeLocation and AddVelocity's modes); Fab packs still ship them.
+        "SphereLocation" => {
+            let mut x = FxModule::new("Shape Location");
+            used.extend(["Sphere Orientation Axis", "Random Seed", "Spawn Group Mask", "Surface Only Band Thickness", "U Distribution", "V Distribution"]);
+            let r = lit_f(m.input("Sphere Radius")).unwrap_or(100.0) * CM;
+            used.push("Sphere Radius");
+            let s = match m.input("Non Uniform Scale") {
+                Some(NInput::Value(v)) if m.switch("UseNonUniformScale") != Some("false") => {
+                    v.floats().filter(|f| f.len() == 3).map(|f| [f[0], f[1], f[2]]).unwrap_or([1.0; 3])
+                }
+                _ => [1.0; 3],
+            };
+            used.push("Non Uniform Scale");
+            if m.switch("Surface Only") == Some("true") {
+                x.set("Surface Only", Fx::Lit(Lit::Bool(true)));
+            }
+            if s[0] == s[1] && s[1] == s[2] {
+                x.set("Shape Primitive", Fx::Choice("Sphere".into()));
+                x.set("Sphere Radius", Fx::Lit(Lit::Float(r * s[0])));
+            } else if s[0] == s[1] {
+                // Squashed or stretched along Unreal Z (our Y, the cylinder
+                // axis): a cylinder of the same radius and height.
+                x.set("Shape Primitive", Fx::Choice("Cylinder".into()));
+                x.set("Cylinder Radius", Fx::Lit(Lit::Float(r * s[0])));
+                x.set("Cylinder Height", Fx::Lit(Lit::Float(2.0 * r * s[2])));
+                o.changes.push(format!(
+                    "Non Uniform Scale {s:?}: the ellipsoid is drawn as a cylinder of radius {} m and height {} m",
+                    r * s[0],
+                    2.0 * r * s[2]
+                ));
+            } else {
+                let mean = (s[0] + s[1] + s[2]) / 3.0;
+                x.set("Shape Primitive", Fx::Choice("Sphere".into()));
+                x.set("Sphere Radius", Fx::Lit(Lit::Float(r * mean)));
+                o.changes.push(format!("Non Uniform Scale {s:?}: drawn as a sphere of the mean radius"));
+            }
+            put!(x, "Offset", "Offset", Unit::Len);
+            o.mods.push(x);
+        }
+        "AddVelocityFromPoint" => {
+            let mut x = FxModule::new("Add Velocity from Point");
+            put!(x, "Velocity Strength", "Velocity Strength", Unit::Len);
+            put!(x, "Origin Offset", "Velocity Origin", Unit::Len);
+            o.mods.push(x);
+        }
+        "ScaleVelocity" => {
+            let mut x = FxModule::new("Scale Velocity");
+            put!(x, "Velocity Scale", "Velocity Scale", Unit::Dir);
             o.mods.push(x);
         }
         "ScaleColor" => {
