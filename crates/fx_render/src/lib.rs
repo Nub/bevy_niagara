@@ -1535,6 +1535,8 @@ fn renderer_texture(
 
 /// First batch size of a system; each further batch doubles it.
 const FIRST_BATCH_SLOTS: u32 = 16;
+/// GPU bytes a system's first batch may take (fewer slots for big effects).
+const FIRST_BATCH_BYTES: u64 = 16 << 20;
 
 impl FxState {
     /// A batch of `key` with a free slot (made if none has one).
@@ -1563,7 +1565,10 @@ impl FxState {
                 .filter(|b| b.key == key)
                 .map(|b| b.gpu.slots)
                 .max();
-            largest.map_or(FIRST_BATCH_SLOTS, |s| s * 2)
+            largest.map_or_else(
+                || (FIRST_BATCH_BYTES / program.instance_bytes().max(1)).clamp(1, FIRST_BATCH_SLOTS as u64) as u32,
+                |s| s * 2,
+            )
         };
         let gpu = GpuBatch::new(wd, program, slots);
         let slots = gpu.slots;

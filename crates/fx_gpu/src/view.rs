@@ -710,7 +710,13 @@ impl BatchDraw {
             pass.set_pipeline(&pipelines.pad);
             pass.dispatch_workgroups_indirect(&self.args, 0);
         }
+        // Only the passes the drawn instances can need (later ones would get no workgroups).
+        let limit = (copies.len() as u64 * self.capacity as u64).next_power_of_two().max(BLOCK as u64);
         for (i, p) in self.passes.iter().enumerate() {
+            match *p {
+                PassKind::MergeGlobal { k, .. } | PassKind::MergeLocal { k } if k as u64 > limit => break,
+                _ => {}
+            }
             let args_offset = 16 * (1 + i as u64);
             match p {
                 PassKind::Local => pass.set_pipeline(&pipelines.sort_local),
