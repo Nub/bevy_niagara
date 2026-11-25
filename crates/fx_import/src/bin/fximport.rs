@@ -2,6 +2,11 @@
 //!
 //!   fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports]
 //!                 [--max-elems N] [--max-bytes N]
+//!   fximport niagara <file.uasset>
+//!   fximport convert <file.uasset> --out DIR
+//!
+//! `convert` writes DIR/<name>.fx.ron and DIR/<name>.report.md and exits
+//! with 3 when the written effect does not validate.
 //!
 //! Prints the package header, imports and the export tree with each
 //! export's properties. Exits with status 1 when the file cannot be read
@@ -13,7 +18,7 @@ use fx_import::{dump, DumpOptions, Package};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]"
+        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)"
     );
     ExitCode::from(64)
 }
@@ -21,6 +26,56 @@ fn usage() -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { return usage() };
+    if cmd == "convert" {
+        let mut file = None;
+        let mut out = None;
+        let mut it = args[1..].iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--out" => out = it.next().cloned(),
+                f if file.is_none() && !f.starts_with("--") => file = Some(f.to_string()),
+                _ => return usage(),
+            }
+        }
+        let (Some(file), Some(out)) = (file, out) else { return usage() };
+        return match fx_import::convert_file(std::path::Path::new(&file), std::path::Path::new(&out)) {
+            Ok(r) => {
+                println!("{}", r.summary());
+                if r.report.validation.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    for e in &r.report.validation {
+                        eprintln!("{e}");
+                    }
+                    ExitCode::from(3)
+                }
+            }
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if cmd == "niagara" {
+        let Some(file) = args.get(1) else { return usage() };
+        let pkg = match std::fs::read(file).map_err(|e| e.to_string()).and_then(|b| Package::read(&b).map_err(|e| e.to_string())) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        return match fx_import::niagara::read_system(&pkg) {
+            Ok(s) => {
+                print!("{}", fx_import::niagara::describe(&s));
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     if cmd != "dump" {
         return usage();
     }

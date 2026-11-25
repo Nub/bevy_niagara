@@ -90,3 +90,36 @@ fn graph_pins_hold_known_defaults_and_links_resolve() {
         }
     }
 }
+
+/// Every test file converts to an effect that validates, with most of its
+/// modules mapped, and known values come through converted.
+#[test]
+fn every_test_file_converts_and_validates() {
+    // (file, least % of modules mapped, text the effect must contain)
+    let expect: &[(&str, f32, &[&str])] = &[
+        ("NS_FireSmokeOnly", 100.0, &["Link(Float, \"User.SpawnRate\")", "\"Sphere Radius\": Float(0.08)"]),
+        ("NS_Fire", 90.0, &["\"Shape Primitive\": Cylinder", "name: \"Sparks\""]),
+        ("NS_Fish", 90.0, &["\"Shape Primitive\": Box", "Mesh((mesh: "]),
+        ("NS_ShinyGlimmer", 90.0, &["Add Velocity from Point"]),
+        ("NS_GeyserEruption", 90.0, &["\"Shape Primitive\": Cone", "Wind Force"]),
+        ("NS_Boids", 80.0, &["Set Particle Velocity"]),
+        ("NS_FluidSimulation", 50.0, &["Link(Int, \"User.ParticleNum\")", "Spawn Burst Instantaneous"]),
+        ("NS_DestructibleRig", 50.0, &["Collision"]),
+    ];
+    let out = std::env::temp_dir().join(format!("fx_import_convert_{}", std::process::id()));
+    for f in files() {
+        let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+        let r = fx_import::convert_file(&f, &out).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let ron = std::fs::read_to_string(&r.ron_path).unwrap();
+        assert!(r.report.validation.is_empty(), "{stem}: {:?}\n{ron}", r.report.validation);
+        if let Some((_, pct, wants)) = expect.iter().find(|(n, _, _)| *n == stem) {
+            assert!(r.report.percent() >= *pct, "{stem}: {}", r.summary());
+            for w in *wants {
+                assert!(ron.contains(w), "{stem}: missing {w}\n{ron}");
+            }
+        }
+        let md = std::fs::read_to_string(&r.report_path).unwrap();
+        assert!(md.contains("Modules mapped"), "{stem}");
+    }
+    let _ = std::fs::remove_dir_all(&out);
+}

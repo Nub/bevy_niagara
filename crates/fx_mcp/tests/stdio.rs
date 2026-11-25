@@ -102,6 +102,7 @@ fn mcp_over_stdio() {
         "module_doc",
         "open_in_viewer",
         "stats",
+        "import_niagara",
     ] {
         assert!(names.contains(&want), "{want} missing from {names:?}");
     }
@@ -119,6 +120,22 @@ fn mcp_over_stdio() {
     assert!(t.contains(":7:") && t.contains("unknown module \"Spawn Rat\""), "{t}");
     assert!(t.contains("did you mean \"Spawn Rate\""), "{t}");
     assert_eq!(bad["structuredContent"]["diagnostics"][0]["line"], 7);
+
+    // Niagara import: a missing file is an error; a test file (when
+    // fetched, see testdata/niagara_assets.sh) converts and validates.
+    let missing = s.call("import_niagara", json!({"path": "testdata/niagara/NS_Nope.uasset"}));
+    assert_eq!(missing["isError"], true);
+    if std::path::Path::new("testdata/niagara/NS_FireSmokeOnly.uasset").exists() {
+        let out = std::env::temp_dir().join(format!("fx_mcp_import_{}", std::process::id()));
+        let r = s.call(
+            "import_niagara",
+            json!({"path": "testdata/niagara/NS_FireSmokeOnly.uasset", "out": out.to_string_lossy()}),
+        );
+        let t = text(&r);
+        assert_eq!(r["isError"], false, "{t}");
+        assert!(t.contains("Modules mapped") && out.join("NS_FireSmokeOnly.fx.ron").exists(), "{t}");
+        let _ = std::fs::remove_dir_all(&out);
+    }
 
     // Module docs, generated from the module table.
     let doc = s.call("module_doc", json!({"name": "gravity force"}));

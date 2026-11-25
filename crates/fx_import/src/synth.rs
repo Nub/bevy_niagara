@@ -263,6 +263,102 @@ impl Synth {
     }
 }
 
+/// A graph node pin for [`Synth::pins`]: links name (node export index, pin id).
+#[derive(Clone, Debug, Default)]
+pub struct SynthPin {
+    pub id: u32,
+    pub name: String,
+    pub output: bool,
+    /// PinSubCategoryObject (the Niagara type struct), a package index.
+    pub type_object: i32,
+    pub default_value: String,
+    pub links: Vec<(i32, u32)>,
+}
+
+impl SynthPin {
+    pub fn new(id: u32, name: &str, output: bool, type_object: i32) -> Self {
+        SynthPin {
+            id,
+            name: name.to_string(),
+            output,
+            type_object,
+            ..Default::default()
+        }
+    }
+    pub fn default(mut self, v: &str) -> Self {
+        self.default_value = v.to_string();
+        self
+    }
+    pub fn link(mut self, node: i32, pin: u32) -> Self {
+        self.links.push((node, pin));
+        self
+    }
+}
+
+fn pin_guid(b: &mut Vec<u8>, id: u32) {
+    for w in [id, 0x5eed, 0, 0] {
+        b.extend_from_slice(&w.to_le_bytes());
+    }
+}
+
+impl Synth {
+    /// Adds the custom versions graph node pins need (UE 4.19+ layout).
+    pub fn with_graph_versions(mut self) -> Self {
+        self.custom_versions.push((custom::BLUEPRINTS_OBJECT, custom::BLUEPRINTS_EDGRAPH_PIN_OPTIMIZED));
+        self.custom_versions.push((custom::FRAMEWORK_OBJECT, custom::FRAMEWORK_PINS_STORE_FNAME));
+        self
+    }
+
+    /// Native bytes of a graph node's pin array, owned by export `node`.
+    pub fn pins(&mut self, node: i32, pins: &[SynthPin]) -> Vec<u8> {
+        let mut b = Vec::new();
+        i32w(&mut b, pins.len() as i32);
+        for p in pins {
+            i32w(&mut b, 0); // not null
+            for _ in 0..2 {
+                i32w(&mut b, node);
+                pin_guid(&mut b, p.id);
+            }
+            let n = self.name(&p.name);
+            fname(&mut b, n);
+            // FriendlyName: empty text without history.
+            i32w(&mut b, 0);
+            b.push(0xff);
+            fstring(&mut b, ""); // tooltip
+            b.push(p.output as u8);
+            let cat = self.name("Type");
+            fname(&mut b, cat);
+            fname(&mut b, 0); // sub-category None
+            i32w(&mut b, p.type_object);
+            b.push(0); // container
+            i32w(&mut b, 0); // is reference
+            i32w(&mut b, 0); // is weak
+            i32w(&mut b, 0); // member parent
+            fname(&mut b, 0);
+            b.extend_from_slice(&[0; 16]);
+            i32w(&mut b, 0); // const
+            i32w(&mut b, 0); // uobject wrapper
+            fstring(&mut b, &p.default_value);
+            fstring(&mut b, "");
+            i32w(&mut b, 0); // default object
+            i32w(&mut b, 0);
+            b.push(0xff); // default text
+            i32w(&mut b, p.links.len() as i32);
+            for (n, id) in &p.links {
+                i32w(&mut b, 0);
+                i32w(&mut b, *n);
+                pin_guid(&mut b, *id);
+            }
+            i32w(&mut b, 0); // sub pins
+            i32w(&mut b, 1); // parent pin: null
+            i32w(&mut b, 1); // reference pass-through: null
+            b.extend_from_slice(&[0; 16]); // persistent guid
+            i32w(&mut b, 0); // bits
+        }
+        b
+    }
+}
+
 /// A property type for the writer: `T::Struct("Vector")`, `T::Array(..)`.
 #[derive(Clone, Debug)]
 pub enum T {
@@ -272,6 +368,8 @@ pub enum T {
     Name,
     Str,
     Object,
+    /// ByteProperty without an enum (byte arrays).
+    Byte,
     /// ByteProperty with an enum name (value is an FName).
     ByteEnum(&'static str),
     Struct(&'static str),
@@ -288,6 +386,7 @@ impl T {
             T::Name => "NameProperty",
             T::Str => "StrProperty",
             T::Object => "ObjectProperty",
+            T::Byte => "ByteProperty",
             T::ByteEnum(_) => "ByteProperty",
             T::Struct(_) => "StructProperty",
             T::Array(_) => "ArrayProperty",
@@ -493,6 +592,22 @@ impl Props<'_> {
         }
         b.extend_from_slice(&data);
         self.raw(name, &T::Array(Box::new(T::Struct(struct_name))), &b, false, false)
+    }
+    /// Array of object references.
+    pub fn object_array(&mut self, name: &str, v: &[i32]) -> &mut Self {
+        let mut b = Vec::new();
+        i32w(&mut b, v.len() as i32);
+        for x in v {
+            i32w(&mut b, *x);
+        }
+        self.raw(name, &T::Array(Box::new(T::Object)), &b, false, false)
+    }
+    /// Array of bytes (ArrayProperty(ByteProperty)).
+    pub fn byte_array(&mut self, name: &str, v: &[u8]) -> &mut Self {
+        let mut b = Vec::new();
+        i32w(&mut b, v.len() as i32);
+        b.extend_from_slice(v);
+        self.raw(name, &T::Array(Box::new(T::Byte)), &b, false, false)
     }
     pub fn name_int_map(&mut self, name: &str, entries: &[(&str, i32)]) -> &mut Self {
         let mut b = Vec::new();

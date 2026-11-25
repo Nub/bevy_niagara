@@ -38,6 +38,14 @@ pub fn list() -> Value {
             }, "required": ["path"]}
         },
         {
+            "name": "import_niagara",
+            "description": "Convert an Unreal Engine 5 Niagara system saved by the editor (.uasset) to an effect source file: writes <out>/<name>.fx.ron and <out>/<name>.report.md (coverage: modules mapped, the rest listed; materials and meshes become placeholders) and returns the report. The written effect is validated.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .uasset file"},
+                "out": {"type": "string", "description": "Output directory (default: the .uasset's folder)"}
+            }, "required": ["path"]}
+        },
+        {
             "name": "list_modules",
             "description": "List every module (name, stages it may be placed in, what it does) and renderer.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -82,11 +90,23 @@ pub fn call(name: &str, args: &Value) -> Option<Value> {
                 Err(e) => text(e, true),
             })
         }
+        "import_niagara" => import_niagara(args),
         "open_in_viewer" => open_in_viewer(args),
         "stats" => stats(args),
         _ => return None,
     };
     Some(r.unwrap_or_else(|e| text(e, true)))
+}
+
+fn import_niagara(args: &Value) -> Result<Value, String> {
+    let path = arg_path(args)?;
+    let out = match args.get("out").and_then(Value::as_str) {
+        Some(o) => PathBuf::from(o),
+        None => path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    };
+    let r = fx_import::convert_file(&path, &out).map_err(|e| format!("{}: {e}", path.display()))?;
+    let ok = r.report.validation.is_empty();
+    Ok(text(format!("{}\n\n{}", r.summary(), r.report.markdown()), !ok))
 }
 
 fn arg_path(args: &Value) -> Result<PathBuf, String> {
