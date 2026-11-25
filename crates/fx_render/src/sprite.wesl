@@ -6,7 +6,7 @@ import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::prepass::utils;
 import fx_render::particle_io::{
     FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sprite_sub_uv,
-    sample_particle_texture, scene_light, finish_faded,
+    sample_particle_texture, scene_light, finish_faded, camera_offset,
 };
 import fx_render::particle_surface::{sprite_corner, sprite_texel};
 
@@ -15,7 +15,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     let i = indices[ii];
     let m = fx.world_from_local;
     let local = vec3<f32>(pw(0u, i), pw(1u, i), pw(2u, i));
-    let pos = (m * vec4<f32>(local, 1.0)).xyz;
+    let pos = camera_offset((m * vec4<f32>(local, 1.0)).xyz, i);
     let vel = (m * vec4<f32>(pw(3u, i), pw(4u, i), pw(5u, i), 0.0)).xyz;
     let size = vec2<f32>(pw(10u, i), pw(11u, i));
     let rotation = radians(pw(12u, i));

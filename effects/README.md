@@ -88,6 +88,28 @@ Dynamic inputs are Niagara's (Uniform Ranged, Random Range by Uniform, `<Type> f
 
 `samples/bouncing_sparks.fx.ron` (floor collisions, impact flashes from collision events) and `samples/fireworks.fx.ron` (trails from location events, bursts from death events) show both.
 
+**Data interfaces** (Niagara's) are typed `User.` parameters giving modules scene and asset data. Declare them in `user_parameters` beside the values:
+
+| Declaration | What it is |
+|---|---|
+| `"User.Character": SkeletalMesh("models/Fox.glb")` | a skinned mesh; the default asset is a glTF file whose scene 0 is spawned under the effect, playing its first clip (`"models/Fox.glb#Animation2"` plays clip 2) |
+| `"User.Rock": StaticMesh("sphere")` | a mesh: a built-in name (`cube`, `sphere`, ...) or an asset path (a `.glb` without a label reads its first primitive) |
+| `"User.Pattern": Texture("textures/pattern.png")` | an image (Rgba8 sRGB/linear, Rgba16Float, Rgba32Float), sampled in linear colour |
+| `"User.Fade": FloatCurve([(0.0, 1.0), (1.0, 0.0)])` (also `Vec2Curve`, `VectorCurve`, `Vec4Curve`, `ColorCurve`) | a curve baked into the effect, read with `Dynamic("Float from Curve", { "Curve": Link(FloatCurve, "User.Fade") })` |
+| `"User.Camera": CameraQuery` | the camera the effect is seen from (`Get Camera Position`, `Get Camera Forward Vector`) |
+| `"User.Depth": SceneDepth` | the scene depth buffer (`Sample Scene Depth`) |
+
+Modules take one through an input of its type: `"Skeletal Mesh": Link(SkeletalMesh, "User.Character")` (`Skeletal Mesh Location`, `Sampling Mode: Surface | Bones`), `Link(StaticMesh, "User.Rock")` (`Static Mesh Location`), `Link(Texture, "User.Pattern")` (`Sample Texture`). `Camera Offset` sets `Particles.CameraOffset`: sprites and meshes are drawn that many metres towards the camera. Asset paths are relative to the effect file's folder in `fxpreview`. In a game, bind your own data on the `ParticleEffect` component (fx_render) instead of the default asset:
+
+```rust
+let mut effect = ParticleEffect::new(cooked, seed);
+effect.bind_entity("User.Character", player);    // an entity with Mesh3d (+ SkinnedMesh: sampled in its animated pose)
+effect.bind_mesh("User.Rock", meshes.add(Sphere::new(0.5)));  // a mesh at the effect's origin
+effect.bind_texture("User.Pattern", asset_server.load("pattern.png"));
+```
+
+Meshes and images must keep their main-world data (`RenderAssetUsages::MAIN_WORLD`, the default for loaded assets). `samples/skeletal_mesh.fx.ron` (embers off the running fox) and `samples/texture_color.fx.ron` (a picture dissolving into coloured particles) use them.
+
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.
 

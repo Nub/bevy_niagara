@@ -29,17 +29,20 @@
 //! No particle counts are read back; the per-frame CPU→GPU traffic is a few
 //! uniform writes from fixed-size scratch arrays.
 
+pub mod data;
 mod mesh_data;
 mod scene;
 pub mod stats;
 mod textures;
 
 pub use stats::{EffectStats, EmitterStats, FxStats, FxStatsData, FxStatsPlugin};
+pub use data::DataBinding;
 pub use scene::{FxRayTracingScene, FxSceneDepth};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bevy::app::AnimationSystems;
 use bevy::asset::{embedded_asset, load_embedded_asset};
 use bevy::core_pipeline::core_3d::{CORE_3D_DEPTH_FORMAT, Transparent3d, TransparentSortingInfo3d};
 use bevy::core_pipeline::schedule::camera_driver;
@@ -83,6 +86,11 @@ use fx_gpu::wgpu;
 
 /// A particle system instance. Its particles are simulated in the entity's
 /// local space and drawn with the entity's `GlobalTransform`.
+///
+/// Data interfaces (meshes and textures the effect's modules read, declared
+/// in its `user_parameters`) read their default asset unless bound with
+/// [`ParticleEffect::bind_entity`], [`ParticleEffect::bind_mesh`] or
+/// [`ParticleEffect::bind_texture`] (see the `data` module docs).
 #[derive(Component, Clone)]
 #[require(Transform, Visibility)]
 pub struct ParticleEffect {
@@ -91,6 +99,8 @@ pub struct ParticleEffect {
     /// Meshes replacing a mesh renderer's `mesh` setting, by renderer index
     /// (all emitters' renderers in order): any Bevy mesh.
     pub meshes: Vec<(usize, Handle<Mesh>)>,
+    /// Data interface bindings by full name (`"User.Character"`).
+    pub bindings: Vec<(String, DataBinding)>,
 }
 
 impl ParticleEffect {
@@ -99,6 +109,7 @@ impl ParticleEffect {
             system: Arc::new(system),
             seed,
             meshes: Vec::new(),
+            bindings: Vec::new(),
         }
     }
 
@@ -240,7 +251,17 @@ impl Plugin for FxPlugin {
             .insert_resource(inbox.clone())
             .insert_resource(builtins)
             .init_resource::<LightPools>()
-            .add_systems(PostUpdate, advance_clock)
+            .init_resource::<data::DataInterfaces>()
+            .add_systems(
+                PostUpdate,
+                (advance_clock, data::drive_animations)
+                    .chain()
+                    .before(AnimationSystems),
+            )
+            .add_systems(
+                PostUpdate,
+                data::update_data_interfaces.after(TransformSystems::Propagate),
+            )
             .add_systems(PostUpdate, scene::request_depth_binding)
             .add_systems(
                 PostUpdate,
@@ -397,12 +418,18 @@ struct ExtractedEffect {
     seed: u32,
     world_from_local: Mat4,
     assets: Arc<Vec<RendererAssets>>,
+    /// Bound data interfaces' data and poses this frame.
+    data: Vec<(String, data::DiValue)>,
+    /// A data interface's asset is still loading.
+    data_pending: bool,
 }
 
 #[derive(Resource, Default)]
 struct ExtractedEffects {
     steps: u32,
     dt: f32,
+    /// Seconds between the previous frame's mesh poses and this frame's.
+    pose_interval: f32,
     effects: Vec<ExtractedEffect>,
 }
 
@@ -446,9 +473,11 @@ fn extract_effects(
     asset_server: Extract<Res<AssetServer>>,
     builtins: Extract<Res<BuiltinMeshes>>,
     meshes: Extract<Res<Assets<Mesh>>>,
+    data_interfaces: Extract<Res<data::DataInterfaces>>,
 ) {
     out.steps = clock.steps_this_frame;
     out.dt = clock.step;
+    out.pose_interval = data_interfaces.interval;
     out.effects.clear();
     for (entity, effect, transform) in &effects {
         let key = (entity, Arc::as_ptr(&effect.system) as usize);
@@ -497,12 +526,22 @@ fn extract_effects(
                 }
             }
         }
+        let (data, data_pending) = match data_interfaces.frame.get(&entity) {
+            Some(d) => (d.values.clone(), d.pending),
+            // Not seen by the main world yet (spawned this frame).
+            None => (
+                Vec::new(),
+                effect.system.data_interfaces.iter().any(|d| d.ty.has_asset() && d.asset.is_some()),
+            ),
+        };
         out.effects.push(ExtractedEffect {
             main: entity,
             system: effect.system.clone(),
             seed: effect.seed,
             world_from_local: transform.to_matrix(),
             assets,
+            data,
+            data_pending,
         });
     }
     if cache.0.len() > out.effects.len() {
@@ -738,6 +777,8 @@ struct EffectInstance {
     depth_generation: u64,
     draws: Vec<RendererDraw>,
     world_from_local: Mat4,
+    /// Data interface name → the data uploaded to `gpu` (held, so its address stays unique).
+    uploaded: HashMap<String, Arc<dyn std::any::Any + Send + Sync>>,
     seen: u64,
 }
 
@@ -976,6 +1017,7 @@ fn prepare_effects(
                     depth_generation: u64::MAX,
                     draws,
                     world_from_local: ex.world_from_local,
+                    uploaded: HashMap::default(),
                     seen: frame,
                 },
             );
@@ -983,6 +1025,30 @@ fn prepare_effects(
         let inst = state.effects.get_mut(&ex.main).unwrap();
         inst.seen = frame;
         inst.world_from_local = ex.world_from_local;
+
+        // Data interfaces: upload new data, move meshes to this frame's pose.
+        for (name, value) in &ex.data {
+            match value {
+                data::DiValue::Mesh { data, pose } => {
+                    let ptr = Arc::as_ptr(data);
+                    if !inst.uploaded.get(name).is_some_and(|u| std::ptr::addr_eq(Arc::as_ptr(u), ptr)) {
+                        let still = fx_core::data::MeshPose::still(pose.clone());
+                        inst.gpu.set_mesh(wd, name, data, still);
+                        inst.uploaded.insert(name.clone(), data.clone());
+                    } else {
+                        inst.gpu
+                            .set_mesh_pose(&queue, name, pose, extracted.pose_interval);
+                    }
+                }
+                data::DiValue::Texture(t) => {
+                    let ptr = Arc::as_ptr(t);
+                    if !inst.uploaded.get(name).is_some_and(|u| std::ptr::addr_eq(Arc::as_ptr(u), ptr)) {
+                        inst.gpu.set_texture(wd, name, t);
+                        inst.uploaded.insert(name.clone(), t.clone());
+                    }
+                }
+            }
+        }
 
         for rd in &mut inst.draws {
             let em = &inst.gpu.emitters[rd.emitter];
@@ -1247,7 +1313,7 @@ fn queue_particles(
     let mut all_ready = extracted
         .effects
         .iter()
-        .all(|e| state.effects.contains_key(&e.main));
+        .all(|e| state.effects.contains_key(&e.main) && !e.data_pending);
     for view in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue;

@@ -16,10 +16,6 @@
         max_particles: 60000,
         emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(20000.0) })],
         particle_spawn: [
-            (module: "Initialize Particle", inputs: {
-                "Lifetime": RandomRange(Float(1.5), Float(2.5)),
-                "Sprite Size": Vec2((0.05, 0.05)),
-            }),
             // A 4 x 4 m sheet standing in the XY plane, 0.5 m above the ground.
             (module: "Shape Location", inputs: {
                 "Shape Primitive": Box, "Box Size": Vec3((4.0, 4.0, 0.0)), "Offset": Vec3((0.0, 2.5, 0.0)),
@@ -32,6 +28,14 @@
                     "Y": Dynamic("Divide Float", { "A": Dynamic("Subtract Float", { "A": Float(4.5), "B": Dynamic("Break Vec3", { "Value": Link(Vec3, "Particles.Position"), "Component": Int(1) }) }), "B": Float(4.0) }),
                 }),
                 "Color Scale": Color((1.5, 1.5, 1.5, 1.0)),
+            }),
+            // After the sample, keeping the position and the sampled colour:
+            // Initial.Color is what Scale Color fades below.
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": RandomRange(Float(1.5), Float(2.5)),
+                "Position": Link(Vec3, "Particles.Position"),
+                "Color": Link(Color, "Particles.Color"),
+                "Sprite Size": Vec2((0.05, 0.05)),
             }),
             (module: "Add Velocity", inputs: {
                 "Velocity": Dynamic("Multiply Vec3 by Float", {

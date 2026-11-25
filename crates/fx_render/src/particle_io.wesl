@@ -83,6 +83,30 @@ fn particle_dynamic_param(i: u32) -> vec4<f32> {
     return vec4<f32>(pw(40u, i), pw(41u, i), pw(42u, i), pw(43u, i));
 }
 
+// Particles.CameraOffset (word 49; 0 when the emitter never sets it).
+fn particle_camera_offset(i: u32) -> f32 {
+    if (fx.extended == 0u) {
+        return 0.0;
+    }
+    return pw(49u, i);
+}
+
+// World-space particle centre `center` moved Particles.CameraOffset metres
+// towards the camera (Niagara's Camera Offset: drawn in front, simulated
+// where it is).
+fn camera_offset(center: vec3<f32>, i: u32) -> vec3<f32> {
+    let d = particle_camera_offset(i);
+    if (d == 0.0) {
+        return center;
+    }
+    let to_camera = view.world_position - center;
+    let l = length(to_camera);
+    if (l < 1e-6) {
+        return center;
+    }
+    return center + to_camera * (d / l);
+}
+
 // Fills the flipbook fields of `out` for normalized age `nage` and quad UV `uv`.
 fn set_sub_uv(out: ptr<function, FxVertexOutput>, nage: f32, uv: vec2<f32>) {
     let f = flipbook(nage, uv, fx.sub_image, fx.sub_uv_blending != 0u);

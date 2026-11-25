@@ -5,7 +5,7 @@
 import bevy_pbr::render::mesh_view_bindings::view;
 import fx_render::particle_io::{
     FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sub_uv,
-    safe_normalize, sample_particle_texture, scene_light, finish,
+    safe_normalize, sample_particle_texture, scene_light, finish, camera_offset,
 };
 
 // 8 floats per vertex: position, normal, uv.
@@ -40,7 +40,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
 
     let scale = vec3<f32>(pw(28u, i), pw(29u, i), pw(30u, i));
     let q = vec4<f32>(pw(31u, i), pw(32u, i), pw(33u, i), pw(34u, i));
-    let center = (m * vec4<f32>(pw(0u, i), pw(1u, i), pw(2u, i), 1.0)).xyz;
+    let center = camera_offset((m * vec4<f32>(pw(0u, i), pw(1u, i), pw(2u, i), 1.0)).xyz, i);
     var offset = rotate(q, p * scale);
     // Normals transform by the inverse scale.
     var normal = rotate(q, nrm / select(scale, vec3<f32>(1.0), scale == vec3<f32>(0.0)));

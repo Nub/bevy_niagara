@@ -499,6 +499,7 @@ fn apply_effect(
                     system: sys,
                     seed: v.seed,
                     meshes: Vec::new(),
+                    bindings: Vec::new(),
                 },
                 Transform::IDENTITY,
             ))

@@ -1,6 +1,7 @@
 // Skeletal mesh: embers stream off the surface of an animated character
 // (Niagara's Skeletal Mesh Location on a Skeletal Mesh data interface).
-// "User.Character" defaults to the glTF fox in models/ (about 80 units tall:
+// "User.Character" defaults to the glTF fox in models/, playing its run
+// clip (`#Animation2`; without a label the first clip plays) (about 80 units tall:
 // the fox is modelled in centimetre-like units, so sizes and speeds here are
 // in the same units); a game binds its own skinned entity instead
 // (fx_render: `ParticleEffect::bind_entity("User.Character", entity)`).
@@ -9,7 +10,7 @@
 (
     name: "Skeletal Mesh",
     user_parameters: {
-        "User.Character": SkeletalMesh("models/Fox.glb"),
+        "User.Character": SkeletalMesh("models/Fox.glb#Animation2"),
     },
     emitters: [
         (
