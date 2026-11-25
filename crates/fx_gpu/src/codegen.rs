@@ -1205,6 +1205,11 @@ pub fn emitter_shader(
         g.helpers, g.out
     )
     .unwrap();
+    // The instance's part of the batch's state and event buffers (see `Frame` in sim_common.wgsl).
+    let source = source
+        .replace("&state[", "&state[fr.state_base + ")
+        .replace("&event_counts[", "&event_counts[fr.ev_count_base + ")
+        .replace("event_data[", "event_data[fr.ev_data_base + ");
     EmitterShader {
         source,
         extended,
@@ -1416,7 +1421,7 @@ fn stage_kernels(g: &mut Gen, ei: usize) -> (String, Vec<StageKernel>) {
         let saved = std::mem::take(&mut g.out);
         match stage.grid {
             None => {
-                writeln!(src, "\n// simulation stage \"{}\" over the particles\n@compute @workgroup_size(WG)\nfn {entry}(@builtin(global_invocation_id) gid: vec3<u32>) {{\n    let i = gid.x;\n    if (i >= atomicLoad(&state[S_COUNT])) {{\n        return;\n    }}", stage.name).unwrap();
+                writeln!(src, "\n// simulation stage \"{}\" over the particles\n@compute @workgroup_size(WG)\nfn {entry}(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{\n    load_frame(wid.y);\n    let i = gid.x;\n    if (i >= atomicLoad(&state[S_COUNT])) {{\n        return;\n    }}", stage.name).unwrap();
                 src.push_str(&grid_halves(grids, &per_step, &done, None));
                 src.push_str("    read_dst = true;\n    var particle = load_particle(i);\n    let p = &particle;\n");
                 for (mi, m) in stage.modules.iter().enumerate() {
@@ -1433,7 +1438,7 @@ fn stage_kernels(g: &mut Gen, ei: usize) -> (String, Vec<StageKernel>) {
                 let wg = if gr.dims == 2 { [8u32, 8, 1] } else { [4, 4, 4] };
                 let groups: [u32; 3] = std::array::from_fn(|a| gr.cells[a].div_ceil(wg[a]));
                 let (iv, sw) = if gr.dims == 2 { ("vec2<i32>", "xy") } else { ("vec3<i32>", "xyz") };
-                writeln!(src, "\n// simulation stage \"{}\" over grid \"{n}\"\n@compute @workgroup_size({}, {}, {})\nfn {entry}(@builtin(global_invocation_id) gid: vec3<u32>) {{\n    if (gid.x >= {}u || gid.y >= {}u || gid.z >= {}u) {{\n        return;\n    }}", stage.name, wg[0], wg[1], wg[2], gr.cells[0], gr.cells[1], gr.cells[2]).unwrap();
+                writeln!(src, "\n// simulation stage \"{}\" over grid \"{n}\"\n@compute @workgroup_size({}, {}, {})\nfn {entry}(@builtin(global_invocation_id) gid0: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{\n    // Instances are stacked along z, {} workgroups each.\n    let inst = wid.z / {}u;\n    load_frame(inst);\n    let gid = vec3<u32>(gid0.x, gid0.y, gid0.z - inst * {}u);\n    if (gid.x >= {}u || gid.y >= {}u || gid.z >= {}u) {{\n        return;\n    }}", stage.name, wg[0], wg[1], wg[2], groups[2], groups[2], groups[2] * wg[2], gr.cells[0], gr.cells[1], gr.cells[2]).unwrap();
                 src.push_str(&grid_halves(grids, &per_step, &done, Some(gi)));
                 writeln!(src, "    let cell = {iv}(gid.{sw});\n    let cellpos = {n}_cell_position(cell);\n    let ci = {n}_index(cell);\n    var particle = new_particle(ci);\n    let p = &particle;").unwrap();
                 for (ai, a) in gr.attributes.iter().enumerate() {

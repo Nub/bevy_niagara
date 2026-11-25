@@ -15,7 +15,8 @@ struct Scene {
     forward: vec4<f32>,   // camera view direction (simulation space), (0, 0, -1) without a view
 }
 
-@group(2) @binding(0) var<uniform> scene: Scene;
+// One Scene per instance slot.
+@group(2) @binding(0) var<storage, read> scenes: array<Scene>;
 @group(2) @binding(1) var scene_depth: texture_2d<f32>;
 
 struct Contact {
@@ -30,7 +31,7 @@ fn no_contact() -> Contact {
 
 // The scene point seen at pixel `px` (w = 0 off-screen or sky).
 fn scene_point(px: vec2<i32>) -> vec4<f32> {
-    let dims = vec2<i32>(scene.size);
+    let dims = vec2<i32>(scenes[fr.slot].size);
     if (any(px < vec2<i32>(0)) || any(px >= dims)) {
         return vec4<f32>(0.0);
     }
@@ -38,15 +39,15 @@ fn scene_point(px: vec2<i32>) -> vec4<f32> {
     if (!(z > 0.0)) {
         return vec4<f32>(0.0);
     }
-    let uv = (vec2<f32>(px) + 0.5) / scene.size;
-    let h = scene.local_from_clip * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
+    let uv = (vec2<f32>(px) + 0.5) / scenes[fr.slot].size;
+    let h = scenes[fr.slot].local_from_clip * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
     return vec4<f32>(h.xyz / h.w, 1.0);
 }
 
 // Tangent at `s` from its neighbours `a` (before) and `b` (after), using the
 // one closer in depth so edges do not bend the normal.
 fn scene_tangent(s: vec3<f32>, a: vec4<f32>, b: vec4<f32>) -> vec3<f32> {
-    let cam = scene.camera.xyz;
+    let cam = scenes[fr.slot].camera.xyz;
     let ds = length(s - cam);
     let da = select(1e30, abs(length(a.xyz - cam) - ds), a.w > 0.0);
     let db = select(1e30, abs(length(b.xyz - cam) - ds), b.w > 0.0);
@@ -62,10 +63,10 @@ fn scene_tangent(s: vec3<f32>, a: vec4<f32>, b: vec4<f32>) -> vec3<f32> {
 // The surface plane a particle at `pos` is pushed out through, if it is
 // behind the depth buffer (by at most `thickness` metres).
 fn scene_depth_contact(pos: vec3<f32>, radius: f32, thickness: f32) -> Contact {
-    if ((scene.flags & 1u) == 0u) {
+    if ((scenes[fr.slot].flags & 1u) == 0u) {
         return no_contact();
     }
-    let clip = scene.clip_from_local * vec4<f32>(pos, 1.0);
+    let clip = scenes[fr.slot].clip_from_local * vec4<f32>(pos, 1.0);
     if (!(clip.w > 0.0)) {
         return no_contact();
     }
@@ -73,12 +74,12 @@ fn scene_depth_contact(pos: vec3<f32>, radius: f32, thickness: f32) -> Contact {
     if (any(abs(ndc) >= vec2<f32>(1.0))) {
         return no_contact();
     }
-    let px = vec2<i32>(floor(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * scene.size));
+    let px = vec2<i32>(floor(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * scenes[fr.slot].size));
     let s = scene_point(px);
     if (s.w == 0.0) {
         return no_contact();
     }
-    let cam = scene.camera.xyz;
+    let cam = scenes[fr.slot].camera.xyz;
     let dp = length(pos - cam);
     let ds = length(s.xyz - cam);
     if (dp + radius < ds || dp > ds + thickness) {
@@ -101,21 +102,21 @@ fn scene_depth_contact(pos: vec3<f32>, radius: f32, thickness: f32) -> Contact {
 // ---- Camera Query and Scene Depth data interfaces ----
 
 fn scene_camera_position() -> vec3<f32> {
-    return scene.camera.xyz;
+    return scenes[fr.slot].camera.xyz;
 }
 
 fn scene_camera_forward() -> vec3<f32> {
-    return scene.forward.xyz;
+    return scenes[fr.slot].forward.xyz;
 }
 
 // Distance from the camera to the scene surface seen through `pos`
 // (fx_core::data::NO_SCENE_DEPTH where nothing is known).
 fn scene_depth_at(pos: vec3<f32>) -> f32 {
     let none = 1.0e30;
-    if ((scene.flags & 1u) == 0u) {
+    if ((scenes[fr.slot].flags & 1u) == 0u) {
         return none;
     }
-    let clip = scene.clip_from_local * vec4<f32>(pos, 1.0);
+    let clip = scenes[fr.slot].clip_from_local * vec4<f32>(pos, 1.0);
     if (!(clip.w > 0.0)) {
         return none;
     }
@@ -123,10 +124,10 @@ fn scene_depth_at(pos: vec3<f32>) -> f32 {
     if (any(abs(ndc) >= vec2<f32>(1.0))) {
         return none;
     }
-    let px = vec2<i32>(floor(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * scene.size));
+    let px = vec2<i32>(floor(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * scenes[fr.slot].size));
     let s = scene_point(px);
     if (s.w == 0.0) {
         return none;
     }
-    return length(s.xyz - scene.camera.xyz);
+    return length(s.xyz - scenes[fr.slot].camera.xyz);
 }

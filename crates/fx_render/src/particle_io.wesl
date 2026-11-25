@@ -37,6 +37,10 @@ struct FxRenderer {
     link_from_end: u32,         // ribbon: U starts at the last sorted particle (the newest)
     mesh_radius: f32,
     sub_image_from_index: u32,  // sprite: show Particles.SubImageIndex (SubUV Animation), not the flipbook over life
+    batched: u32,               // indices are batch references r * capacity + i (fx_gpu::view::BatchDraw)
+    region_words: u32,          // batched: words between particle copies
+    _pad0: u32,
+    _pad1: u32,
 }
 
 @group(1) @binding(0) var<uniform> fx: FxRenderer;
@@ -44,10 +48,25 @@ struct FxRenderer {
 @group(1) @binding(2) var<storage, read> indices: array<u32>;
 @group(1) @binding(3) var particle_texture: texture_2d<f32>;
 @group(1) @binding(4) var particle_sampler: sampler;
+// Batched draws: world_from_local of every batch slot.
+@group(1) @binding(8) var<storage, read> transforms: array<mat4x4<f32>>;
 
 // Word `w` of particle slot `i` (fx_gpu's structure-of-arrays layout).
 fn pw(w: u32, i: u32) -> f32 {
+    if (fx.batched != 0u) {
+        // Batch reference r * capacity + i: copy r of the batch buffer.
+        let r = i / fx.capacity;
+        return particles[r * fx.region_words + w * fx.capacity + (i - r * fx.capacity)];
+    }
     return particles[w * fx.capacity + i];
+}
+
+// The effect transform of particle `i` (per instance when batched).
+fn particle_world_from_local(i: u32) -> mat4x4<f32> {
+    if (fx.batched != 0u) {
+        return transforms[i / fx.capacity / 2u];
+    }
+    return fx.world_from_local;
 }
 
 // What every particle renderer passes to its fragment shader.

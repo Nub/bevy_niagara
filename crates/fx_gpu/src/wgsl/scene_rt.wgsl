@@ -26,9 +26,9 @@ fn scene_ray(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
 // within `radius` of `p_to`). The normal comes from two more rays beside the
 // first; without them, it faces back along the move.
 fn scene_ray_contact(p_from: vec3<f32>, p_to: vec3<f32>, radius: f32, _thickness: f32) -> Contact {
-    let a = (scene.world_from_local * vec4<f32>(p_from, 1.0)).xyz;
-    let b = (scene.world_from_local * vec4<f32>(p_to, 1.0)).xyz;
-    let scale = length(scene.world_from_local[0].xyz);
+    let a = (scenes[fr.slot].world_from_local * vec4<f32>(p_from, 1.0)).xyz;
+    let b = (scenes[fr.slot].world_from_local * vec4<f32>(p_to, 1.0)).xyz;
+    let scale = length(scenes[fr.slot].world_from_local[0].xyz);
     let d = b - a;
     let len = length(d);
     if (!(len > 0.0)) {
@@ -59,8 +59,8 @@ fn scene_ray_contact(p_from: vec3<f32>, p_to: vec3<f32>, radius: f32, _thickness
             }
         }
     }
-    let m = scene.world_from_local;
+    let m = scenes[fr.slot].world_from_local;
     let nl = transpose(mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz)) * n;
-    let o = (scene.local_from_world * vec4<f32>(p0, 1.0)).xyz;
+    let o = (scenes[fr.slot].local_from_world * vec4<f32>(p0, 1.0)).xyz;
     return Contact(true, unit_or_y(nl), o);
 }

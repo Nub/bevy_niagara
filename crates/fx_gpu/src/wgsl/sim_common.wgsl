@@ -27,15 +27,32 @@ struct Frame {
     looped_age: f32,            // Emitter.LoopedAge
     loop_count: u32,            // Emitter.LoopCount
     normalized_loop_age: f32,   // Emitter.NormalizedLoopAge
+    _pad: u32,
+    // Where this instance lives in the batch buffers (fx_gpu::GpuBatch), in words.
+    src_base: u32,              // particles read (the current copy)
+    dst_base: u32,              // particles written (the other copy)
+    state_base: u32,
+    ev_count_base: u32,
+    ev_data_base: u32,
+    grid_base: u32,
+    slot: u32,                  // instance slot (scene, transforms)
+    n_active: u32,              // instances stepped by this dispatch
 }
 
-@group(0) @binding(0) var<uniform> fr: Frame;
-@group(0) @binding(1) var<storage, read> src: array<f32>;
-@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+// One Frame per instance stepped (dynamic offset per step); `fr` is this
+// invocation's, loaded by `load_frame` at the start of every kernel.
+@group(0) @binding(0) var<storage, read> frames: array<Frame>;
+var<private> fr: Frame;
+// Every instance's particles: two copies per slot, each `region` words (see fx_gpu::GpuBatch).
+@group(0) @binding(1) var<storage, read_write> parts: array<f32>;
+
+fn load_frame(j: u32) {
+    fr = frames[j];
+}
 @group(0) @binding(3) var<storage, read_write> state: array<atomic<u32>>;
 // Indirect dispatch args: update at words 0..3, spawn at 4..7. Bound only to the
 // kernels that write them, never to the indirect dispatches that read them.
-@group(1) @binding(0) var<storage, read_write> args: array<u32>;
+@group(1) @binding(0) var<storage, read_write> args: array<atomic<u32>>;
 // Events of the whole effect: one counter per (emitter, kind) region, and each
 // region's events (EVENT_WORDS each) and sorted order (see fx_gpu::events).
 @group(0) @binding(4) var<storage, read_write> event_counts: array<atomic<u32>>;
@@ -50,11 +67,11 @@ struct Iteration {
 @group(0) @binding(7) var<uniform> it: Iteration;
 
 fn grid_ld(w: u32) -> f32 {
-    return grid[w];
+    return grid[fr.grid_base + w];
 }
 
 fn grid_st(w: u32, v: f32) {
-    grid[w] = v;
+    grid[fr.grid_base + w] = v;
 }
 
 // ---- random numbers (fx_core::sim::rng; pcg and to_unit are in fx_core's lib.wgsl) ----
@@ -171,9 +188,9 @@ var<private> read_dst: bool;
 
 fn ld(w: u32, i: u32) -> f32 {
     if (read_dst) {
-        return dst[w * fr.capacity + i];
+        return parts[fr.dst_base + w * fr.capacity + i];
     }
-    return src[w * fr.capacity + i];
+    return parts[fr.src_base + w * fr.capacity + i];
 }
 
 fn load_particle(i: u32) -> Particle {
@@ -215,7 +232,7 @@ fn load_particle(i: u32) -> Particle {
 }
 
 fn st(w: u32, i: u32, v: f32) {
-    dst[w * fr.capacity + i] = v;
+    parts[fr.dst_base + w * fr.capacity + i] = v;
 }
 
 fn store_particle(i: u32, p: Particle) {
@@ -263,19 +280,36 @@ fn groups(n: u32) -> u32 {
 }
 
 // ---- the step: begin → update (indirect) → spawn_prep → spawn (indirect) → finish ----
+//
+// Every instance of a batch steps in the same dispatches: the single-thread
+// kernels run one thread per instance and raise the indirect arguments to
+// the largest instance's (x) times the instances (y); the per-particle
+// kernels take their instance from workgroup_id.y. The host clears `args`
+// before `begin`.
 
-@compute @workgroup_size(1)
-fn begin() {
+const WG_INST: u32 = 64u;
+
+fn raise_args(at: u32, x: u32) {
+    atomicMax(&args[at], x);
+    atomicStore(&args[at + 1u], fr.n_active);
+    atomicStore(&args[at + 2u], 1u);
+}
+
+@compute @workgroup_size(WG_INST)
+fn begin(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= frames[0].n_active) {
+        return;
+    }
+    load_frame(gid.x);
     let n = atomicLoad(&state[S_COUNT]);
-    args[0] = groups(n);
-    args[1] = 1u;
-    args[2] = 1u;
+    raise_args(0u, groups(n));
     atomicStore(&state[S_NEW], 0u);
     reset_events();
 }
 
 @compute @workgroup_size(WG)
-fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn update(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    load_frame(wid.y);
     let i = gid.x;
     if (i >= atomicLoad(&state[S_COUNT])) {
         return;
@@ -291,8 +325,12 @@ fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-@compute @workgroup_size(1)
-fn spawn_prep() {
+@compute @workgroup_size(WG_INST)
+fn spawn_prep(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= frames[0].n_active) {
+        return;
+    }
+    load_frame(gid.x);
     let alive = atomicLoad(&state[S_NEW]);
     let room = fr.capacity - min(alive, fr.capacity);
     let n = spawn_counts(room);
@@ -300,16 +338,13 @@ fn spawn_prep() {
     atomicStore(&state[S_BASE_ID], base);
     atomicStore(&state[S_NEXT_ID], base + n);
     atomicStore(&state[S_SPAWN_N], n);
-    args[4] = groups(n);
-    args[5] = 1u;
-    args[6] = 1u;
-    args[8] = groups(max_event_count());
-    args[9] = 1u;
-    args[10] = 1u;
+    raise_args(4u, groups(n));
+    raise_args(8u, groups(max_event_count()));
 }
 
 @compute @workgroup_size(WG)
-fn spawn(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn spawn(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    load_frame(wid.y);
     let k = gid.x;
     if (k >= atomicLoad(&state[S_SPAWN_N])) {
         return;
@@ -325,18 +360,21 @@ fn spawn(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // Sorts this emitter's events by source UniqueID (after update, before spawn).
 @compute @workgroup_size(WG)
-fn event_rank(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+fn event_rank(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wid: vec3<u32>) {
+    load_frame(wid.y);
     rank_events(gid.x, lid);
 }
 
-@compute @workgroup_size(1)
-fn finish() {
+@compute @workgroup_size(WG_INST)
+fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= frames[0].n_active) {
+        return;
+    }
+    load_frame(gid.x);
     let n = atomicLoad(&state[S_NEW]);
     atomicStore(&state[S_COUNT], n);
     // Particle simulation stages run over the living particles.
-    args[12] = groups(n);
-    args[13] = 1u;
-    args[14] = 1u;
+    raise_args(12u, groups(n));
 }
 
 // ---- collisions (fx_core::sim::collide_plane) ----

@@ -435,7 +435,8 @@ fn extract_proxies(
 }
 
 struct ProxyGpu {
-    particles: wgpu::Buffer,
+    /// The instance's first particle copy in its batch (a new instance rebuilds the proxy).
+    particles: fx_gpu::Region,
     /// Sprites: every living particle, compacted. Ribbons use fx_render's sort.
     draw: Option<ViewDraw>,
     uniform: wgpu::Buffer,
@@ -709,7 +710,7 @@ fn write_proxies(
                     layout: &layout,
                     entries: &[
                         buffer(0, &entry.uniform),
-                        buffer(1, &em.particles[em.current]),
+                        wgpu::BindGroupEntry { binding: 1, resource: em.particles[em.current].binding() },
                         buffer(2, &draw.indices),
                         buffer(3, &draw.draw_args),
                         buffer(4, &slice.buffer),
@@ -750,7 +751,7 @@ fn write_proxies(
                     layout: &ribbon_layout,
                     entries: &[
                         buffer(0, &entry.uniform),
-                        buffer(1, &em.particles[em.current]),
+                        wgpu::BindGroupEntry { binding: 1, resource: em.particles[em.current].binding() },
                         buffer(2, rb.indices),
                         buffer(3, rb.dist),
                         buffer(4, rb.ribbons),

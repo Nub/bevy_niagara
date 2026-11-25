@@ -137,7 +137,7 @@ impl LightGather {
         let bind_group = |s: usize| {
             let resources = [
                 params.as_entire_binding(),
-                emitter.particles[s].as_entire_binding(),
+                emitter.particles[s].binding(),
                 draw.indices.as_entire_binding(),
                 draw.draw_args.as_entire_binding(),
                 out.as_entire_binding(),

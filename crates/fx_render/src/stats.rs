@@ -118,7 +118,7 @@ fn copy_counts(
             gpu_bytes: inst.gpu.gpu_bytes(),
         };
         for em in &inst.gpu.emitters {
-            encoder.copy_buffer_to_buffer(&em.state, fx_gpu::STATE_COUNT * 4, buffer, off, 4);
+            encoder.copy_buffer_to_buffer(&em.state.buffer, em.state.offset + fx_gpu::STATE_COUNT * 4, buffer, off, 4);
             off += 4;
             es.emitters.push(EmitterStats {
                 name: em.name.clone(),

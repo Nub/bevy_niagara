@@ -88,7 +88,7 @@ fn smoke_grid(gpu: &GpuEffect, device: &wgpu::Device, queue: &wgpu::Queue) -> (V
     let g = &gpu.system.emitters[0].grids[0];
     let per_step: u32 = gpu.system.emitters[0].stages.iter().map(|s| s.iterations).sum();
     let half = ((gpu.frame * per_step) & 1) as u64;
-    let bytes = fx_gpu::read_buffer(device, queue, &gpu.emitters[0].grids, half * g.half_words() as u64 * 4, g.half_words() as u64 * 4);
+    let bytes = fx_gpu::read_buffer(device, queue, &gpu.emitters[0].grids.buffer, gpu.emitters[0].grids.offset + half * g.half_words() as u64 * 4, g.half_words() as u64 * 4);
     (bytemuck::cast_slice(&bytes).to_vec(), g.cell_count())
 }
 

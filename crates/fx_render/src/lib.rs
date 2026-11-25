@@ -84,10 +84,10 @@ use fx_core::render::{
     BlendMode, FacingMode, MeshBlendMode, MeshFacingMode, RibbonFacingMode, RibbonLinkOrderMode,
     RibbonUvMode, SortMode, SpriteAlignment,
 };
-use fx_gpu::GpuEffect;
+use fx_gpu::{GpuBatch, GpuEffect};
 use fx_gpu::lights::{GpuLight, LightGather, LightPipelines};
 use fx_gpu::ribbon::{RibbonBuild, RibbonPipelines};
-use fx_gpu::view::{CullRadius, ViewDraw, ViewDrawConfig, ViewParams, ViewPipelines};
+use fx_gpu::view::{BatchDraw, CullRadius, ViewDraw, ViewDrawConfig, ViewParams, ViewPipelines};
 use fx_gpu::wgpu;
 
 /// A particle system instance. Its particles are simulated in the entity's
@@ -815,7 +815,7 @@ impl SpecializedRenderPipeline for ParticlePipeline {
 }
 
 /// The `FxRenderer` uniform of `particle_io.wesl`.
-const UNIFORM_BYTES: usize = 40 * 4;
+const UNIFORM_BYTES: usize = 44 * 4;
 
 // ---------------------------------------------------------------- GPU state
 
@@ -827,7 +827,6 @@ struct ViewState {
     draw_args: Buffer,
     /// Bind groups use the loaded texture (not the built-in fallback).
     uses_loaded_texture: bool,
-    seen: u64,
 }
 
 struct RibbonState {
@@ -848,16 +847,37 @@ enum Settings {
     Light(CookedLight),
 }
 
+/// A renderer of one instance: ribbons and lights (per instance, reading the
+/// instance's part of its batch). Sprites and meshes draw per batch
+/// ([`BatchRendererDraw`]); their entries here hold only the settings.
 struct RendererDraw {
     emitter: usize,
     settings: Settings,
     uniform: wgpu::Buffer,
     assets: RendererAssets,
-    /// Sprites and meshes: per view.
-    views: HashMap<RetainedViewEntity, ViewState>,
     ribbon: Option<RibbonState>,
     light: Option<LightState>,
     scratch: [u8; UNIFORM_BYTES],
+}
+
+/// A sprite or mesh renderer of every instance of a batch.
+struct BatchRendererDraw {
+    /// Index among the system's renderers.
+    renderer: usize,
+    emitter: usize,
+    settings: Settings,
+    uniform: wgpu::Buffer,
+    views: HashMap<RetainedViewEntity, BatchViewState>,
+    scratch: [u8; UNIFORM_BYTES],
+}
+
+/// A batch renderer seen from one view: one cull and sort, one draw.
+struct BatchViewState {
+    draw: BatchDraw,
+    bind_group: BindGroup,
+    draw_args: Buffer,
+    uses_loaded_texture: bool,
+    seen: u64,
 }
 
 struct GpuMesh {
@@ -867,17 +887,50 @@ struct GpuMesh {
     radius: f32,
 }
 
+/// What instances must share to be simulated and drawn together: the
+/// program, the renderers' assets, and (for systems with data interfaces,
+/// which bind per batch) the instance itself.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct BatchKey {
+    /// (system pointer, ray tracing): the program.
+    program: (usize, bool),
+    /// The renderer assets (`RendererAssetsCache` entry pointer).
+    assets: usize,
+    /// Systems with data interfaces get a batch per instance.
+    exclusive: bool,
+}
+
+/// Instances of one [`BatchKey`] simulated and drawn together.
+struct Batch {
+    key: BatchKey,
+    gpu: GpuBatch,
+    /// `world_from_local` of every slot (`array<mat4x4<f32>>`).
+    transforms: wgpu::Buffer,
+    transform_bytes: Vec<u8>,
+    assets: Arc<Vec<RendererAssets>>,
+    draws: Vec<BatchRendererDraw>,
+    /// Instances simulated and drawn this frame (not paused).
+    members: Vec<Entity>,
+    /// Per emitter: the particle copy (2 * slot + current) of each member, after the steps.
+    copies: Vec<Vec<u32>>,
+    /// Slots held by instances (live or pooled).
+    used: u32,
+    /// [`FxSceneDepth::generation`] the scene bind group was made for.
+    depth_generation: u64,
+    /// Mean member position, for sorting against other transparents.
+    center: Vec3,
+}
+
 struct EffectInstance {
     system: Arc<CookedSystem>,
     seed: u32,
     gpu: GpuEffect,
-    /// Built with the ray-tracing scene layout.
-    ray_tracing: bool,
-    /// [`FxSceneDepth::generation`] the scene bind group was made for.
-    depth_generation: u64,
+    /// Index of its batch in [`FxState::batches`].
+    batch: usize,
+    key: BatchKey,
     draws: Vec<RendererDraw>,
     world_from_local: Mat4,
-    /// Data interface name → the data uploaded to `gpu` (held, so its address stays unique).
+    /// Data interface name → the data uploaded to its batch (held, so its address stays unique).
     uploaded: HashMap<String, Arc<dyn std::any::Any + Send + Sync>>,
     seen: u64,
     /// [`EffectControl`] generation it last ran.
@@ -898,6 +951,8 @@ pub struct FxState {
     ribbon_pipelines: RibbonPipelines,
     light_pipelines: LightPipelines,
     effects: HashMap<Entity, EffectInstance>,
+    /// Batches by index (`None`: dropped).
+    batches: Vec<Option<Batch>>,
     builtin: textures::Builtin,
     meshes: HashMap<AssetId<Mesh>, GpuMesh>,
     /// Bound where a renderer has no buffer of its own.
@@ -905,8 +960,8 @@ pub struct FxState {
     frame: u64,
     /// Compiled systems by (system pointer, ray tracing).
     programs: HashMap<(usize, bool), Arc<fx_gpu::GpuProgram>>,
-    /// Idle instances by program key, ready for reuse.
-    pool: HashMap<(usize, bool), Vec<EffectInstance>>,
+    /// Idle instances by batch key, ready for reuse (they keep their slots).
+    pool: HashMap<BatchKey, Vec<EffectInstance>>,
     /// Scratch list of entities gone this frame.
     gone: Vec<Entity>,
     /// Pool counters changed this frame.
@@ -938,6 +993,7 @@ fn init_render(
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -954,11 +1010,12 @@ fn init_render(
         ribbon_pipelines: RibbonPipelines::new(wd),
         light_pipelines: LightPipelines::new(wd),
         effects: HashMap::default(),
+        batches: Vec::new(),
         builtin: textures::Builtin::new(wd),
         meshes: HashMap::default(),
         dummy: wd.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fx dummy storage"),
-            size: 16,
+            size: 64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         }),
@@ -1005,8 +1062,25 @@ fn particle_bind_groups(
     indices: &wgpu::Buffer,
     texture: (&wgpu::TextureView, &wgpu::Sampler),
     extra: [&wgpu::Buffer; 3],
+    transforms: &wgpu::Buffer,
 ) -> [BindGroup; 2] {
-    let bg = |s: usize| {
+    let bg = |s: usize| particle_bind_group(wd, layout, uniform, &em.particles[s], indices, texture, extra, transforms);
+    [bg(0), bg(1)]
+}
+
+/// A group 1 bind group reading `particles`.
+#[allow(clippy::too_many_arguments)]
+fn particle_bind_group(
+    wd: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    particles: &fx_gpu::Region,
+    indices: &wgpu::Buffer,
+    texture: (&wgpu::TextureView, &wgpu::Sampler),
+    extra: [&wgpu::Buffer; 3],
+    transforms: &wgpu::Buffer,
+) -> BindGroup {
+    {
         BindGroup::from(wd.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fx particles"),
             layout,
@@ -1017,7 +1091,7 @@ fn particle_bind_groups(
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: em.particles[s].as_entire_binding(),
+                    resource: particles.binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1043,10 +1117,13 @@ fn particle_bind_groups(
                     binding: 7,
                     resource: extra[2].as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: transforms.as_entire_binding(),
+                },
             ],
         }))
-    };
-    [bg(0), bg(1)]
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1093,14 +1170,20 @@ fn prepare_effects(
         );
     }
 
+    for b in state.batches.iter_mut().flatten() {
+        b.members.clear();
+    }
     let ray_tracing = rt.layout.is_some();
     for ex in &extracted.effects {
-        let key = (Arc::as_ptr(&ex.system) as usize, ray_tracing);
-        state.used.insert(key, frame);
-        // Another system (hot reload) or scene layout: back to the pool, take a fitting one.
-        if state.effects.get(&ex.main).is_some_and(|inst| {
-            !Arc::ptr_eq(&inst.system, &ex.system) || inst.ray_tracing != ray_tracing
-        }) {
+        let program_key = (Arc::as_ptr(&ex.system) as usize, ray_tracing);
+        let key = BatchKey {
+            program: program_key,
+            assets: Arc::as_ptr(&ex.assets) as usize,
+            exclusive: !ex.system.data_interfaces.is_empty(),
+        };
+        state.used.insert(program_key, frame);
+        // Another system (hot reload), scene layout or renderer assets: back to the pool, take a fitting one.
+        if state.effects.get(&ex.main).is_some_and(|inst| inst.key != key) {
             let inst = state.effects.remove(&ex.main).unwrap();
             state.release(inst);
         }
@@ -1112,23 +1195,11 @@ fn prepare_effects(
                     inst.seed = ex.seed;
                     inst.generation = ex.generation;
                     inst.draining = false;
-                    for (i, rd) in inst.draws.iter_mut().enumerate() {
-                        let a = ex.assets.get(i).cloned().unwrap_or_default();
-                        if a.mesh != rd.assets.mesh
-                            || a.texture != rd.assets.texture
-                            || a.material != rd.assets.material
-                        {
-                            rd.views.clear();
-                            rd.ribbon = None;
-                            rd.light = None;
-                            rd.assets = a;
-                        }
-                    }
                     state.stats_reused += 1;
                     inst
                 }
                 None => {
-                    let program = match state.programs.get(&key) {
+                    let program = match state.programs.get(&program_key) {
                         Some(p) => p.clone(),
                         None => {
                             let options = fx_gpu::GpuOptions {
@@ -1137,7 +1208,7 @@ fn prepare_effects(
                             match fx_gpu::GpuProgram::new(wd, ex.system.clone(), options) {
                                 Ok(p) => {
                                     let p = Arc::new(p);
-                                    state.programs.insert(key, p.clone());
+                                    state.programs.insert(program_key, p.clone());
                                     state.stats_programs += 1;
                                     p
                                 }
@@ -1152,7 +1223,11 @@ fn prepare_effects(
                         }
                     };
                     state.stats_created += 1;
-                    new_instance(wd, &program, ex, ray_tracing, frame)
+                    let batch = state.batch_with_room(wd, &program, key, ex);
+                    let b = state.batches[batch].as_mut().unwrap();
+                    let gpu = b.gpu.alloc(ex.seed).expect("batch_with_room has a free slot");
+                    b.used += 1;
+                    new_instance(wd, gpu, batch, key, ex, frame)
                 }
             };
             state.effects.insert(ex.main, inst);
@@ -1179,116 +1254,52 @@ fn prepare_effects(
             inst.draining = true;
             inst.drain_steps = 0;
         }
+        let batch = state.batches[inst.batch].as_mut().unwrap();
+        if !inst.paused {
+            batch.members.push(ex.main);
+        }
+        let at = inst.gpu.slot as usize * 64;
+        for (k, x) in inst.world_from_local.to_cols_array().iter().enumerate() {
+            batch.transform_bytes[at + k * 4..at + k * 4 + 4].copy_from_slice(&x.to_le_bytes());
+        }
 
-        // Data interfaces: upload new data, move meshes to this frame's pose.
+        // Data interfaces (bound per batch; such systems have a batch per instance):
+        // upload new data, move meshes to this frame's pose.
         for (name, value) in &ex.data {
             match value {
                 data::DiValue::Mesh { data, pose } => {
                     let ptr = Arc::as_ptr(data);
                     if !inst.uploaded.get(name).is_some_and(|u| std::ptr::addr_eq(Arc::as_ptr(u), ptr)) {
                         let still = fx_core::data::MeshPose::still(pose.clone());
-                        inst.gpu.set_mesh(wd, name, data, still);
+                        batch.gpu.set_mesh(wd, name, data, still);
                         inst.uploaded.insert(name.clone(), data.clone());
                     } else {
-                        inst.gpu
+                        batch
+                            .gpu
                             .set_mesh_pose(&queue, name, pose, extracted.pose_interval);
                     }
                 }
                 data::DiValue::Texture(t) => {
                     let ptr = Arc::as_ptr(t);
                     if !inst.uploaded.get(name).is_some_and(|u| std::ptr::addr_eq(Arc::as_ptr(u), ptr)) {
-                        inst.gpu.set_texture(wd, name, t);
+                        batch.gpu.set_texture(wd, name, t);
                         inst.uploaded.insert(name.clone(), t.clone());
                     }
                 }
             }
         }
 
+        // Ribbons and lights: per instance.
         for rd in &mut inst.draws {
+            if !matches!(rd.settings, Settings::Ribbon(_) | Settings::Light(_)) {
+                continue;
+            }
             let em = &inst.gpu.emitters[rd.emitter];
-            let mesh = rd
-                .assets
-                .mesh
-                .as_ref()
-                .and_then(|h| state.meshes.get(&h.id()));
             let sub_index = inst.gpu.system.emitters[rd.emitter].sets_sub_image_index();
-            write_uniform(
-                rd,
-                em,
-                &inst.world_from_local,
-                mesh.map_or(1.0, |m| m.radius),
-                sub_index,
-            );
+            write_uniform(&rd.settings, &mut rd.scratch, &inst.world_from_local, em.capacity, em.words > fx_gpu::WORDS_PER_PARTICLE, 1.0, sub_index, None);
             queue.write_buffer(&rd.uniform, 0, &rd.scratch);
             let loaded = rd.assets.texture.as_ref().and_then(|h| images.get(h));
-            let [cols, rows] = match &rd.settings {
-                Settings::Sprite(s) => s.sub_image_size,
-                _ => [1, 1],
-            };
-            let tex = |builtin: &mut textures::Builtin| -> (wgpu::TextureView, wgpu::Sampler) {
-                match loaded {
-                    Some(img) => ((*img.texture_view).clone(), (*img.sampler).clone()),
-                    None => {
-                        let (v, s) = builtin.get(wd, &queue, cols, rows);
-                        (v.clone(), s.clone())
-                    }
-                }
-            };
             match &rd.settings {
-                Settings::Sprite(_) | Settings::Mesh(_) => {
-                    let (config, extra0) = match &rd.settings {
-                        Settings::Sprite(s) => (
-                            ViewDrawConfig::sprites(view_sort_mode(s.sort_mode, deterministic.0)),
-                            &state.dummy,
-                        ),
-                        Settings::Mesh(m) => {
-                            let Some(mesh) = mesh else {
-                                // Not loaded yet.
-                                continue;
-                            };
-                            (
-                                ViewDrawConfig {
-                                    sort_mode: view_sort_mode(m.sort_mode, deterministic.0),
-                                    vertex_count: mesh.index_count,
-                                    cull: CullRadius::MeshScale { scale: mesh.radius },
-                                },
-                                &mesh.vertices,
-                            )
-                        }
-                        _ => unreachable!(),
-                    };
-                    for view in &views {
-                        let entry = rd.views.get(&view.retained_view_entity);
-                        let stale =
-                            entry.is_some_and(|v| loaded.is_some() && !v.uses_loaded_texture);
-                        if entry.is_none() || stale {
-                            let draw =
-                                ViewDraw::with_config(wd, &state.view_pipelines, em, config);
-                            let (tv, ts) = tex(&mut state.builtin);
-                            let bind_groups = particle_bind_groups(
-                                wd,
-                                &layout,
-                                &rd.uniform,
-                                em,
-                                &draw.indices,
-                                (&tv, &ts),
-                                [extra0, &state.dummy, &state.dummy],
-                            );
-                            rd.views.insert(
-                                view.retained_view_entity,
-                                ViewState {
-                                    bind_groups,
-                                    draw_args: Buffer::from(draw.draw_args.clone()),
-                                    draw,
-                                    uses_loaded_texture: loaded.is_some(),
-                                    seen: frame,
-                                },
-                            );
-                        }
-                        rd.views.get_mut(&view.retained_view_entity).unwrap().seen = frame;
-                    }
-                    rd.views.retain(|_, v| v.seen == frame);
-                }
                 Settings::Ribbon(r) => {
                     let stale = rd
                         .ribbon
@@ -1298,7 +1309,7 @@ fn prepare_effects(
                         let draw =
                             ViewDraw::with_config(wd, &state.view_pipelines, em, ribbon_config(r));
                         let build = RibbonBuild::new(wd, &state.ribbon_pipelines, em, &draw);
-                        let (tv, ts) = tex(&mut state.builtin);
+                        let (tv, ts) = renderer_texture(wd, &queue, &mut state.builtin, loaded, &rd.settings);
                         let bind_groups = particle_bind_groups(
                             wd,
                             &layout,
@@ -1307,6 +1318,7 @@ fn prepare_effects(
                             &draw.indices,
                             (&tv, &ts),
                             [&build.dist, &build.ribbons, &build.meta],
+                            &state.dummy,
                         );
                         rd.ribbon = Some(RibbonState {
                             view: ViewState {
@@ -1314,7 +1326,6 @@ fn prepare_effects(
                                 draw_args: Buffer::from(draw.draw_args.clone()),
                                 draw,
                                 uses_loaded_texture: loaded.is_some(),
-                                seen: frame,
                             },
                             build,
                         });
@@ -1353,6 +1364,7 @@ fn prepare_effects(
                         });
                     }
                 }
+                _ => {}
             }
         }
     }
@@ -1365,14 +1377,117 @@ fn prepare_effects(
         state.release(inst);
     }
     state.gone = gone;
-    // Systems unused for a while (hot-reloaded away): drop their pools and programs.
+
+    // Per batch: transforms, the sprite and mesh renderers' uniforms and per-view culls.
+    for batch in state.batches.iter_mut().flatten() {
+        if batch.members.is_empty() {
+            continue;
+        }
+        queue.write_buffer(&batch.transforms, 0, &batch.transform_bytes);
+        let mut center = Vec3::ZERO;
+        for m in &batch.members {
+            if let Some(inst) = state.effects.get(m) {
+                center += inst.world_from_local.w_axis.truncate();
+            }
+        }
+        batch.center = center / batch.members.len() as f32;
+        let sys = batch.gpu.program.system.clone();
+        for rd in &mut batch.draws {
+            let a = &batch.assets[rd.renderer];
+            let mesh = a.mesh.as_ref().and_then(|h| state.meshes.get(&h.id()));
+            let program = &batch.gpu.program;
+            let sub_index = sys.emitters[rd.emitter].sets_sub_image_index();
+            write_uniform(
+                &rd.settings,
+                &mut rd.scratch,
+                &Mat4::IDENTITY,
+                program.emitter_capacity(rd.emitter),
+                program.system.emitters[rd.emitter].uses_extended_attributes(),
+                mesh.map_or(1.0, |m| m.radius),
+                sub_index,
+                Some(batch.gpu.region_words(rd.emitter)),
+            );
+            queue.write_buffer(&rd.uniform, 0, &rd.scratch);
+            let loaded = a.texture.as_ref().and_then(|h| images.get(h));
+            let (config, extra0) = match &rd.settings {
+                Settings::Sprite(s) => (
+                    ViewDrawConfig::sprites(view_sort_mode(s.sort_mode, deterministic.0)),
+                    &state.dummy,
+                ),
+                Settings::Mesh(m) => {
+                    let Some(mesh) = mesh else {
+                        // Not loaded yet.
+                        continue;
+                    };
+                    (
+                        ViewDrawConfig {
+                            sort_mode: view_sort_mode(m.sort_mode, deterministic.0),
+                            vertex_count: mesh.index_count,
+                            cull: CullRadius::MeshScale { scale: mesh.radius },
+                        },
+                        &mesh.vertices,
+                    )
+                }
+                _ => continue,
+            };
+            for view in &views {
+                let entry = rd.views.get(&view.retained_view_entity);
+                let stale = entry.is_some_and(|v| loaded.is_some() && !v.uses_loaded_texture);
+                if entry.is_none() || stale {
+                    let draw = BatchDraw::new(
+                        wd,
+                        &state.view_pipelines,
+                        &batch.gpu,
+                        rd.emitter,
+                        &batch.transforms,
+                        config,
+                    );
+                    let (tv, ts) = renderer_texture(wd, &queue, &mut state.builtin, loaded, &rd.settings);
+                    let particles = batch.gpu.particles(rd.emitter);
+                    let bind_group = particle_bind_group(
+                        wd,
+                        &layout,
+                        &rd.uniform,
+                        &fx_gpu::Region {
+                            buffer: particles.clone(),
+                            offset: 0,
+                            size: particles.size(),
+                        },
+                        &draw.indices,
+                        (&tv, &ts),
+                        [extra0, &state.dummy, &state.dummy],
+                        &batch.transforms,
+                    );
+                    rd.views.insert(
+                        view.retained_view_entity,
+                        BatchViewState {
+                            bind_group,
+                            draw_args: Buffer::from(draw.draw_args.clone()),
+                            draw,
+                            uses_loaded_texture: loaded.is_some(),
+                            seen: frame,
+                        },
+                    );
+                }
+                rd.views.get_mut(&view.retained_view_entity).unwrap().seen = frame;
+            }
+            rd.views.retain(|_, v| v.seen == frame);
+        }
+    }
+
+    // Systems unused for a while (hot-reloaded away): drop their pools, batches and programs.
     if frame % 60 == 0 {
         let stale = |last: &u64| frame.saturating_sub(*last) > POOL_UNUSED_FRAMES;
         if state.used.values().any(stale) {
             let used = std::mem::take(&mut state.used);
             for (key, last) in &used {
                 if stale(last) {
-                    state.pool.remove(key);
+                    state.pool.retain(|k, _| k.program != *key);
+                    for b in &mut state.batches {
+                        if b.as_ref().is_some_and(|b| b.key.program == *key) {
+                            *b = None;
+                        }
+                    }
                     state.programs.remove(key);
                     state.pool_dirty = true;
                 }
@@ -1389,11 +1504,120 @@ fn prepare_effects(
         s.live = state.effects.len() as u64;
         s.idle = state.pool.values().map(|v| v.len() as u64).sum();
         s.gpu_bytes = state
-            .effects
-            .values()
-            .chain(state.pool.values().flatten())
-            .map(|i| i.gpu.gpu_bytes())
+            .batches
+            .iter()
+            .flatten()
+            .map(|b| b.gpu.gpu_bytes() + b.transforms.size())
             .sum();
+    }
+}
+
+/// A renderer's texture: the loaded one, or the built-in sprite for its flipbook grid.
+fn renderer_texture(
+    wd: &wgpu::Device,
+    queue: &RenderQueue,
+    builtin: &mut textures::Builtin,
+    loaded: Option<&GpuImage>,
+    settings: &Settings,
+) -> (wgpu::TextureView, wgpu::Sampler) {
+    let [cols, rows] = match settings {
+        Settings::Sprite(s) => s.sub_image_size,
+        _ => [1, 1],
+    };
+    match loaded {
+        Some(img) => ((*img.texture_view).clone(), (*img.sampler).clone()),
+        None => {
+            let (v, s) = builtin.get(wd, queue, cols, rows);
+            (v.clone(), s.clone())
+        }
+    }
+}
+
+/// First batch size of a system; each further batch doubles it.
+const FIRST_BATCH_SLOTS: u32 = 16;
+
+impl FxState {
+    /// A batch of `key` with a free slot (made if none has one).
+    fn batch_with_room(
+        &mut self,
+        wd: &wgpu::Device,
+        program: &Arc<fx_gpu::GpuProgram>,
+        key: BatchKey,
+        ex: &ExtractedEffect,
+    ) -> usize {
+        if !key.exclusive
+            && let Some(i) = self
+                .batches
+                .iter()
+                .position(|b| b.as_ref().is_some_and(|b| b.key == key && b.gpu.free_slots() > 0))
+        {
+            return i;
+        }
+        let slots = if key.exclusive {
+            1
+        } else {
+            let largest = self
+                .batches
+                .iter()
+                .flatten()
+                .filter(|b| b.key == key)
+                .map(|b| b.gpu.slots)
+                .max();
+            largest.map_or(FIRST_BATCH_SLOTS, |s| s * 2)
+        };
+        let gpu = GpuBatch::new(wd, program, slots);
+        let slots = gpu.slots;
+        let draws = renderers(&ex.system)
+            .enumerate()
+            .filter_map(|(i, (emitter, r))| {
+                let settings = match r {
+                    CookedRenderer::Sprite(s) => Settings::Sprite(s.clone()),
+                    CookedRenderer::Mesh(s) => Settings::Mesh(s.clone()),
+                    _ => return None,
+                };
+                Some(BatchRendererDraw {
+                    renderer: i,
+                    emitter,
+                    settings,
+                    uniform: wd.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("fx batch renderer uniform"),
+                        size: UNIFORM_BYTES as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    views: HashMap::default(),
+                    scratch: [0; UNIFORM_BYTES],
+                })
+            })
+            .collect();
+        let batch = Batch {
+            key,
+            transforms: wd.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fx batch transforms"),
+                size: slots as u64 * 64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            transform_bytes: vec![0; slots as usize * 64],
+            assets: ex.assets.clone(),
+            draws,
+            members: Vec::new(),
+            copies: vec![Vec::new(); ex.system.emitters.len()],
+            used: 0,
+            depth_generation: u64::MAX,
+            center: Vec3::ZERO,
+            gpu,
+        };
+        match self.batches.iter().position(Option::is_none) {
+            Some(i) => {
+                self.batches[i] = Some(batch);
+                i
+            }
+            None => {
+                self.batches.push(Some(batch));
+                self.batches.len() - 1
+            }
+        }
     }
 }
 
@@ -1402,24 +1626,31 @@ fn bytemuck_bytes<T: Copy>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
 }
 
+/// The `FxRenderer` uniform of particle_io.wesl; `batched`: the words
+/// between particle copies of a batch draw (indices are batch references).
+#[allow(clippy::too_many_arguments)]
 fn write_uniform(
-    rd: &mut RendererDraw,
-    em: &fx_gpu::GpuEmitter,
+    settings: &Settings,
+    b: &mut [u8; UNIFORM_BYTES],
     world_from_local: &Mat4,
+    capacity: u32,
+    extended: bool,
     mesh_radius: f32,
     sub_image_from_index: bool,
+    batched: Option<u32>,
 ) {
-    let b = &mut rd.scratch;
     let mut put = |w: usize, v: u32| b[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
     for (i, x) in world_from_local.to_cols_array().iter().enumerate() {
         put(i, x.to_bits());
     }
     put(26, 1.0f32.to_bits());
     put(27, 1.0f32.to_bits());
-    put(28, em.capacity);
-    put(33, (em.words > fx_gpu::WORDS_PER_PARTICLE) as u32);
+    put(28, capacity);
+    put(33, extended as u32);
     put(38, mesh_radius.to_bits());
-    match &rd.settings {
+    put(40, batched.is_some() as u32);
+    put(41, batched.unwrap_or(0));
+    match settings {
         Settings::Sprite(s) => {
             for c in 0..3 {
                 put(16 + c, s.custom_facing_vector[c].to_bits());
@@ -1514,15 +1745,25 @@ fn queue_particles(
             all_ready = false;
             continue;
         };
-        for (main, inst) in &state.effects {
-            if inst.paused {
-                continue;
-            }
-            let center = inst.world_from_local.w_axis.truncate();
-            for (i, rd) in inst.draws.iter().enumerate() {
-                let material = rd.assets.material.clone();
-                let textured = rd.assets.texture.is_some();
-                let key = match &rd.settings {
+        // Sprites and meshes: one item per batch renderer; ribbons: one per instance.
+        let batch_items = state.batches.iter().enumerate().filter_map(|(b, batch)| {
+            let batch = batch.as_ref().filter(|b| !b.members.is_empty())?;
+            Some(batch.draws.iter().map(move |rd| {
+                let shown = rd.views.contains_key(&view.retained_view_entity);
+                (batch_entity(b), rd.renderer, batch.center, &rd.settings, &batch.assets[rd.renderer], shown)
+            }))
+        });
+        let ribbon_items = state.effects.iter().filter(|(_, i)| !i.paused).map(|(main, inst)| {
+            inst.draws.iter().enumerate().filter(|(_, rd)| matches!(rd.settings, Settings::Ribbon(_))).map(|(i, rd)| {
+                (*main, i, inst.world_from_local.w_axis.truncate(), &rd.settings, &rd.assets, true)
+            })
+        });
+        let items: Vec<_> = batch_items.flatten().chain(ribbon_items.flatten()).collect();
+        {
+            for (main, i, center, settings, assets, shown) in items {
+                let material = assets.material.clone();
+                let textured = assets.texture.is_some();
+                let key = match settings {
                     Settings::Sprite(s) => ParticleKey {
                         view_key,
                         kind: DrawKind::Sprite,
@@ -1543,7 +1784,7 @@ fn queue_particles(
                         material,
                     },
                     Settings::Mesh(m) => {
-                        if !rd.views.contains_key(&view.retained_view_entity) {
+                        if !shown {
                             // Mesh not loaded yet.
                             all_ready = false;
                             continue;
@@ -1574,7 +1815,7 @@ fn queue_particles(
                     // Sorted phases key items by (entity, main entity): a distinct
                     // placeholder per renderer keeps an effect's renderers (and
                     // emitters) from replacing each other.
-                    entity: (renderer_entity(i), MainEntity::from(*main)),
+                    entity: (renderer_entity(i), MainEntity::from(main)),
                     draw_function: draw,
                     batch_range: i as u32..i as u32 + 1,
                     extra_index: PhaseItemExtraIndex::None,
@@ -1652,57 +1893,88 @@ fn simulate(
     rt: Res<FxRayTracingScene>,
 ) {
     let state = &mut *state;
-    // What scene collisions read this frame.
-    for inst in state.effects.values_mut() {
-        if !inst.gpu.uses_scene() || inst.paused {
+    let wd = device.wgpu_device();
+    // What scene collisions read this frame: the depth (per batch), the view (per instance).
+    for batch in state.batches.iter_mut().flatten() {
+        // The previous frame's commands were submitted: its frame slots are free.
+        batch.gpu.submitted();
+        if batch.members.is_empty() {
             continue;
         }
-        if inst.depth_generation != depth.generation {
-            inst.gpu
-                .set_scene_depth(device.wgpu_device(), depth.texture_view());
-            inst.depth_generation = depth.generation;
+        let Some(first) = state.effects.get(&batch.members[0]) else { continue };
+        if !first.gpu.uses_scene() {
+            continue;
         }
-        inst.gpu
-            .set_scene_view(&queue, inst.world_from_local, depth.view.as_ref());
-        if inst.gpu.uses_ray_tracing() {
-            inst.gpu.set_ray_tracing_scene(rt.bind_group.clone());
+        if batch.depth_generation != depth.generation {
+            batch.gpu.set_scene_depth(wd, depth.texture_view());
+            batch.depth_generation = depth.generation;
+        }
+        if first.gpu.uses_ray_tracing() {
+            batch.gpu.set_ray_tracing_scene(rt.bind_group.clone());
+        }
+        for m in &batch.members {
+            if let Some(inst) = state.effects.get_mut(m) {
+                inst.gpu.set_scene_view(&queue, inst.world_from_local, depth.view.as_ref());
+            }
+        }
+    }
+    // The systems' warm-ups (Warmup Time) run once per instance, in their own submissions.
+    for batch in state.batches.iter_mut().flatten() {
+        for m in &batch.members {
+            if let Some(inst) = state.effects.get_mut(m)
+                && inst.gpu.needs_warm_up()
+            {
+                batch.gpu.warm_up(wd, &queue, &mut inst.gpu);
+            }
         }
     }
     let recorder = ctx.diagnostic_recorder();
     let diagnostics = recorder.as_deref();
     let encoder = ctx.command_encoder();
     let span = diagnostics.time_span(encoder, "fx_sim");
-    for inst in state.effects.values_mut() {
-        // The previous frame's commands were submitted: its uniform slots are free.
-        inst.gpu.submitted();
-        if inst.paused {
+    let steps = extracted.steps.min(fx_gpu::MAX_STEPS_PER_SUBMIT);
+    for batch in state.batches.iter_mut().flatten() {
+        if batch.members.is_empty() {
             continue;
         }
-        // The system's warm-up (Warmup Time) runs once, in its own submissions.
-        if inst.gpu.needs_warm_up() {
-            inst.gpu.warm_up(device.wgpu_device(), &queue);
-        }
-        let steps = extracted.steps.min(fx_gpu::MAX_STEPS_PER_SUBMIT);
+        // Every member steps in the same dispatches.
         for _ in 0..steps {
-            inst.gpu.step(&queue, encoder, extracted.dt);
+            for m in &batch.members {
+                if let Some(inst) = state.effects.get_mut(m) {
+                    batch.gpu.stage(&mut inst.gpu, encoder, extracted.dt);
+                }
+            }
+            batch.gpu.record(&queue, encoder);
         }
-        if inst.draining {
-            inst.drain_steps += steps;
+        for (e, copies) in batch.copies.iter_mut().enumerate() {
+            copies.clear();
+            for m in &batch.members {
+                if let Some(inst) = state.effects.get_mut(m) {
+                    copies.push(inst.gpu.slot * 2 + inst.gpu.emitters[e].current as u32);
+                    if e == 0 && inst.draining {
+                        inst.drain_steps += steps;
+                    }
+                }
+            }
         }
     }
     span.end(encoder);
     let span = diagnostics.time_span(encoder, "fx_cull_sort");
-    for inst in state.effects.values_mut() {
-        if inst.paused {
+    for batch in state.batches.iter_mut().flatten() {
+        if batch.members.is_empty() {
             continue;
         }
-        for rd in &mut inst.draws {
-            let em = &inst.gpu.emitters[rd.emitter];
+        for rd in &mut batch.draws {
             for view in &views {
                 if let Some(vs) = rd.views.get_mut(&view.retained_view_entity) {
-                    let vp = local_view(view, &inst.world_from_local);
-                    vs.draw
-                        .record(&queue, encoder, &state.view_pipelines, em, &vp);
+                    let vp = local_view(view, &Mat4::IDENTITY);
+                    vs.draw.record(
+                        &queue,
+                        encoder,
+                        &state.view_pipelines,
+                        &batch.copies[rd.emitter],
+                        &vp,
+                    );
                 }
             }
         }
@@ -1810,6 +2082,30 @@ impl<P: PhaseItem> RenderCommand<P> for DrawParticles {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let state = state.into_inner();
+        if let Some(b) = entity_batch(item.main_entity().id()) {
+            let Some(batch) = state.batches.get(b).and_then(Option::as_ref) else {
+                return RenderCommandResult::Skip;
+            };
+            let r = item.batch_range().start as usize;
+            let Some(rd) = batch.draws.iter().find(|d| d.renderer == r) else {
+                return RenderCommandResult::Skip;
+            };
+            let Some(vs) = rd.views.get(&view.retained_view_entity) else {
+                return RenderCommandResult::Skip;
+            };
+            pass.set_bind_group(1, &vs.bind_group, &[]);
+            match &rd.settings {
+                Settings::Mesh(_) => {
+                    let Some(mesh) = batch.assets[r].mesh.as_ref().and_then(|h| state.meshes.get(&h.id())) else {
+                        return RenderCommandResult::Skip;
+                    };
+                    pass.set_index_buffer(mesh.indices.slice(..), IndexFormat::Uint32);
+                    pass.draw_indexed_indirect(&vs.draw_args, 0);
+                }
+                _ => pass.draw_indirect(&vs.draw_args, 0),
+            }
+            return RenderCommandResult::Success;
+        }
         let Some(inst) = state.effects.get(&item.main_entity().id()) else {
             return RenderCommandResult::Skip;
         };
@@ -1817,14 +2113,8 @@ impl<P: PhaseItem> RenderCommand<P> for DrawParticles {
             return RenderCommandResult::Skip;
         };
         let parity = inst.gpu.emitters[rd.emitter].current;
+        let _ = view;
         match &rd.settings {
-            Settings::Sprite(_) => {
-                let Some(vs) = rd.views.get(&view.retained_view_entity) else {
-                    return RenderCommandResult::Skip;
-                };
-                pass.set_bind_group(1, &vs.bind_groups[parity], &[]);
-                pass.draw_indirect(&vs.draw_args, 0);
-            }
             Settings::Ribbon(_) => {
                 let Some(rs) = &rd.ribbon else {
                     return RenderCommandResult::Skip;
@@ -1832,18 +2122,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawParticles {
                 pass.set_bind_group(1, &rs.view.bind_groups[parity], &[]);
                 pass.draw_indirect(&rs.view.draw_args, 0);
             }
-            Settings::Mesh(_) => {
-                let (Some(vs), Some(mesh)) = (
-                    rd.views.get(&view.retained_view_entity),
-                    rd.assets.mesh.as_ref().and_then(|h| state.meshes.get(&h.id())),
-                ) else {
-                    return RenderCommandResult::Skip;
-                };
-                pass.set_bind_group(1, &vs.bind_groups[parity], &[]);
-                pass.set_index_buffer(mesh.indices.slice(..), IndexFormat::Uint32);
-                pass.draw_indexed_indirect(&vs.draw_args, 0);
-            }
-            Settings::Light(_) => return RenderCommandResult::Skip,
+            _ => return RenderCommandResult::Skip,
         }
         RenderCommandResult::Success
     }
@@ -1853,6 +2132,20 @@ impl<P: PhaseItem> RenderCommand<P> for DrawParticles {
 /// entity (the draw reads nothing from it), but distinct per renderer.
 fn renderer_entity(i: usize) -> Entity {
     Entity::from_raw_u32(u32::MAX - 2 - i as u32).unwrap_or(Entity::PLACEHOLDER)
+}
+
+/// The phase item main entity of batch `b` (renderer draws of every instance
+/// in it): not a real entity, distinct from real ones and per batch.
+fn batch_entity(b: usize) -> Entity {
+    Entity::from_raw_u32(BATCH_ENTITY_BASE - b as u32).unwrap_or(Entity::PLACEHOLDER)
+}
+
+const BATCH_ENTITY_BASE: u32 = u32::MAX - 4096;
+
+/// The batch index of a [`batch_entity`].
+fn entity_batch(e: Entity) -> Option<usize> {
+    let i = e.index_u32();
+    (i <= BATCH_ENTITY_BASE && i > BATCH_ENTITY_BASE - 1_000_000).then(|| (BATCH_ENTITY_BASE - i) as usize)
 }
 
 /// Systems of the `RenderGraph` schedule other plugins order against.
@@ -1947,28 +2240,34 @@ const MAX_IDLE_PER_SYSTEM: usize = 1024;
 const POOL_UNUSED_FRAMES: u64 = 600;
 
 impl FxState {
-    /// Puts an instance whose entity is gone back in its system's pool.
+    /// Puts an instance whose entity is gone back in its batch key's pool
+    /// (it keeps its slot), or frees its slot when the pool is full.
     fn release(&mut self, mut inst: EffectInstance) {
         self.pool_dirty = true;
-        let key = (Arc::as_ptr(&inst.system) as usize, inst.ray_tracing);
-        let idle = self.pool.entry(key).or_default();
+        let idle = self.pool.entry(inst.key).or_default();
         if idle.len() < MAX_IDLE_PER_SYSTEM {
             inst.draining = false;
             inst.paused = false;
             idle.push(inst);
+        } else if let Some(b) = self.batches.get_mut(inst.batch).and_then(Option::as_mut) {
+            b.gpu.release(inst.gpu);
+            b.used -= 1;
+            if b.used == 0 {
+                self.batches[inst.batch] = None;
+            }
         }
     }
 }
 
-/// A new instance of `program`, its renderers' state built lazily.
+/// A new instance in slot `gpu` of batch `batch`, its ribbon and light state built lazily.
 fn new_instance(
     wd: &wgpu::Device,
-    program: &Arc<fx_gpu::GpuProgram>,
+    gpu: GpuEffect,
+    batch: usize,
+    key: BatchKey,
     ex: &ExtractedEffect,
-    ray_tracing: bool,
     frame: u64,
 ) -> EffectInstance {
-    let gpu = GpuEffect::from_program(wd, program, ex.seed);
     let draws = renderers(&ex.system)
         .enumerate()
         .map(|(i, (emitter, r))| RendererDraw {
@@ -1986,7 +2285,6 @@ fn new_instance(
                 mapped_at_creation: false,
             }),
             assets: ex.assets.get(i).cloned().unwrap_or_default(),
-            views: HashMap::default(),
             ribbon: None,
             light: None,
             scratch: [0; UNIFORM_BYTES],
@@ -1996,8 +2294,8 @@ fn new_instance(
         system: ex.system.clone(),
         seed: ex.seed,
         gpu,
-        ray_tracing,
-        depth_generation: u64::MAX,
+        batch,
+        key,
         draws,
         world_from_local: ex.world_from_local,
         uploaded: HashMap::default(),
@@ -2063,7 +2361,7 @@ fn copy_done_counts(
     let mut off = 0;
     for (entity, inst) in draining() {
         for em in &inst.gpu.emitters {
-            encoder.copy_buffer_to_buffer(&em.state, fx_gpu::STATE_COUNT * 4, buffer, off, 4);
+            encoder.copy_buffer_to_buffer(&em.state.buffer, em.state.offset + fx_gpu::STATE_COUNT * 4, buffer, off, 4);
             off += 4;
         }
         layout.push((*entity, inst.generation, inst.gpu.emitters.len() as u32));

@@ -4,7 +4,7 @@
 
 import bevy_pbr::render::mesh_view_bindings::view;
 import fx_render::particle_io::{
-    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, particle_dynamic_param_1, set_sub_uv,
+    FxVertexOutput, fx, indices, pw, particle_world_from_local, particle_color, particle_dynamic_param, particle_dynamic_param_1, set_sub_uv,
     safe_normalize, sample_particle_texture, scene_light, finish, camera_offset,
 };
 
@@ -32,7 +32,7 @@ fn facing_basis(x: vec3<f32>) -> mat3x3<f32> {
 @vertex
 fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FxVertexOutput {
     let i = indices[ii];
-    let m = fx.world_from_local;
+    let m = particle_world_from_local(i);
     let b = vi * 8u;
     let p = vec3<f32>(vertices[b], vertices[b + 1u], vertices[b + 2u]);
     let nrm = vec3<f32>(vertices[b + 3u], vertices[b + 4u], vertices[b + 5u]);

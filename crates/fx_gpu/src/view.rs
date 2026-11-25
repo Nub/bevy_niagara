@@ -10,11 +10,11 @@
 
 use std::borrow::Cow;
 
-use crate::GpuEmitter;
+use crate::{GpuEmitter, WORKGROUP};
 
 const VIEW_WGSL: &str = include_str!("wgsl/view.wgsl");
 const BLOCK: u32 = 512;
-const PARAMS_BYTES: usize = 6 * 16 + 16 + 16 + 16 + 16;
+const PARAMS_BYTES: usize = 6 * 16 + 16 + 16 + 16 + 16 + 16;
 /// Bytes of `draw_args`: room for `draw_indexed_indirect`'s five words.
 pub const DRAW_ARGS_BYTES: u64 = 20;
 const PASS_STRIDE: u64 = 256;
@@ -113,6 +113,12 @@ pub struct ViewPipelines {
     sort_local: wgpu::ComputePipeline,
     sort_merge_local: wgpu::ComputePipeline,
     sort_merge_global: wgpu::ComputePipeline,
+    batch_prep: wgpu::ComputePipeline,
+    cull_batch: wgpu::ComputePipeline,
+    sort_prep: wgpu::ComputePipeline,
+    pad: wgpu::ComputePipeline,
+    /// Bound to the batched-only bindings of unbatched draws.
+    dummy: wgpu::Buffer,
 }
 
 fn buffer_entry(
@@ -144,6 +150,8 @@ impl ViewPipelines {
                 buffer_entry(3, Storage { read_only: false }, false),
                 buffer_entry(4, Storage { read_only: false }, false),
                 buffer_entry(5, Storage { read_only: false }, false),
+                buffer_entry(6, Storage { read_only: true }, false),
+                buffer_entry(7, Storage { read_only: true }, false),
             ],
         });
         let args_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -184,6 +192,16 @@ impl ViewPipelines {
             sort_local: pipe("sort_local", &plain),
             sort_merge_local: pipe("sort_merge_local", &with_pass),
             sort_merge_global: pipe("sort_merge_global", &with_pass),
+            batch_prep: pipe("batch_prep", &plain),
+            cull_batch: pipe("cull_batch", &plain),
+            sort_prep: pipe("sort_prep", &with_args),
+            pad: pipe("pad", &plain),
+            dummy: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fx view dummy"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             layout,
             args_layout,
             pass_layout,
@@ -298,11 +316,11 @@ impl ViewDraw {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: emitter.particles[s].as_entire_binding(),
+                        resource: emitter.particles[s].binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: emitter.state.as_entire_binding(),
+                        resource: emitter.state.binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -315,6 +333,14 @@ impl ViewDraw {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: draw_args.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: pipelines.dummy.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: pipelines.dummy.as_entire_binding(),
                     },
                 ],
             })
@@ -367,41 +393,7 @@ impl ViewDraw {
         emitter: &GpuEmitter,
         view: &ViewParams,
     ) {
-        let s = &mut self.scratch;
-        let mut put = |w: usize, v: u32| s[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
-        for (i, pl) in view.planes.iter().enumerate() {
-            for c in 0..4 {
-                put(i * 4 + c, pl[c].to_bits());
-            }
-        }
-        for c in 0..3 {
-            put(24 + c, view.camera_position[c].to_bits());
-            put(28 + c, view.camera_forward[c].to_bits());
-        }
-        put(32, self.capacity);
-        put(
-            33,
-            match self.sort_mode {
-                SortMode::None => 0,
-                SortMode::ViewDepth => 1,
-                SortMode::ViewDistance => 2,
-                SortMode::UniqueId => 3,
-                SortMode::RibbonSpawnOrder => 4,
-                SortMode::RibbonLinkOrder => 5,
-            },
-        );
-        put(34, self.max_pow2);
-        let c = &self.config;
-        let (mode, word, scale) = match c.cull {
-            CullRadius::SpriteSize => (0, 0, 1.0f32),
-            CullRadius::Word { word, scale } => (1, word, scale),
-            CullRadius::MeshScale { scale } => (2, 28, scale),
-            CullRadius::Off => (3, 0, 0.0),
-        };
-        put(35, mode);
-        put(36, c.vertex_count);
-        put(37, word);
-        put(38, scale.to_bits());
+        write_params(&mut self.scratch, view, self.capacity, self.sort_mode, self.max_pow2, &self.config, 0);
         queue.write_buffer(&self.params, 0, &self.scratch);
 
         let bg = &self.bind_groups[emitter.current];
@@ -450,6 +442,263 @@ impl ViewDraw {
     /// Number of recorded sort passes (0 when not sorting).
     pub fn sort_pass_count(&self) -> usize {
         self.passes.len()
+    }
+}
+
+/// The `ViewParams` uniform of view.wgsl.
+fn write_params(
+    s: &mut [u8; PARAMS_BYTES],
+    view: &ViewParams,
+    capacity: u32,
+    sort_mode: SortMode,
+    max_pow2: u32,
+    c: &ViewDrawConfig,
+    region_words: u32,
+) {
+    let mut put = |w: usize, v: u32| s[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    for (i, pl) in view.planes.iter().enumerate() {
+        for c in 0..4 {
+            put(i * 4 + c, pl[c].to_bits());
+        }
+    }
+    for c in 0..3 {
+        put(24 + c, view.camera_position[c].to_bits());
+        put(28 + c, view.camera_forward[c].to_bits());
+    }
+    put(32, capacity);
+    put(
+        33,
+        match sort_mode {
+            SortMode::None => 0,
+            SortMode::ViewDepth => 1,
+            SortMode::ViewDistance => 2,
+            SortMode::UniqueId => 3,
+            SortMode::RibbonSpawnOrder => 4,
+            SortMode::RibbonLinkOrder => 5,
+        },
+    );
+    put(34, max_pow2);
+    let (mode, word, scale) = match c.cull {
+        CullRadius::SpriteSize => (0, 0, 1.0f32),
+        CullRadius::Word { word, scale } => (1, word, scale),
+        CullRadius::MeshScale { scale } => (2, 28, scale),
+        CullRadius::Off => (3, 0, 0.0),
+    };
+    put(35, mode);
+    put(36, c.vertex_count);
+    put(37, word);
+    put(38, scale.to_bits());
+    put(39, region_words);
+}
+
+/// One emitter of every instance of a [`GpuBatch`](crate::GpuBatch) seen
+/// from one view: one cull over all the instances drawn, one sort, one
+/// indirect draw. `indices` holds particle references `r * capacity + i`
+/// (copy `r = 2 * slot + parity`, see [`GpuEmitter::particles`]), read at
+/// word `r * region_words + w * capacity + i` of the batch's particle buffer;
+/// planes, camera and sort keys are in world space, with each slot's
+/// `world_from_local` from the `transforms` buffer given at creation.
+pub struct BatchDraw {
+    pub config: ViewDrawConfig,
+    capacity: u32,
+    region_words: u32,
+    max_pow2: u32,
+    passes: Vec<PassKind>,
+    params: wgpu::Buffer,
+    entries: wgpu::Buffer,
+    /// Visible particle references (`array<u32>`), sorted when sorting.
+    pub indices: wgpu::Buffer,
+    /// `draw_indirect` (or indexed) arguments at offset 0.
+    pub draw_args: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    args_bind_group: wgpu::BindGroup,
+    pass_bind_group: wgpu::BindGroup,
+    args: wgpu::Buffer,
+    scratch: [u8; PARAMS_BYTES],
+    entry_bytes: Vec<u8>,
+}
+
+impl BatchDraw {
+    /// `transforms` holds one `mat4x4<f32>` (world_from_local) per slot.
+    pub fn new(
+        device: &wgpu::Device,
+        pipelines: &ViewPipelines,
+        batch: &crate::GpuBatch,
+        emitter: usize,
+        transforms: &wgpu::Buffer,
+        config: ViewDrawConfig,
+    ) -> Self {
+        use wgpu::BufferUsages as U;
+        let capacity = batch.program.emitter_capacity(emitter);
+        let total = capacity as u64 * batch.slots as u64;
+        let sorted = config.sort_mode != SortMode::None;
+        let max_pow2 = (total.next_power_of_two() as u32).max(BLOCK);
+        let len = if sorted { max_pow2 as u64 } else { total };
+        let buf = |label: &str, size: u64, usage: U| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let params = buf("fx batch view params", PARAMS_BYTES as u64, U::UNIFORM | U::COPY_DST);
+        let entries = buf("fx batch view entries", batch.slots as u64 * 4, U::STORAGE | U::COPY_DST);
+        let keys = buf("fx batch view keys", if sorted { len * 4 } else { 4 }, U::STORAGE);
+        let indices = buf("fx batch view indices", len * 4, U::STORAGE | U::COPY_SRC);
+        let draw_args = buf("fx batch view draw args", DRAW_ARGS_BYTES, U::STORAGE | U::INDIRECT | U::COPY_SRC);
+        let passes = if sorted { sort_passes(max_pow2) } else { Vec::new() };
+        let args = buf("fx batch view dispatch args", 16 * (1 + passes.len() as u64), U::STORAGE | U::INDIRECT);
+        let mut pass_data = vec![0u8; (PASS_STRIDE as usize) * passes.len().max(1)];
+        for (i, p) in passes.iter().enumerate() {
+            let (k, j) = match *p {
+                PassKind::Local => (0, 0),
+                PassKind::MergeGlobal { k, j } => (k, j),
+                PassKind::MergeLocal { k } => (k, 0),
+            };
+            let o = i * PASS_STRIDE as usize;
+            pass_data[o..o + 4].copy_from_slice(&k.to_le_bytes());
+            pass_data[o + 4..o + 8].copy_from_slice(&j.to_le_bytes());
+        }
+        let pass_ubo = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("fx batch view sort passes"),
+                contents: &pass_data,
+                usage: U::UNIFORM,
+            },
+        );
+        fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: b.as_entire_binding(),
+            }
+        }
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx batch view"),
+            layout: &pipelines.layout,
+            entries: &[
+                e(0, &params),
+                e(1, batch.particles(emitter)),
+                e(2, batch.state(emitter)),
+                e(3, &keys),
+                e(4, &indices),
+                e(5, &draw_args),
+                e(6, &entries),
+                e(7, transforms),
+            ],
+        });
+        let args_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx batch view args"),
+            layout: &pipelines.args_layout,
+            entries: &[e(0, &args)],
+        });
+        let pass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx batch view sort pass"),
+            layout: &pipelines.pass_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &pass_ubo,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(8),
+                }),
+            }],
+        });
+        BatchDraw {
+            config,
+            capacity,
+            region_words: batch.region_words(emitter),
+            max_pow2,
+            passes,
+            params,
+            entries,
+            indices,
+            draw_args,
+            bind_group,
+            args_bind_group,
+            pass_bind_group,
+            args,
+            scratch: [0; PARAMS_BYTES],
+            entry_bytes: Vec::with_capacity(batch.slots as usize * 4),
+        }
+    }
+
+    /// Records culling (and sorting) of the instances `copies` (each
+    /// `2 * slot + current`, as [`GpuEmitter::particles`]) for `view` (world
+    /// space). With no copies the draw is empty.
+    pub fn record(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pipelines: &ViewPipelines,
+        copies: &[u32],
+        view: &ViewParams,
+    ) {
+        write_params(
+            &mut self.scratch,
+            view,
+            self.capacity,
+            self.config.sort_mode,
+            self.max_pow2,
+            &self.config,
+            self.region_words,
+        );
+        queue.write_buffer(&self.params, 0, &self.scratch);
+        self.entry_bytes.clear();
+        for c in copies {
+            self.entry_bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        if !copies.is_empty() {
+            queue.write_buffer(&self.entries, 0, &self.entry_bytes);
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fx batch cull and sort"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_pipeline(&pipelines.batch_prep);
+        pass.dispatch_workgroups(1, 1, 1);
+        if copies.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&pipelines.cull_batch);
+        pass.dispatch_workgroups(self.capacity.div_ceil(WORKGROUP), copies.len() as u32, 1);
+        if self.passes.is_empty() {
+            return;
+        }
+        drop(pass);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fx batch sort prep"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.args_bind_group, &[]);
+        pass.set_pipeline(&pipelines.sort_prep);
+        pass.dispatch_workgroups(1, 1, 1);
+        drop(pass);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fx batch sort"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_pipeline(&pipelines.pad);
+        pass.dispatch_workgroups_indirect(&self.args, 0);
+        for (i, p) in self.passes.iter().enumerate() {
+            let args_offset = 16 * (1 + i as u64);
+            match p {
+                PassKind::Local => pass.set_pipeline(&pipelines.sort_local),
+                PassKind::MergeGlobal { .. } => {
+                    pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                    pass.set_pipeline(&pipelines.sort_merge_global);
+                }
+                PassKind::MergeLocal { .. } => {
+                    pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                    pass.set_pipeline(&pipelines.sort_merge_local);
+                }
+            }
+            pass.dispatch_workgroups_indirect(&self.args, args_offset);
+        }
     }
 }
 

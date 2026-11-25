@@ -19,7 +19,10 @@ struct ViewParams {
     vertex_count: u32,            // draw argument 0: vertices or indices per instance
     radius_word: u32,
     radius_scale: f32,
-    _pad: u32,
+    region_words: u32,           // batched: words between particle copies
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<uniform> vp: ViewParams;
@@ -28,6 +31,10 @@ struct ViewParams {
 @group(0) @binding(3) var<storage, read_write> keys: array<u32>;
 @group(0) @binding(4) var<storage, read_write> vals: array<u32>;
 @group(0) @binding(5) var<storage, read_write> draw: array<atomic<u32>>;
+// Batched draws (fx_gpu::view::BatchDraw): the particle copy (2 * slot + parity)
+// of each instance drawn, and every slot's world_from_local.
+@group(0) @binding(6) var<storage, read> entries: array<u32>;
+@group(0) @binding(7) var<storage, read> transforms: array<mat4x4<f32>>;
 
 fn pw(w: u32, i: u32) -> f32 {
     return particles[w * vp.capacity + i];
@@ -39,7 +46,11 @@ fn count() -> u32 {
 
 // Sort size for the living particles: a power of two, at least one block.
 fn sort_len() -> u32 {
-    let n = max(count(), 1u);
+    return sort_len_of(count());
+}
+
+fn sort_len_of(c: u32) -> u32 {
+    let n = max(c, 1u);
     let p = 1u << (32u - countLeadingZeros(n - 1u));
     return clamp(p, BLOCK, vp.max_pow2);
 }
@@ -67,6 +78,11 @@ fn cull_prep() {
     }
     let p = sort_len();
     set_args(0u, p / WG);
+    set_sort_args(p);
+}
+
+// Dispatch args of the sort passes (slots 1..) for sort length p.
+fn set_sort_args(p: u32) {
     // Same pass order as fx_gpu::view::sort_passes.
     var slot = 1u;
     set_args(slot, p / BLOCK);   // local sort
@@ -238,5 +254,87 @@ fn sort_merge_global(@builtin(global_invocation_id) gid: vec3<u32>) {
         let v = vals[i];
         vals[i] = vals[l];
         vals[l] = v;
+    }
+}
+
+// ---- batched: every instance of a batch in one cull, sort and draw ----
+//
+// batch_prep (1 thread) → cull_batch (groups(capacity) × entries) →
+// sort_prep (1 thread) → pad (indirect) → [sort passes (indirect)].
+// A particle is referenced as r * capacity + i (copy r = 2 * slot + parity);
+// the renderer reads it at r * region_words + w * capacity + i. Planes,
+// camera and keys are in world space.
+
+@compute @workgroup_size(1)
+fn batch_prep() {
+    atomicStore(&draw[0], vp.vertex_count);
+    atomicStore(&draw[1], 0u);
+    atomicStore(&draw[2], 0u);
+    atomicStore(&draw[3], 0u);
+    atomicStore(&draw[4], 0u);
+}
+
+@compute @workgroup_size(WG)
+fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let r = entries[wid.y];
+    let slot = r / 2u;
+    let i = gid.x;
+    if (i >= state[slot * 64u]) {
+        return;
+    }
+    let base = r * vp.region_words;
+    let cap = vp.capacity;
+    let m = transforms[slot];
+    let pos = (m * vec4<f32>(particles[base + i], particles[base + cap + i], particles[base + 2u * cap + i], 1.0)).xyz;
+    if (vp.cull_mode != 3u) {
+        var radius = 0.0;
+        switch vp.cull_mode {
+            case 1u: { radius = abs(particles[base + vp.radius_word * cap + i]) * vp.radius_scale; }
+            case 2u: {
+                radius = max(abs(particles[base + 28u * cap + i]),
+                    max(abs(particles[base + 29u * cap + i]), abs(particles[base + 30u * cap + i]))) * vp.radius_scale;
+            }
+            default: {
+                radius = max(abs(particles[base + 10u * cap + i]), abs(particles[base + 11u * cap + i]));
+            }
+        }
+        radius *= max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
+        for (var k = 0u; k < 6u; k++) {
+            let pl = vp.planes[k];
+            if (dot(pl.xyz, pos) + pl.w < -radius) {
+                return;
+            }
+        }
+    }
+    let at = atomicAdd(&draw[1], 1u);
+    vals[at] = r * cap + i;
+    if (vp.sort_mode != 0u) {
+        let d = pos - vp.camera_position.xyz;
+        var dist = dot(d, vp.camera_forward.xyz);
+        if (vp.sort_mode == 2u) {
+            dist = length(d);
+        }
+        var key = 0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0));
+        if (vp.sort_mode == 3u) {
+            key = min(bitcast<u32>(particles[base + 27u * cap + i]), 0xFFFFFFFEu);
+        }
+        keys[at] = key;
+    }
+}
+
+@compute @workgroup_size(1)
+fn sort_prep() {
+    let p = sort_len_of(atomicLoad(&draw[1]));
+    set_args(0u, p / WG);
+    set_sort_args(p);
+}
+
+// The sort length's tail past the visible particles sorts last.
+@compute @workgroup_size(WG)
+fn pad(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= atomicLoad(&draw[1])) {
+        keys[i] = NONE;
+        vals[i] = 0u;
     }
 }
