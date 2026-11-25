@@ -69,7 +69,7 @@ struct Bench {
 }
 
 pub fn run(def: &SceneDef, frames: u32, warm_frames: u32, (w, h): (u32, u32)) -> SceneResult {
-    let path = crate::bench_dir().join("scenes").join(def.file);
+    let path = crate::bench_dir().join("..").join(def.file);
     let src = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     let checked = fx_core::check_source(def.file, &src);

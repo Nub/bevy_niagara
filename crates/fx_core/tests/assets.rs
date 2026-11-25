@@ -67,7 +67,7 @@ fn samples_validate_cleanly_and_cook() {
 #[test]
 fn source_model_serialises_to_ron_that_parses_back() {
     // The model's serde form is valid effect source: what tools write, the validator reads.
-    for f in ron_files("samples") {
+    for f in ron_files("samples").into_iter().chain(ron_files("library")) {
         let c = fx_core::check_file(&f).unwrap();
         let src = c.source.unwrap();
         let text = ron::ser::to_string_pretty(&src, ron::ser::PrettyConfig::default()).unwrap();
@@ -139,5 +139,67 @@ fn invalid_samples_give_expected_errors() {
             "{}: error without help: {rendered}",
             f.display()
         );
+    }
+}
+
+/// The reference effect library: every effect validates without
+/// diagnostics, cooks, simulates for two seconds with every emitter spawning
+/// and finite state, and its header names the Niagara tutorial steps it
+/// follows and has a preview strip.
+#[test]
+fn library_effects_validate_cook_and_simulate() {
+    let files = ron_files("library");
+    let names: Vec<_> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    for want in [
+        "campfire.fx.ron",
+        "sparks_burst.fx.ron",
+        "rising_smoke.fx.ron",
+        "magic_swirl.fx.ron",
+        "sword_trail.fx.ron",
+        "debris.fx.ron",
+    ] {
+        assert!(names.iter().any(|n| n == want), "missing library effect {want}");
+    }
+    for f in files {
+        let text = fs::read_to_string(&f).unwrap();
+        assert!(
+            text.contains("Niagara tutorial recipe"),
+            "{}: header must name the Niagara tutorial steps it follows",
+            f.display()
+        );
+        let stem = f.file_name().unwrap().to_string_lossy().replace(".fx.ron", "");
+        let strip = effects_dir().join("library/previews").join(format!("{stem}_strip.png"));
+        assert!(strip.exists(), "{}: no preview {}", f.display(), strip.display());
+
+        let c = fx_core::check_file(&f).unwrap();
+        let diags: Vec<String> = c.diagnostics.iter().map(|d| d.to_string()).collect();
+        assert!(diags.is_empty(), "{}:\n{}", f.display(), diags.join("\n"));
+        let sys = c.cooked.unwrap();
+        let bytes = cook::to_bytes(&sys);
+        assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
+
+        let mut sim = Simulation::new(sys, 7);
+        let mut seen = vec![false; sim.system.emitters.len()];
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0);
+            for (ei, s) in seen.iter_mut().enumerate() {
+                *s |= !sim.particles(ei).is_empty();
+            }
+        }
+        for (e, s) in sim.system.emitters.iter().zip(&seen) {
+            assert!(*s, "{}: emitter {} spawned nothing in 2 s", f.display(), e.name);
+        }
+        for ei in 0..sim.system.emitters.len() {
+            for p in sim.particles(ei) {
+                assert!(
+                    p.position.is_finite() && p.velocity.is_finite(),
+                    "{} produced non-finite state",
+                    f.display()
+                );
+            }
+        }
     }
 }

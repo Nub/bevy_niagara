@@ -1,0 +1,69 @@
+// Rising smoke: a soft, lit, depth-sorted column of puffs that rises,
+// drifts with the wind, swirls, spreads and fades.
+//
+// Niagara tutorial recipe ("Create a smoke effect": Fountain template turned
+// into smoke):
+//  1. Spawn Rate (low, steady).
+//  2. Initialize Particle: long random Lifetime, a small box spawn standing in
+//     for Sphere Location, grey Color with low alpha, random Sprite Size and
+//     Sprite Rotation.
+//  3. Add Velocity upward (slow), Gravity Force set to a weak upward pull
+//     (buoyancy), a sideways wind force (User.Wind, the tutorial's "Wind
+//     Force" step done as a second Gravity Force), Curl Noise Force panning
+//     the field, Drag, then Solve Forces and Velocity.
+//  4. Scale Sprite Size over age (puffs spread), Scale Color alpha over age
+//     (fade in, fade out).
+//  5. Sprite renderer: Alpha blend, lit, Sort Mode = View Depth, soft
+//     particles (the tutorial's depth-fade step).
+// Not available yet: a SubUV smoke flipbook texture and sprite rotation
+// rate (puffs keep their spawn rotation).
+(
+    name: "Rising Smoke",
+    user_parameters: {
+        "User.Wind": Vec3((0.25, 0.0, 0.0)),
+    },
+    emitters: [
+        (
+            name: "Smoke",
+            sim_target: Gpu,
+            max_particles: 256,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(36.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(4.0), Float(6.0)),
+                    "Position": RandomRange(Vec3((-0.15, 0.0, -0.15)), Vec3((0.15, 0.1, 0.15))),
+                    "Color": Color((0.4, 0.4, 0.42, 0.55)),
+                    "Sprite Size": RandomRange(Vec2((0.3, 0.3)), Vec2((0.5, 0.5))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-0.08, 0.35, -0.08)), Vec3((0.08, 0.6, 0.08))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force", inputs: { "Gravity": Vec3((0.0, 0.25, 0.0)) }),
+                (module: "Gravity Force", inputs: { "Gravity": Link(Vec3, "User.Wind") }),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(0.5),
+                    "Noise Frequency": Float(0.6),
+                    "Pan Noise Field": Vec3((0.0, -0.4, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(0.7) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (3.0, 3.0))])),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (0.6, 0.7), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((
+                blend_mode: Alpha,
+                lit: true,
+                sort_mode: ViewDepth,
+                soft_particle_fade_distance: 0.5,
+            ))],
+        ),
+    ],
+)

@@ -23,6 +23,7 @@ repo. Exit code 3 means a regression.
 | `sprites_1m_sorted` | `scenes/sprites_1m_sorted.fx.ron` | none yet (tracks the bitonic sort) |
 | `fire` | `scenes/fire.fx.ron` | 0.2 |
 | `sparks` | `scenes/sparks.fx.ron` | 0.2 |
+| `lib_*` (6) | `../effects/library/*.fx.ron` | 0.2 each (reference effect library) |
 
 Passes: `sim` = `fx_sim` (spawn/update/compaction), `sort` = `fx_cull_sort`
 (cull, depth sort, indirect args), `draw` = `main_transparent_pass_3d`,

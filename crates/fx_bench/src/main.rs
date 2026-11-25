@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// A fixed benchmark scene.
 pub struct SceneDef {
     pub name: &'static str,
-    /// File in `bench/scenes/`.
+    /// Effect file, relative to the repository root.
     pub file: &'static str,
     pub camera: [f32; 3],
     pub target: [f32; 3],
@@ -38,30 +38,73 @@ pub struct SceneDef {
 pub const SCENES: &[SceneDef] = &[
     SceneDef {
         name: "sprites_1m",
-        file: "sprites_1m.fx.ron",
+        file: "bench/scenes/sprites_1m.fx.ron",
         camera: [0.0, 2.0, 7.0],
         target: [0.0, 2.0, 0.0],
         budget_gpu_ms: Some(2.0),
     },
     SceneDef {
         name: "sprites_1m_sorted",
-        file: "sprites_1m_sorted.fx.ron",
+        file: "bench/scenes/sprites_1m_sorted.fx.ron",
         camera: [0.0, 2.0, 7.0],
         target: [0.0, 2.0, 0.0],
         budget_gpu_ms: None,
     },
     SceneDef {
         name: "fire",
-        file: "fire.fx.ron",
+        file: "bench/scenes/fire.fx.ron",
         camera: [0.0, 1.0, 3.5],
         target: [0.0, 0.8, 0.0],
         budget_gpu_ms: Some(0.2),
     },
     SceneDef {
         name: "sparks",
-        file: "sparks.fx.ron",
+        file: "bench/scenes/sparks.fx.ron",
         camera: [0.0, 1.0, 4.0],
         target: [0.5, 0.8, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    // Reference effect library (effects/library): 0.2 ms each.
+    SceneDef {
+        name: "lib_campfire",
+        file: "effects/library/campfire.fx.ron",
+        camera: [0.0, 1.0, 3.2],
+        target: [0.0, 0.7, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "lib_sparks_burst",
+        file: "effects/library/sparks_burst.fx.ron",
+        camera: [0.0, 1.2, 4.0],
+        target: [0.0, 0.9, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "lib_rising_smoke",
+        file: "effects/library/rising_smoke.fx.ron",
+        camera: [0.0, 1.6, 5.5],
+        target: [0.0, 1.4, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "lib_magic_swirl",
+        file: "effects/library/magic_swirl.fx.ron",
+        camera: [0.0, 1.2, 3.5],
+        target: [0.0, 0.9, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "lib_sword_trail",
+        file: "effects/library/sword_trail.fx.ron",
+        camera: [0.0, 1.3, 3.5],
+        target: [0.0, 1.2, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "lib_debris",
+        file: "effects/library/debris.fx.ron",
+        camera: [0.0, 1.3, 5.0],
+        target: [0.0, 1.0, 0.0],
         budget_gpu_ms: Some(0.2),
     },
 ];
@@ -149,7 +192,7 @@ impl SceneResult {
             .collect();
         SceneResult {
             name: def.name.into(),
-            file: format!("bench/scenes/{}", def.file),
+            file: def.file.into(),
             max_particles,
             budget_gpu_ms: def.budget_gpu_ms,
             within_budget: def.budget_gpu_ms.map(|b| total <= b),
@@ -257,7 +300,7 @@ fn main() -> ExitCode {
         }
         Some("list") => {
             for s in SCENES {
-                println!("{:20} bench/scenes/{:28} budget {:?} ms", s.name, s.file, s.budget_gpu_ms);
+                println!("{:20} {:40} budget {:?} ms", s.name, s.file, s.budget_gpu_ms);
             }
             Ok(0)
         }
@@ -583,6 +626,12 @@ fn dashboard(dir: &Path) -> Result<(), String> {
         "history_gpu_typical".into(),
         json!({ "type": "line", "labels": labels, "unit": "ms",
                 "series": series(&["fire", "sparks"], &total) }),
+    );
+    let library: Vec<&str> = SCENES.iter().map(|s| s.name).filter(|n| n.starts_with("lib_")).collect();
+    out.insert(
+        "history_gpu_library".into(),
+        json!({ "type": "line", "labels": labels, "unit": "ms",
+                "series": series(&library, &total) }),
     );
     let all: Vec<&str> = SCENES.iter().map(|s| s.name).collect();
     out.insert(

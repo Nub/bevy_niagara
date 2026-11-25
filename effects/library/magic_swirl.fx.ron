@@ -1,0 +1,181 @@
+// Magic swirl: violet and cyan ribbons spiral up from a glowing ring,
+// with twinkling motes around them and a soft core glow.
+//
+// Niagara tutorial recipe ("Magic / spell swirl": Simple Sprite Burst +
+// Dynamic Beam/Ribbon tutorials combined):
+//  1. Motes: Spawn Rate; Initialize Particle with a thin box ring band
+//     (stands in for Torus/Cylinder Location), HDR violet Color, small size.
+//  2. Add Velocity in Cone (upward); Curl Noise Force with a strong, panning
+//     field standing in for Vortex Velocity (the swirl); Drag; Solve Forces
+//     and Velocity.
+//  3. Scale Color over age (violet -> cyan, fade out) and Scale Sprite Size
+//     (twinkle grow/shrink); Sprite renderer Additive.
+//  4. Ribbons: three strand emitters on the ring, each with Initialize
+//     Ribbon (width, twist) and a fixed tangential-upward Add Velocity so
+//     its particles follow one path, the same curl swirl, Ribbon renderer
+//     Additive, tessellated (the tutorial's ribbon step).
+//  5. Core glow: one large additive sprite at a time (a burst, then Spawn
+//     Rate 0.5), alpha pulsing over its 2 s age.
+// Not available yet: Vortex Velocity and Point Attraction (curl noise makes
+// the swirl), Torus/Cylinder Location.
+(
+    name: "Magic Swirl",
+    emitters: [
+        (
+            name: "Motes",
+            sim_target: Gpu,
+            max_particles: 384,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(140.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.2), Float(2.2)),
+                    "Position": RandomRange(Vec3((-0.5, 0.0, -0.5)), Vec3((0.5, 0.05, 0.5))),
+                    "Color": RandomRange(Color((2.0, 0.6, 4.0, 1.0)), Color((3.0, 1.0, 5.0, 1.0))),
+                    "Sprite Size": RandomRange(Vec2((0.03, 0.03)), Vec2((0.07, 0.07))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(30.0),
+                    "Velocity Strength": RandomRange(Float(0.6), Float(1.2)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(3.0),
+                    "Noise Frequency": Float(0.9),
+                    "Pan Noise Field": Vec3((0.0, -0.8, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (1.0, (0.2, 1.2, 0.8))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (0.8, 0.8), (1.0, 0.0)])),
+                }),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (0.3, 0.3)), (0.2, (1.4, 1.4)), (0.5, (0.8, 0.8)), (1.0, (0.2, 0.2))])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Strand A",
+            sim_target: Gpu,
+            max_particles: 160,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.2),
+                    "Position": Vec3((0.45, 0.05, 0.0)),
+                    "Color": Color((0.7, 0.3, 2.6, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.05), "Ribbon Twist": Float(45.0) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((-0.3, 1.0, 0.4)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(3.0),
+                    "Noise Frequency": Float(0.9),
+                    "Pan Noise Field": Vec3((0.0, -0.8, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(1.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.7), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+        (
+            name: "Strand B",
+            sim_target: Gpu,
+            max_particles: 160,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.2),
+                    "Position": Vec3((-0.22, 0.05, 0.39)),
+                    "Color": Color((0.3, 1.4, 2.4, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.05), "Ribbon Twist": Float(45.0) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((-0.25, 1.0, -0.45)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(3.0),
+                    "Noise Frequency": Float(0.9),
+                    "Pan Noise Field": Vec3((0.0, -0.8, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(1.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.7), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+        (
+            name: "Strand C",
+            sim_target: Gpu,
+            max_particles: 160,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.2),
+                    "Position": Vec3((-0.22, 0.05, -0.39)),
+                    "Color": Color((1.4, 0.4, 2.4, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.05), "Ribbon Twist": Float(45.0) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.5, 1.0, 0.05)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(3.0),
+                    "Noise Frequency": Float(0.9),
+                    "Pan Noise Field": Vec3((0.0, -0.8, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(1.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.7), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+        (
+            name: "Core Glow",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(0.5) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": Vec3((0.0, 0.25, 0.0)),
+                    "Color": Color((0.8, 0.3, 1.6, 0.6)),
+                    "Sprite Size": Vec2((1.4, 1.4)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.5, 0.6), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

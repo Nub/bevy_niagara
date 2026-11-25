@@ -22,6 +22,22 @@ fn sample(name: &str) -> fx_core::CookedSystem {
     c.cooked.unwrap_or_else(|| panic!("{name}: {errs:?}"))
 }
 
+const LIBRARY: &[&str] = &[
+    "campfire.fx.ron",
+    "sparks_burst.fx.ron",
+    "rising_smoke.fx.ron",
+    "magic_swirl.fx.ron",
+    "sword_trail.fx.ron",
+    "debris.fx.ron",
+];
+
+fn library(name: &str) -> fx_core::CookedSystem {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../effects/library")
+        .join(name);
+    fx_core::check_file(&path).unwrap().cooked.unwrap_or_else(|| panic!("{name} does not cook"))
+}
+
 fn fields(p: &Particle) -> Vec<(&'static str, f32)> {
     let mut v = Vec::new();
     let mut put = |n: &'static str, xs: &[f32]| xs.iter().for_each(|x| v.push((n, *x)));
@@ -158,12 +174,17 @@ fn gpu_matches_cpu_reference() {
         .map(|n| (n, sample(n), WORDS_PER_PARTICLE))
         .collect();
     systems.push(("extended", extended_system(), WORDS_PER_PARTICLE_EXTENDED));
+    // The reference effect library (effects/library); words per particle vary
+    // by emitter there, so 0 skips that check.
+    for n in LIBRARY {
+        systems.push((n, library(n), 0));
+    }
     for (name, sys, words) in systems {
         let seed = 42;
         let mut cpu = Simulation::new(sys.clone(), seed);
         let mut gpu = GpuEffect::new(&device, &sys, seed).unwrap();
         assert!(
-            gpu.emitters.iter().all(|e| e.words == words),
+            words == 0 || gpu.emitters.iter().all(|e| e.words == words),
             "{name}: words per particle"
         );
         let mut diff = Diff::default();
