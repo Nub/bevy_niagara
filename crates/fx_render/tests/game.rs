@@ -2,7 +2,7 @@
 //! despawn, attached effects follow their parent, typed `User.` parameters,
 //! pool reuse without new GPU instances, and scalability culling.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
@@ -16,8 +16,52 @@ use fx_render::{
     ParamError, ParticleEffect,
 };
 
-/// Bevy apps with a GPU, one at a time.
-static GPU: Mutex<()> = Mutex::new(());
+/// One app (one GPU device) runs every scenario in turn: several GPU apps in
+/// one process crash the driver at exit.
+#[test]
+fn game_api() {
+    let mut app = app();
+    let scenarios: [(&str, fn(&mut App)); 6] = [
+        ("one-shot despawns, looping stays", one_shot_despawns_when_done_and_looping_stays),
+        ("attached effect follows its parent", attached_effect_follows_its_parent),
+        ("user parameters are typed", user_parameters_are_typed),
+        ("pool reuse without new GPU instances", pool_reuses_instances_without_new_gpu_allocations),
+        ("scalability culls by distance and budget", scalability_culls_by_distance_and_budget),
+        ("deactivate, reset and fire", deactivate_reset_and_fire),
+    ];
+    for (name, run) in scenarios {
+        eprintln!("scenario: {name}");
+        run(&mut app);
+        clean(&mut app);
+    }
+}
+
+/// Despawns every effect (and its parents' trees) and restores the settings.
+fn clean(app: &mut App) {
+    let effects: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<ParticleEffect>>()
+        .iter(app.world())
+        .collect();
+    let roots: Vec<Entity> = effects
+        .into_iter()
+        .map(|mut e| {
+            while let Some(p) = app.world().get::<ChildOf>(e) {
+                e = p.parent();
+            }
+            e
+        })
+        .collect();
+    for e in roots {
+        if let Ok(em) = app.world_mut().get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    app.insert_resource(fx_render::FxQuality::default());
+    app.insert_resource(fx_render::FxScalability::default());
+    frames(app, 3);
+    assert_eq!(app.world().resource::<FxPoolStats>().get().live, 0, "effects left live");
+}
 
 fn cook(src: &str) -> Arc<CookedSystem> {
     let c = fx_core::check_source("test.fx.ron", src);
@@ -67,7 +111,9 @@ fn fountain(extra: &str) -> Arc<CookedSystem> {
     ))
 }
 
-fn app() -> App {
+/// Never dropped: tearing down several GPU apps in one process crashes at
+/// exit (SIGSEGV in the driver), so each test leaks its app.
+fn app() -> std::mem::ManuallyDrop<App> {
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
@@ -97,7 +143,7 @@ fn app() -> App {
         RenderTarget::from(image),
         Transform::from_xyz(0.0, 2.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    app
+    std::mem::ManuallyDrop::new(app)
 }
 
 /// Runs `frames` frames of one simulation step each.
@@ -124,25 +170,22 @@ fn spawn(app: &mut App, bundle: impl Bundle) -> Entity {
     app.world_mut().spawn(bundle).id()
 }
 
-#[test]
-fn one_shot_despawns_when_done_and_looping_stays() {
-    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let mut app = app();
+fn one_shot_despawns_when_done_and_looping_stays(app: &mut App) {
     let sys = burst("");
     assert_eq!(sys.duration, Some(0.0), "bursts only: duration is the last burst");
     let one = spawn(
-        &mut app,
+        app,
         (ParticleEffect::shared(sys.clone(), 1), EffectControl::one_shot(), Transform::default()),
     );
-    let looping = spawn(&mut app, (ParticleEffect::shared(sys.clone(), 2), Transform::default()));
-    frames(&mut app, 3);
+    let looping = spawn(app, (ParticleEffect::shared(sys.clone(), 2), Transform::default()));
+    frames(app, 3);
     assert!(app.world().get_entity(one).is_ok());
-    let alive: u32 = counts(&app, one).iter().map(|c| c.0).sum();
+    let alive: u32 = counts(app, one).iter().map(|c| c.0).sum();
     assert!(alive > 0, "one-shot spawned nothing");
     // 0.3 s lifetimes: gone after ~18 steps, plus a few frames of read-back lag.
     let mut despawned_at = None;
     for f in 0..90 {
-        frames(&mut app, 1);
+        frames(app, 1);
         if app.world().get_entity(one).is_err() {
             despawned_at = Some(f + 3);
             break;
@@ -153,17 +196,14 @@ fn one_shot_despawns_when_done_and_looping_stays() {
     assert!(at >= 18, "despawned before its particles died ({at})");
     let c = app.world().get::<EffectControl>(looping).unwrap();
     assert!(!c.is_finished() && c.is_active());
-    frames(&mut app, 2);
+    frames(app, 2);
     let stats = app.world().resource::<FxPoolStats>().get();
     assert_eq!((stats.live, stats.idle), (1, 1), "{stats:?}");
 }
 
-#[test]
-fn attached_effect_follows_its_parent() {
-    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let mut app = app();
+fn attached_effect_follows_its_parent(app: &mut App) {
     let sys = fountain("");
-    let parent = spawn(&mut app, Transform::from_xyz(0.0, 0.0, 0.0));
+    let parent = spawn(app, Transform::from_xyz(0.0, 0.0, 0.0));
     let effect = {
         let mut commands = app.world_mut().commands();
         let id = commands
@@ -177,26 +217,24 @@ fn attached_effect_follows_its_parent() {
         app.world_mut().flush();
         id
     };
-    frames(&mut app, 2);
+    frames(app, 2);
     for (i, x) in [2.0f32, -3.5, 7.25].into_iter().enumerate() {
         app.world_mut().get_mut::<Transform>(parent).unwrap().translation =
             Vec3::new(x, 0.5 * i as f32, -x);
-        frames(&mut app, 1);
+        frames(app, 1);
         let want = Vec3::new(x, 0.5 * i as f32 + 1.0, -x);
         let gt = app.world().get::<GlobalTransform>(effect).unwrap().translation();
         assert!(gt.distance(want) < 1e-5, "main world: {gt} vs {want}");
-        let rt = render_effect(&app, effect, |_, m| m.w_axis.truncate()).unwrap();
+        let rt = render_effect(app, effect, |_, m| m.w_axis.truncate()).unwrap();
         assert!(rt.distance(want) < 1e-5, "render world: {rt} vs {want}");
     }
     // Despawning the parent takes the attached effect with it.
     app.world_mut().entity_mut(parent).despawn();
-    frames(&mut app, 2);
+    frames(app, 2);
     assert!(app.world().get_entity(effect).is_err());
 }
 
-#[test]
-fn user_parameters_are_typed() {
-    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+fn user_parameters_are_typed(app: &mut App) {
     let mut effect = ParticleEffect::shared(burst(""), 1);
     assert_eq!(
         effect.set_param("User.Speed", 3i32),
@@ -223,10 +261,9 @@ fn user_parameters_are_typed() {
     effect.set_param("User.Tint", Color::linear_rgb(0.0, 1.0, 0.0)).unwrap();
 
     // Reaches the GPU instance, and changes per frame.
-    let mut app = app();
-    let e = spawn(&mut app, (effect, Transform::default()));
-    frames(&mut app, 2);
-    let user = render_effect(&app, e, |g, _| g.user.clone()).unwrap();
+    let e = spawn(app, (effect, Transform::default()));
+    frames(app, 2);
+    let user = render_effect(app, e, |g, _| g.user.clone()).unwrap();
     assert_eq!(user[0], Value::Float(5.5));
     assert_eq!(user[1], Value::Color([0.0, 1.0, 0.0, 1.0]));
     app.world_mut()
@@ -234,15 +271,12 @@ fn user_parameters_are_typed() {
         .unwrap()
         .set_param("User.Speed", 9.0)
         .unwrap();
-    frames(&mut app, 1);
-    let user = render_effect(&app, e, |g, _| g.user.clone()).unwrap();
+    frames(app, 1);
+    let user = render_effect(app, e, |g, _| g.user.clone()).unwrap();
     assert_eq!(user[0], Value::Float(9.0));
 }
 
-#[test]
-fn pool_reuses_instances_without_new_gpu_allocations() {
-    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let mut app = app();
+fn pool_reuses_instances_without_new_gpu_allocations(app: &mut App) {
     let sys = burst("");
     let wave = |app: &mut App, seed: u32| -> Vec<Entity> {
         let mut commands = app.world_mut().commands();
@@ -269,30 +303,32 @@ fn pool_reuses_instances_without_new_gpu_allocations() {
         }
         panic!("one-shots never ended");
     };
-    let ids = wave(&mut app, 0);
-    wait_gone(&mut app, &ids);
+    let base = app.world().resource::<FxPoolStats>().get();
+    let ids = wave(app, 0);
+    wait_gone(app, &ids);
     let warm = app.world().resource::<FxPoolStats>().get();
     eprintln!("after the first wave: {warm:?}");
-    assert_eq!((warm.programs, warm.instances_created, warm.idle), (1, 24, 24));
+    assert_eq!(
+        (warm.programs - base.programs, warm.instances_created - base.instances_created),
+        (1, 24)
+    );
     for w in 1..=4 {
-        let ids = wave(&mut app, 100 * w);
-        frames(&mut app, 2);
+        let ids = wave(app, 100 * w);
+        frames(app, 2);
         let mid = app.world().resource::<FxPoolStats>().get();
-        assert_eq!((mid.live, mid.idle), (24, 0), "{mid:?}");
-        wait_gone(&mut app, &ids);
+        assert_eq!(mid.live, 24, "{mid:?}");
+        assert_eq!(mid.instances_created, warm.instances_created, "{mid:?}");
+        wait_gone(app, &ids);
         let s = app.world().resource::<FxPoolStats>().get();
         eprintln!("after wave {w}: {s:?}");
-        assert_eq!(s.programs, 1, "recompiled");
-        assert_eq!(s.instances_created, 24, "new GPU instances after warm-up");
-        assert_eq!(s.instances_reused, 24 * w as u64);
+        assert_eq!(s.programs, warm.programs, "recompiled");
+        assert_eq!(s.instances_created, warm.instances_created, "new GPU instances after warm-up");
+        assert_eq!(s.instances_reused - warm.instances_reused, 24 * w as u64);
         assert_eq!(s.gpu_bytes, warm.gpu_bytes, "GPU memory grew");
     }
 }
 
-#[test]
-fn scalability_culls_by_distance_and_budget() {
-    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let mut app = app();
+fn scalability_culls_by_distance_and_budget(app: &mut App) {
     let sys = fountain(
         "scalability: (max_distance: 20.0, max_instances: 3, bounds_radius: 1.0, \
          spawn_count_scale_by_distance: [(5.0, 1.0), (15.0, 0.5)], \
@@ -302,12 +338,12 @@ fn scalability_culls_by_distance_and_budget() {
     let near: Vec<Entity> = (0..5)
         .map(|i| {
             spawn(
-                &mut app,
+                app,
                 (ParticleEffect::shared(sys.clone(), i), Transform::from_xyz(0.0, 0.0, -(i as f32))),
             )
         })
         .collect();
-    let far = spawn(&mut app, (ParticleEffect::shared(sys.clone(), 9), Transform::from_xyz(0.0, 0.0, -40.0)));
+    let far = spawn(app, (ParticleEffect::shared(sys.clone(), 9), Transform::from_xyz(0.0, 0.0, -40.0)));
     let far_shot = {
         let mut commands = app.world_mut().commands();
         let id = commands
@@ -316,51 +352,48 @@ fn scalability_culls_by_distance_and_budget() {
         app.world_mut().flush();
         id
     };
-    frames(&mut app, 3);
+    frames(app, 3);
     let culled = |app: &App, e: Entity| app.world().get::<EffectControl>(e).unwrap().culled();
-    assert_eq!(culled(&app, far), Some(CullReason::Distance));
+    assert_eq!(culled(app, far), Some(CullReason::Distance));
     assert!(app.world().get_entity(far_shot).is_err(), "culled one-shot not ended");
-    let reasons: Vec<_> = near.iter().map(|&e| culled(&app, e)).collect();
+    let reasons: Vec<_> = near.iter().map(|&e| culled(app, e)).collect();
     assert_eq!(
         reasons,
         [None, None, None, Some(CullReason::Budget), Some(CullReason::Budget)]
     );
     // Culled instances do not simulate.
     let frame_of = |app: &App, e: Entity| render_effect(app, e, |g, _| g.frame).unwrap();
-    let (a, b) = (frame_of(&app, near[0]), frame_of(&app, far));
-    frames(&mut app, 5);
-    assert_eq!(frame_of(&app, near[0]), a + 5);
-    assert_eq!(frame_of(&app, far), b, "a culled effect simulated");
+    let (a, b) = (frame_of(app, near[0]), frame_of(app, far));
+    frames(app, 5);
+    assert_eq!(frame_of(app, near[0]), a + 5);
+    assert_eq!(frame_of(app, far), b, "a culled effect simulated");
     // Spawn scale by distance (camera at distance ~8.2..12.2 from these).
     let scale = |app: &App, e: Entity| app.world().get::<EffectControl>(e).unwrap().spawn_scale();
-    let s0 = scale(&app, near[0]);
+    let s0 = scale(app, near[0]);
     assert!(s0 < 1.0 && s0 > 0.5, "{s0}");
-    assert_eq!(render_effect(&app, near[0], |g, _| g.spawn_scale).unwrap(), s0);
+    assert_eq!(render_effect(app, near[0], |g, _| g.spawn_scale).unwrap(), s0);
     // Low quality: half the spawns, one instance.
     app.insert_resource(fx_render::FxQuality(fx_render::QualityLevel::Low));
-    frames(&mut app, 1);
-    assert!((scale(&app, near[0]) - s0 * 0.5).abs() < 1e-5);
-    let kept = near.iter().filter(|&&e| culled(&app, e).is_none()).count();
+    frames(app, 1);
+    assert!((scale(app, near[0]) - s0 * 0.5).abs() < 1e-5);
+    let kept = near.iter().filter(|&&e| culled(app, e).is_none()).count();
     assert_eq!(kept, 1);
     // Scalability off: nothing culled.
     app.insert_resource(fx_render::FxScalability { enabled: false });
-    frames(&mut app, 1);
-    assert!(near.iter().chain([&far]).all(|&e| culled(&app, e).is_none()));
+    frames(app, 1);
+    assert!(near.iter().chain([&far]).all(|&e| culled(app, e).is_none()));
 }
 
-#[test]
-fn deactivate_reset_and_fire() {
-    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let mut app = app();
-    let e = spawn(&mut app, (ParticleEffect::shared(fountain(""), 4), Transform::default()));
-    frames(&mut app, 30);
+fn deactivate_reset_and_fire(app: &mut App) {
+    let e = spawn(app, (ParticleEffect::shared(fountain(""), 4), Transform::default()));
+    frames(app, 30);
     let next_id = |app: &App| counts(app, e)[0].1;
-    let before = next_id(&app);
+    let before = next_id(app);
     app.world_mut().get_mut::<EffectControl>(e).unwrap().deactivate();
-    frames(&mut app, 30);
-    assert_eq!(next_id(&app), before, "spawned while deactivated");
+    frames(app, 30);
+    assert_eq!(next_id(app), before, "spawned while deactivated");
     app.world_mut().get_mut::<EffectControl>(e).unwrap().reset();
-    frames(&mut app, 1);
-    assert_eq!(render_effect(&app, e, |g, _| g.frame).unwrap(), 1, "reset restarts at frame 0");
-    assert!(next_id(&app) < before);
+    frames(app, 1);
+    assert_eq!(render_effect(app, e, |g, _| g.frame).unwrap(), 1, "reset restarts at frame 0");
+    assert!(next_id(app) < before);
 }

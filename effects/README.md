@@ -164,6 +164,20 @@ scalability: (                 // every field optional
 
 Without `duration`, the cook derives it: an emitter whose spawn modules are only `Spawn Burst Instantaneous` with constant Spawn Times stops spawning after its latest Spawn Time (no spawn modules: at once); if every emitter stops, the effect is a one-shot lasting the latest of them, otherwise (any `Spawn Rate`, or a Spawn Time that is not a constant) it loops. The game runtime stops spawning a one-shot after `duration` and despawns it when its particles are gone. A culled looping effect pauses until it is back in range or view; a culled one-shot ends. The spawn-count scale (the quality level's `spawn_count_scale` times the distance curve) multiplies every spawn request. The game picks the quality level (`Low`, `Medium`, `High` (default), `Epic`, `Cinematic`) at runtime; a level's `max_distance` and `max_instances` replace the base values. Distances, scales, `visibility_grace` and `bounds_radius` must be finite and at least 0 (`max_distance` and `duration` more than 0), curve distances strictly increasing.
 
+**Using effects from a game** (`fx_render::game`; full example in `examples/arena`):
+
+```rust
+let impact: Arc<CookedSystem> = /* cook once, share the Arc: one program and one pool per system */;
+let mut fx = ParticleEffect::shared(impact.clone(), seed);
+fx.set_param("User.Tint", Color::linear_rgb(1.0, 0.4, 0.1))?;   // Err(ParamError::WrongType / Unknown)
+commands.spawn_one_shot(fx, Transform::from_translation(hit));     // despawns itself when done
+commands.attach_effect(hand_bone, ParticleEffect::shared(glow, 1), EffectMode::Looping, Transform::IDENTITY);
+// EffectControl (on every effect): activate(), deactivate(), reset(), fire(), is_finished(), culled()
+// Resources: FxQuality(QualityLevel::Low), FxScalability { enabled }, FxPoolStats::get()
+```
+
+Attach to a skeleton joint with `fx_render::find_joint(root, "b_Head", &children, &names)`. Particles simulate in the effect's local space, so attached effects carry their particles with them.
+
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.
 

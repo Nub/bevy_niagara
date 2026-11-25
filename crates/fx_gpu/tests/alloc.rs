@@ -34,6 +34,9 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
+/// The tests share the allocation counter: one at a time.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn effect(n: u32) -> fx_core::CookedSystem {
     let src = format!(
         r#"(
@@ -133,6 +136,7 @@ fn baseline_allocs(passes: usize, frames: usize) -> Vec<u64> {
 
 #[test]
 fn warm_frames_allocate_a_fixed_amount_independent_of_particles() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // 50k particles/s with 0.5-2 s lifetimes: the living count grows from
     // ~25k to ~60k over the measured frames.
     let (frames, cap) = frame_allocs(200_000, SortMode::ViewDepth, 110);
@@ -163,6 +167,7 @@ fn warm_frames_allocate_a_fixed_amount_independent_of_particles() {
 /// the reused instance's frames allocate what a fresh instance's do.
 #[test]
 fn pooled_reset_allocates_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (device, queue, _) = fx_gpu::headless_device().unwrap();
     let mut fx = GpuEffect::new(&device, &effect(10_000), 3).unwrap();
     let run = |fx: &mut GpuEffect, frames: usize| -> Vec<u64> {
@@ -185,15 +190,16 @@ fn pooled_reset_allocates_nothing() {
     // Warm the reset path once (the first clear_buffer may set up wgpu state).
     fx.reset(4);
     run(&mut fx, 40);
-    let steady = *run(&mut fx, 10).last().unwrap();
+    // wgpu's own per-frame allocations cycle (cleanup every few frames): compare with the steady maximum.
+    let steady = *run(&mut fx, 30).iter().max().unwrap();
     for seed in 5..10 {
         let before = ALLOCS.load(Ordering::Relaxed);
         fx.reset(seed);
         assert_eq!(ALLOCS.load(Ordering::Relaxed) - before, 0, "reset allocated");
         let frames = run(&mut fx, 20);
-        eprintln!("after reset {seed}: allocations per frame {frames:?} (steady {steady})");
+        eprintln!("after reset {seed}: allocations per frame {frames:?} (steady max {steady})");
         // The reset frame records three buffer clears; later frames are steady.
-        assert!(frames[1..].iter().all(|&a| a == steady), "{frames:?} vs {steady}");
+        assert!(frames[1..].iter().all(|&a| a <= steady), "{frames:?} vs {steady}");
     }
     assert_eq!(fx.gpu_bytes(), bytes, "GPU memory changed");
     let (count, next_id) = fx.read_counts(&device, &queue)[0];
