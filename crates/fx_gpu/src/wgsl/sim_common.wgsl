@@ -293,9 +293,9 @@ fn shape_ring(radius: f32, coverage: f32, u: array<f32, 5>) -> vec3<f32> {
 }
 
 // ---- particles: structure of arrays, word w of particle i at w * capacity + i ----
-// Words 0..27 are the base attributes every emitter stores. Words 28..48 (Scale,
+// Words 0..27 are the base attributes every emitter stores. Words 28..49 (Scale,
 // MeshOrientation, the Ribbon attributes, LightRadius, DynamicMaterialParameter,
-// SubImageIndex, Initial.Scale, Initial.RibbonWidth)
+// SubImageIndex, Initial.Scale, Initial.RibbonWidth, CameraOffset)
 // exist only when the generated `EXT` is true; otherwise they stay at their
 // defaults in registers and the buffers end at word 27.
 
@@ -324,6 +324,7 @@ struct Particle {
     sub_image_index: f32,
     initial_scale: vec3<f32>,
     initial_ribbon_width: f32,
+    camera_offset: f32,
     id: u32,
     alive: bool,
 }
@@ -354,6 +355,7 @@ fn new_particle(id: u32) -> Particle {
     p.sub_image_index = 0.0;
     p.initial_scale = vec3<f32>(1.0);
     p.initial_ribbon_width = 0.1;
+    p.camera_offset = 0.0;
     p.id = id;
     p.alive = true;
     return p;
@@ -390,6 +392,7 @@ fn load_particle(i: u32) -> Particle {
         p.sub_image_index = ld(44u, i);
         p.initial_scale = vec3<f32>(ld(45u, i), ld(46u, i), ld(47u, i));
         p.initial_ribbon_width = ld(48u, i);
+        p.camera_offset = ld(49u, i);
     }
     return p;
 }
@@ -427,6 +430,7 @@ fn store_particle(i: u32, p: Particle) {
         st(44u, i, p.sub_image_index);
         st(45u, i, p.initial_scale.x); st(46u, i, p.initial_scale.y); st(47u, i, p.initial_scale.z);
         st(48u, i, p.initial_ribbon_width);
+        st(49u, i, p.camera_offset);
     }
 }
 

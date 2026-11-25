@@ -18,6 +18,7 @@
 //! `fx_core::sim`; the GPU clamps the request to the free room.
 
 pub mod codegen;
+mod data;
 mod emitter_cpu;
 pub mod events;
 pub mod lights;
@@ -44,8 +45,11 @@ pub const WORDS_PER_PARTICLE: u32 = 28;
 /// (`fx_core::cook::CookedEmitter::uses_extended_attributes`): the base 28,
 /// then Scale, MeshOrientation, RibbonID, RibbonWidth, RibbonTwist,
 /// RibbonLinkOrder, LightRadius, DynamicMaterialParameter (words 28..43),
-/// SubImageIndex (44), Initial.Scale (45..47) and Initial.RibbonWidth (48).
-pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 49;
+/// SubImageIndex (44), Initial.Scale (45..47), Initial.RibbonWidth (48) and
+/// CameraOffset (49).
+pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 50;
+/// Word of `Particles.CameraOffset` in the extended layout.
+pub const WORD_CAMERA_OFFSET: u32 = 49;
 /// Word of `Particles.SubImageIndex` in the extended layout.
 pub const WORD_SUB_IMAGE_INDEX: u32 = 44;
 /// `User.` parameters a system may have on the GPU.
@@ -112,7 +116,7 @@ struct Pipelines {
     finish: wgpu::ComputePipeline,
     /// Sorts the emitter's events (emitters that write events).
     event_rank: Option<wgpu::ComputePipeline>,
-    /// The update reads the scene bindings (group 2).
+    /// The update and spawn read the data interfaces (group 1) and the scene (group 2).
     uses_scene: bool,
 }
 
@@ -158,9 +162,9 @@ pub struct GpuEffect {
     /// The events and their sorted order.
     pub event_data: wgpu::Buffer,
     scene: SceneBindings,
+    data: data::DataBindings,
     /// The ray-tracing scene bind group (group 3), when RayTraced collisions trace rays.
     ray_tracing_scene: Option<wgpu::BindGroup>,
-    empty_bind_group: wgpu::BindGroup,
     slot: u32,
     scratch: [u8; FRAME_BYTES],
 }
@@ -186,7 +190,7 @@ pub struct SceneView {
 }
 
 /// Bytes of the `Scene` uniform in `scene.wgsl`.
-const SCENE_BYTES: usize = 4 * 64 + 16 + 16;
+const SCENE_BYTES: usize = 4 * 64 + 16 + 16 + 16;
 
 /// Group 2: the scene uniform and the depth texture (an `R32Float` copy of
 /// the view's depth, reverse-Z).
@@ -350,16 +354,8 @@ impl GpuEffect {
             label: Some("fx_gpu sim args"),
             entries: &[storage_entry(0, false)],
         });
-        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("fx_gpu empty"),
-            entries: &[],
-        });
-        let empty_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fx_gpu empty"),
-            layout: &empty_layout,
-            entries: &[],
-        });
         let scene = SceneBindings::new(device);
+        let data = data::DataBindings::new(device, system);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fx_gpu sim"),
             bind_group_layouts: &[Some(&layout)],
@@ -372,7 +368,7 @@ impl GpuEffect {
         });
         let scene_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fx_gpu sim scene"),
-            bind_group_layouts: &[Some(&layout), Some(&empty_layout), Some(&scene.layout)],
+            bind_group_layouts: &[Some(&layout), Some(&data.layout), Some(&scene.layout)],
             immediate_size: 0,
         });
         let rt_pipeline_layout = options.ray_tracing_layout.map(|rt| {
@@ -380,7 +376,7 @@ impl GpuEffect {
                 label: Some("fx_gpu sim ray tracing"),
                 bind_group_layouts: &[
                     Some(&layout),
-                    Some(&empty_layout),
+                    Some(&data.layout),
                     Some(&scene.layout),
                     Some(rt),
                 ],
@@ -441,13 +437,18 @@ impl GpuEffect {
                     cache: None,
                 })
             };
+            // Kernels running module code read the data interfaces and the scene when used.
+            let modules_read = shader.uses_scene || shader.uses_data;
             let pipe = |entry: &str| {
                 let writes_args = entry == "begin" || entry == "spawn_prep";
+                let runs_modules = entry == "update" || entry == "spawn";
                 make(
                     &module,
                     entry,
                     if writes_args {
                         &args_pipeline_layout
+                    } else if runs_modules && modules_read {
+                        &scene_pipeline_layout
                     } else {
                         &pipeline_layout
                     },
@@ -472,21 +473,13 @@ impl GpuEffect {
             });
             let pipelines = Pipelines {
                 begin: pipe("begin"),
-                update: make(
-                    &module,
-                    "update",
-                    if shader.uses_scene {
-                        &scene_pipeline_layout
-                    } else {
-                        &pipeline_layout
-                    },
-                ),
+                update: pipe("update"),
                 update_rt,
                 spawn_prep: pipe("spawn_prep"),
                 spawn: pipe("spawn"),
                 finish: pipe("finish"),
                 event_rank: shader.writes_events.then(|| pipe("event_rank")),
-                uses_scene: shader.uses_scene,
+                uses_scene: modules_read,
             };
             let particle_buffer = |i: usize| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -597,8 +590,8 @@ impl GpuEffect {
             event_counts,
             event_data,
             scene,
+            data,
             ray_tracing_scene: None,
-            empty_bind_group,
             slot: 0,
             scratch: [0; FRAME_BYTES],
         })
@@ -613,6 +606,45 @@ impl GpuEffect {
             }
             _ => false,
         }
+    }
+
+    /// Binds mesh data interface `name` (SkeletalMesh or StaticMesh) to
+    /// `mesh`, posed by `pose` (see `fx_core::data::MeshPose`). Uploads the
+    /// mesh: call when the mesh changes, not every frame. Returns false if no
+    /// such data interface is declared.
+    pub fn set_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        name: &str,
+        mesh: &fx_core::data::MeshData,
+        pose: fx_core::data::MeshPose,
+    ) -> bool {
+        self.data.set_mesh(device, &self.system, name, mesh, pose)
+    }
+
+    /// Moves a bound mesh to a new pose, `interval` seconds after its last
+    /// one: one matrix per joint (skinned) or one (static), from mesh space to
+    /// the effect's simulation space. Writes in place; call every frame the
+    /// mesh moves. Returns false if `name` is not a bound mesh.
+    pub fn set_mesh_pose(
+        &mut self,
+        queue: &wgpu::Queue,
+        name: &str,
+        matrices: &[bevy_math::Mat4],
+        interval: f32,
+    ) -> bool {
+        self.data
+            .set_mesh_pose(queue, &self.system, name, matrices, interval)
+    }
+
+    /// Binds texture data interface `name`. Returns false if it is not declared.
+    pub fn set_texture(
+        &mut self,
+        device: &wgpu::Device,
+        name: &str,
+        texture: &fx_core::data::TextureData,
+    ) -> bool {
+        self.data.set_texture(device, &self.system, name, texture)
     }
 
     /// Call after each queue submission that contained steps: frees the
@@ -666,14 +698,26 @@ impl GpuEffect {
         use bevy_math::{Mat4, Vec4};
         self.scene.world_from_local = world_from_local;
         let local_from_world = world_from_local.inverse();
-        let (clip_from_local, camera, size, flags) = match view {
-            Some(v) => (
-                v.clip_from_world * world_from_local,
-                local_from_world.transform_point3(v.camera_position),
-                [v.size[0] as f32, v.size[1] as f32],
-                1u32,
-            ),
-            None => (Mat4::IDENTITY, bevy_math::Vec3::ZERO, [1.0, 1.0], 0),
+        let (clip_from_local, camera, size, flags, forward) = match view {
+            Some(v) => {
+                // The view direction: from the near plane's centre deeper in
+                // (reverse-Z: 1 is near), for perspective and orthographic alike.
+                let world_from_clip = v.clip_from_world.inverse();
+                let near = world_from_clip.project_point3(bevy_math::Vec3::new(0.0, 0.0, 1.0));
+                let deeper = world_from_clip.project_point3(bevy_math::Vec3::new(0.0, 0.0, 0.5));
+                let forward = local_from_world
+                    .transform_vector3(deeper - near)
+                    .try_normalize()
+                    .unwrap_or(bevy_math::Vec3::NEG_Z);
+                (
+                    v.clip_from_world * world_from_local,
+                    local_from_world.transform_point3(v.camera_position),
+                    [v.size[0] as f32, v.size[1] as f32],
+                    1u32,
+                    forward,
+                )
+            }
+            None => (Mat4::IDENTITY, bevy_math::Vec3::ZERO, [1.0, 1.0], 0, bevy_math::Vec3::NEG_Z),
         };
         let mut b = [0u8; SCENE_BYTES];
         let mut w = 0usize;
@@ -694,6 +738,7 @@ impl GpuEffect {
         put(size[1]);
         put(f32::from_bits(flags));
         put(0.0);
+        Vec4::from((forward, 0.0)).to_array().into_iter().for_each(&mut put);
         queue.write_buffer(&self.scene.uniform, 0, &b);
     }
 
@@ -822,14 +867,14 @@ impl GpuEffect {
             pass.set_bind_group(0, bg, &[offset as u32]);
             match (&p.update_rt, &self.ray_tracing_scene) {
                 (Some(update_rt), Some(rt)) => {
-                    pass.set_bind_group(1, &self.empty_bind_group, &[]);
+                    pass.set_bind_group(1, &self.data.bind_group, &[]);
                     pass.set_bind_group(2, &self.scene.bind_group, &[]);
                     pass.set_bind_group(3, rt, &[]);
                     pass.set_pipeline(update_rt);
                 }
                 _ => {
                     if p.uses_scene {
-                        pass.set_bind_group(1, &self.empty_bind_group, &[]);
+                        pass.set_bind_group(1, &self.data.bind_group, &[]);
                         pass.set_bind_group(2, &self.scene.bind_group, &[]);
                     }
                     pass.set_pipeline(&p.update);
@@ -860,6 +905,10 @@ impl GpuEffect {
                 timestamp_writes: None,
             });
             pass.set_bind_group(0, bg, &[offset as u32]);
+            if p.uses_scene {
+                pass.set_bind_group(1, &self.data.bind_group, &[]);
+                pass.set_bind_group(2, &self.scene.bind_group, &[]);
+            }
             pass.set_pipeline(&p.spawn);
             pass.dispatch_workgroups_indirect(&em.args, 16);
             pass.set_pipeline(&p.finish);
@@ -921,6 +970,7 @@ impl GpuEffect {
                     p.sub_image_index = w(44, i);
                     p.initial_scale = [w(45, i), w(46, i), w(47, i)].into();
                     p.initial_ribbon_width = w(48, i);
+                    p.camera_offset = w(49, i);
                 }
                 ps.push(p);
             }
@@ -949,6 +999,7 @@ impl GpuEffect {
             .sum::<u64>()
             + self.event_counts.size()
             + self.event_data.size()
+            + self.data.bytes()
     }
 }
 

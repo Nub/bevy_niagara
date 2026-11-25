@@ -19,6 +19,7 @@ use fx_core::types::{Value, ValueType};
 const COMMON: &str = include_str!("wgsl/sim_common.wgsl");
 const SCENE: &str = include_str!("wgsl/scene.wgsl");
 const SCENE_RT: &str = include_str!("wgsl/scene_rt.wgsl");
+const DATA: &str = include_str!("wgsl/data.wgsl");
 
 /// Stage numbers used in random keys (as in `fx_core::sim`).
 const STAGE_PARTICLE_SPAWN: u32 = 4;
@@ -90,6 +91,8 @@ struct Gen<'a> {
     uses_scene: bool,
     /// A module traces rays (group 3).
     uses_tlas: bool,
+    /// A module reads mesh or texture data interfaces (group 1).
+    uses_data: bool,
 }
 
 impl Gen<'_> {
@@ -146,6 +149,7 @@ impl Gen<'_> {
                 attr::SUB_IMAGE_INDEX => "(*p).sub_image_index",
                 attr::INITIAL_SCALE => "(*p).initial_scale",
                 attr::INITIAL_RIBBON_WIDTH => "(*p).initial_ribbon_width",
+                attr::CAMERA_OFFSET => "(*p).camera_offset",
                 _ => "0.0",
             }
             .into(),
@@ -403,6 +407,18 @@ impl Gen<'_> {
                 args[0], args[1]
             )
             .unwrap(),
+            Op::CameraPosition => {
+                self.uses_scene = true;
+                writeln!(b, "    return scene_camera_position();").unwrap();
+            }
+            Op::CameraForward => {
+                self.uses_scene = true;
+                writeln!(b, "    return scene_camera_forward();").unwrap();
+            }
+            Op::SceneDepth => {
+                self.uses_scene = true;
+                writeln!(b, "    return scene_depth_at({});", args[1]).unwrap();
+            }
             Op::Compare => {
                 let op = match &node.args[2] {
                     CookedInput::Const(Value::Int(i)) => *i,
@@ -840,6 +856,59 @@ impl Gen<'_> {
                 writeln!(o, "    (*p).position = cur_event.position + {off};").unwrap();
                 writeln!(o, "    (*p).velocity += cur_event.velocity * {s};").unwrap();
             }
+            ModuleKind::SkeletalMeshLocation | ModuleKind::StaticMeshLocation => {
+                self.uses_data = true;
+                let int = |slot: usize| match m.inputs[slot] {
+                    CookedInput::Const(Value::Int(i)) => i,
+                    _ => 0,
+                };
+                let skeletal = kind == ModuleKind::SkeletalMeshLocation;
+                let di = int(0).max(0);
+                let (mode, offset, inherit) = if skeletal {
+                    (int(1), inp(2, self), inp(3, self))
+                } else {
+                    (fx_core::data::SAMPLE_SURFACE, inp(1, self), inp(2, self))
+                };
+                writeln!(o, "    let offset = {offset};\n    let inherit = {inherit};").unwrap();
+                if mode == fx_core::data::SAMPLE_BONES {
+                    writeln!(o, "    let s = mesh_sample_bone({di}u, rand_unit(k, 128u));").unwrap();
+                } else {
+                    writeln!(
+                        o,
+                        "    let s = mesh_sample_surface({di}u, vec3<f32>(rand_unit(k, 128u), rand_unit(k, 129u), rand_unit(k, 130u)));"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    o,
+                    "    if (s.ok) {{\n        (*p).position = s.position + s.normal * offset;\n        (*p).velocity += s.velocity * inherit;\n    }}"
+                )
+                .unwrap();
+            }
+            ModuleKind::SampleTexture => {
+                self.uses_data = true;
+                let di = match m.inputs[0] {
+                    CookedInput::Const(Value::Int(i)) => i.max(0),
+                    _ => 0,
+                };
+                let blend = match m.inputs[3] {
+                    CookedInput::Const(Value::Int(i)) => i,
+                    _ => 0,
+                };
+                let (uv, scale) = (inp(1, self), inp(2, self));
+                writeln!(o, "    let c = texture_sample({di}u, {uv}) * {scale};").unwrap();
+                if blend == 1 {
+                    writeln!(o, "    (*p).color *= c;").unwrap();
+                } else {
+                    writeln!(o, "    (*p).color = c;").unwrap();
+                }
+            }
+            ModuleKind::CameraOffset => {
+                let amount = inp(0, self);
+                let additive = matches!(m.inputs[1], CookedInput::Const(Value::Int(1)));
+                let op = if additive { "+=" } else { "=" };
+                writeln!(o, "    (*p).camera_offset {op} {amount};").unwrap();
+            }
             ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
         }
         writeln!(o, "    }}").unwrap();
@@ -865,6 +934,8 @@ pub struct EmitterShader {
     pub uses_scene: bool,
     /// Traces rays (bind group 3: the ray-tracing scene).
     pub uses_tlas: bool,
+    /// Reads mesh or texture data interfaces (bind group 1, see `wgsl/data.wgsl`).
+    pub uses_data: bool,
     /// Writes events: has an `event_rank` pass.
     pub writes_events: bool,
 }
@@ -888,6 +959,7 @@ pub fn emitter_shader(
         ray_tracing: options.ray_tracing,
         uses_scene: false,
         uses_tlas: false,
+        uses_data: false,
     };
     g.out
         .push_str("fn spawn_particle(p: ptr<function, Particle>) {\n");
@@ -915,7 +987,7 @@ pub fn emitter_shader(
     }
     write!(
         source,
-        "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..48 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n",
+        "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..49 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n",
         emitter.name, sys.name
     )
     .unwrap();
@@ -924,6 +996,9 @@ pub fn emitter_shader(
     }
     if g.uses_tlas {
         source.push_str(SCENE_RT);
+    }
+    if g.uses_data {
+        source.push_str(DATA);
     }
     write!(
         source,
@@ -936,6 +1011,7 @@ pub fn emitter_shader(
         extended,
         uses_scene: g.uses_scene,
         uses_tlas: g.uses_tlas,
+        uses_data: g.uses_data,
         writes_events: EventKind::ALL
             .iter()
             .any(|k| events.region(ei, *k).is_some()),

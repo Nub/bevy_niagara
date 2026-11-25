@@ -10,8 +10,9 @@ struct Scene {
     local_from_world: mat4x4<f32>,
     camera: vec4<f32>,    // camera position (simulation space)
     size: vec2<f32>,      // depth texture size in pixels
-    flags: u32,           // 1: depth valid
+    flags: u32,           // 1: a view (and its depth) is bound
     pad: u32,
+    forward: vec4<f32>,   // camera view direction (simulation space), (0, 0, -1) without a view
 }
 
 @group(2) @binding(0) var<uniform> scene: Scene;
@@ -95,4 +96,37 @@ fn scene_depth_contact(pos: vec3<f32>, radius: f32, thickness: f32) -> Contact {
         n = -n;
     }
     return Contact(true, n, s.xyz);
+}
+
+// ---- Camera Query and Scene Depth data interfaces ----
+
+fn scene_camera_position() -> vec3<f32> {
+    return scene.camera.xyz;
+}
+
+fn scene_camera_forward() -> vec3<f32> {
+    return scene.forward.xyz;
+}
+
+// Distance from the camera to the scene surface seen through `pos`
+// (fx_core::data::NO_SCENE_DEPTH where nothing is known).
+fn scene_depth_at(pos: vec3<f32>) -> f32 {
+    let none = 1.0e30;
+    if ((scene.flags & 1u) == 0u) {
+        return none;
+    }
+    let clip = scene.clip_from_local * vec4<f32>(pos, 1.0);
+    if (!(clip.w > 0.0)) {
+        return none;
+    }
+    let ndc = clip.xy / clip.w;
+    if (any(abs(ndc) >= vec2<f32>(1.0))) {
+        return none;
+    }
+    let px = vec2<i32>(floor(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * scene.size));
+    let s = scene_point(px);
+    if (s.w == 0.0) {
+        return none;
+    }
+    return length(s.xyz - scene.camera.xyz);
 }
