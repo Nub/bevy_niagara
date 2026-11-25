@@ -2071,6 +2071,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fx_bench"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "fx_core",
+ "fx_render",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fx_core"
 version = "0.1.0"
 dependencies = [

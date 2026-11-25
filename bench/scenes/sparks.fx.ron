@@ -1,0 +1,44 @@
+// Bench scene: a continuous shower of sparks (like a grinder): fast,
+// velocity-aligned, falling under gravity, cooling and shrinking.
+// Steady state ~350 particles.
+// Budget: whole effect (sim + cull + draw) under 0.2 ms on the 3080 at 1080p.
+(
+    name: "Sparks",
+    emitters: [
+        (
+            name: "Sparks",
+            sim_target: Gpu,
+            max_particles: 512,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(400.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.5), Float(1.2)),
+                    "Position": Vec3((0.0, 1.0, 0.0)),
+                    "Color": Color((5.0, 3.5, 1.5, 1.0)),
+                    "Sprite Size": Vec2((0.02, 0.08)),
+                    "Mass": RandomRange(Float(0.5), Float(1.5)),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((1.0, 0.6, 0.0)),
+                    "Cone Angle": Float(25.0),
+                    "Velocity Strength": RandomRange(Float(3.0), Float(6.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(0.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (0.6, (1.0, 0.4, 0.1)), (1.0, (0.4, 0.05, 0.0))])),
+                }),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (1.0, 1.0)), (1.0, (0.3, 0.3))])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+    ],
+)

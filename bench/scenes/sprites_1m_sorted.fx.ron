@@ -1,0 +1,33 @@
+// Bench scene: 1M GPU sprites, alpha blended and depth sorted (bitonic). One burst that
+// lives for the whole run, so every measured frame simulates and draws 1M.
+// Tracks the bitonic sort at scale; no budget yet.
+(
+    name: "Sprites 1M Sorted",
+    emitters: [(
+        name: "Sprites",
+        sim_target: Gpu,
+        max_particles: 1000000,
+        emitter_update: [
+            (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1000000) }),
+        ],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": Float(1000.0),
+                "Position": RandomRange(Vec3((-2.0, 0.0, -2.0)), Vec3((2.0, 4.0, 2.0))),
+                "Color": Color((1.0, 0.6, 0.2, 1.0)),
+                "Sprite Size": RandomRange(Vec2((0.01, 0.01)), Vec2((0.03, 0.03))),
+            }),
+            (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-0.2, -0.2, -0.2)), Vec3((0.2, 0.2, 0.2))) }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Gravity Force", inputs: { "Gravity": Vec3((0.0, -0.05, 0.0)) }),
+            (module: "Drag", inputs: { "Drag": Float(0.1) }),
+            (module: "Solve Forces and Velocity"),
+            (module: "Scale Color", inputs: {
+                "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+            }),
+        ],
+        renderers: [Sprite((blend_mode: Alpha, sort_mode: ViewDepth))],
+    )],
+)

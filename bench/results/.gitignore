@@ -1,0 +1,3 @@
+# Runs with uncommitted changes (and the compare demo) stay local.
+*-dirty.json
+local/
