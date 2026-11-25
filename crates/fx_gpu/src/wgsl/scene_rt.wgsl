@@ -22,12 +22,12 @@ fn scene_ray(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
     return hit.t;
 }
 
-// The surface a particle crossed moving from `from` to `to` this step (or
-// within `radius` of `to`). The normal comes from two more rays beside the
+// The surface a particle crossed moving from `p_from` to `p_to` this step (or
+// within `radius` of `p_to`). The normal comes from two more rays beside the
 // first; without them, it faces back along the move.
-fn scene_ray_contact(from: vec3<f32>, to: vec3<f32>, radius: f32, _thickness: f32) -> Contact {
-    let a = (scene.world_from_local * vec4<f32>(from, 1.0)).xyz;
-    let b = (scene.world_from_local * vec4<f32>(to, 1.0)).xyz;
+fn scene_ray_contact(p_from: vec3<f32>, p_to: vec3<f32>, radius: f32, _thickness: f32) -> Contact {
+    let a = (scene.world_from_local * vec4<f32>(p_from, 1.0)).xyz;
+    let b = (scene.world_from_local * vec4<f32>(p_to, 1.0)).xyz;
     let scale = length(scene.world_from_local[0].xyz);
     let d = b - a;
     let len = length(d);
