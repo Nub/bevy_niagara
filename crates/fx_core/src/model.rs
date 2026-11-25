@@ -227,6 +227,9 @@ pub struct RibbonSource {
     pub link_order: RibbonLinkOrderMode,
     /// Subdivisions per segment, 1..=16.
     pub tessellation_factor: u32,
+    /// Visible to Solari's rays (reflections, bounce light, shadows); the
+    /// (emissive) ribbon lights the scene. Off by default, as in Niagara.
+    pub ray_tracing: bool,
     /// Asset path; `None` draws plain colour.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -253,6 +256,7 @@ impl Default for RibbonSource {
             tiling_length: 1.0,
             link_order: RibbonLinkOrderMode::default(),
             tessellation_factor: 1,
+            ray_tracing: false,
             texture: None,
             material: None,
             span: Span::default(),

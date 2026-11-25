@@ -333,6 +333,12 @@ pub const RIBBON_FIELDS: &[RendererField] = &[
         "subdivisions per segment",
     ),
     field(
+        "ray_tracing",
+        "bool",
+        "false",
+        "Solari: seen in reflections and bounce light, casts shadows, lights the scene (needs fx_solari)",
+    ),
+    field(
         "texture",
         "\"asset/path.png\"",
         "none",

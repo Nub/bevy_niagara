@@ -237,6 +237,8 @@ pub struct CookedRibbon {
     pub link_order: RibbonLinkOrderMode,
     /// Subdivisions per segment, 1..=16.
     pub tessellation_factor: u32,
+    /// In Solari's ray-traced scene (needs fx_solari).
+    pub ray_tracing: bool,
     /// Asset path; `None` draws plain colour.
     pub texture: Option<String>,
     /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
@@ -258,6 +260,7 @@ fn cook_ribbon(r: &RibbonSource) -> CookedRibbon {
         tiling_length: r.tiling_length,
         link_order: r.link_order,
         tessellation_factor: r.tessellation_factor,
+        ray_tracing: r.ray_tracing,
         texture: r.texture.clone(),
         material: r.material.clone(),
     }

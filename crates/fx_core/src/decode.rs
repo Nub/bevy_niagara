@@ -350,6 +350,9 @@ fn decode_ribbon(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option
         )
         .unwrap_or(r.tessellation_factor);
     }
+    if let Some(v) = f.take("ray_tracing") {
+        r.ray_tracing = boolean(v, "ray_tracing", d).unwrap_or_default();
+    }
     if let Some(v) = f.take("texture") {
         r.texture = asset_path(
             v,

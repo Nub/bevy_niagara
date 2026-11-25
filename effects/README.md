@@ -40,6 +40,7 @@ Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: 
 | `tiling_length` | metres > 0 per texture repeat | `1.0` |
 | `link_order` | `SpawnOrder`, `Custom` (by `Particles.RibbonLinkOrder`, ascending) | `SpawnOrder` |
 | `tessellation_factor` | subdivisions per segment, 1..=16 | `1` |
+| `ray_tracing` | Solari: in reflections and shadows, lights the scene (needs `FxSolariPlugin`) | `false` |
 | `texture`, `material` | asset paths | none |
 
 `Mesh` draws a mesh per particle, scaled by `Particles.Scale` and rotated by `Particles.MeshOrientation` (`Initialize Mesh`, `Update Mesh Orientation`):
