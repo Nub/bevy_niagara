@@ -286,12 +286,12 @@ fn setup_scene(
         MeshMaterial3d(floor),
     ));
     commands.insert_resource(GlobalAmbientLight {
-        brightness: 120.0,
+        brightness: 350.0,
         ..default()
     });
     commands.spawn((
         DirectionalLight {
-            illuminance: 1500.0,
+            illuminance: 4000.0,
             ..default()
         },
         Transform::from_xyz(6.0, 12.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
