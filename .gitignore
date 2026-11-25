@@ -1,2 +1,5 @@
 /target
 *.fxb
+# Tutorial assets and reference frames (third-party; fetched by
+# testdata/tutorial_assets.sh, never committed).
+/testdata/tutorial_assets/

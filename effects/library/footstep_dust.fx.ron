@@ -1,0 +1,113 @@
+// Footstep dust: a character walks along +X; at every step (alternating left
+// and right foot, 0.35 s apart) a low puff of warm dust kicks out along the
+// ground, swells and settles.
+//
+// Niagara tutorial recipe: Vive Games, "Unreal Engine 5 Niagara Footsteps
+// Tutorial" (Footstep series #29), https://www.youtube.com/watch?v=4LevtPm4i_I
+//  1. 00:23 Dust Niagara: Simple Sprite Burst -> Spawn Burst Interval (one
+//     puff of 14 sprites per step); Initialize Particle (short random
+//     Lifetime, warm beige Color, random size and rotation).
+//  2. Shape Location Sphere (small, at the foot), Add Velocity from Point
+//     (outward from the foot) with Velocity Scale (1, 0.3, 1) so it spreads
+//     low along the ground; Drag slows it.
+//  3. Scale Sprite Size grows the puffs; Scale Color fades alpha in and out;
+//     Sprite Rotation Rate for a slow roll.
+//  4. Sprite renderer: Alpha, dust texture (textures/puff.png), ViewDepth
+//     sort, soft particles.
+//  5. 05:25 Adding footsteps dust: the tutorial spawns the system from the
+//     character's footstep (anim notify, no Blueprint). Here the feet are
+//     two emitters ("Left Foot", "Right Foot") whose burst position walks
+//     with Emitter.Age (Multiply Vec3 by Float), offset half a step.
+// Gaps: no animation notify or character: the walk is faked by moving the
+// spawn point with emitter age.
+(
+    name: "Footstep Dust",
+    emitters: [
+        (
+            name: "Left Foot",
+            sim_target: Gpu,
+            max_particles: 128,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(4.2) }),
+                (module: "Spawn Burst Interval", inputs: { "Spawn Count": Int(14), "Spawn Interval": Float(0.7), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.9), Float(1.4)),
+                    "Color": Color((0.95, 0.86, 0.72, 0.75)),
+                    "Sprite Size": RandomRange(Vec2((0.22, 0.22)), Vec2((0.36, 0.36))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Sphere,
+                    "Sphere Radius": Float(0.06),
+                    "Offset": Dynamic("Add Vec3", {
+                        "A": Vec3((-2.4, 0.06, 0.12)),
+                        "B": Dynamic("Multiply Vec3 by Float", { "A": Vec3((1.15, 0.0, 0.0)), "B": Link(Float, "Emitter.LoopedAge") }),
+                    }),
+                }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Strength": RandomRange(Float(0.6), Float(1.3)),
+                    "Velocity Origin": Dynamic("Add Vec3", {
+                        "A": Vec3((-2.4, 0.0, 0.12)),
+                        "B": Dynamic("Multiply Vec3 by Float", { "A": Vec3((1.15, 0.0, 0.0)), "B": Link(Float, "Emitter.LoopedAge") }),
+                    }),
+                    "Velocity Scale": Vec3((1.0, 0.3, 1.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(3.5) }),
+                (module: "Acceleration Force", inputs: { "Acceleration": Vec3((0.0, 0.08, 0.0)) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sprite Rotation Rate", inputs: { "Rotation Rate": Float(25.0) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (0.3, (1.3, 1.3)), (1.0, (2.0, 2.0))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.1, 1.0), (0.5, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, sort_mode: ViewDepth, soft_particle_fade_distance: 0.1, texture: "textures/puff.png"))],
+        ),
+        (
+            name: "Right Foot",
+            sim_target: Gpu,
+            max_particles: 128,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(4.2) }),
+                (module: "Spawn Burst Interval", inputs: { "Spawn Count": Int(14), "Spawn Interval": Float(0.7), "Spawn Time": Float(0.35) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.9), Float(1.4)),
+                    "Color": Color((0.95, 0.86, 0.72, 0.75)),
+                    "Sprite Size": RandomRange(Vec2((0.22, 0.22)), Vec2((0.36, 0.36))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Sphere,
+                    "Sphere Radius": Float(0.06),
+                    "Offset": Dynamic("Add Vec3", {
+                        "A": Vec3((-2.4, 0.06, -0.12)),
+                        "B": Dynamic("Multiply Vec3 by Float", { "A": Vec3((1.15, 0.0, 0.0)), "B": Link(Float, "Emitter.LoopedAge") }),
+                    }),
+                }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Strength": RandomRange(Float(0.6), Float(1.3)),
+                    "Velocity Origin": Dynamic("Add Vec3", {
+                        "A": Vec3((-2.4, 0.0, -0.12)),
+                        "B": Dynamic("Multiply Vec3 by Float", { "A": Vec3((1.15, 0.0, 0.0)), "B": Link(Float, "Emitter.LoopedAge") }),
+                    }),
+                    "Velocity Scale": Vec3((1.0, 0.3, 1.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(3.5) }),
+                (module: "Acceleration Force", inputs: { "Acceleration": Vec3((0.0, 0.08, 0.0)) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sprite Rotation Rate", inputs: { "Rotation Rate": Float(-25.0) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (0.3, (1.3, 1.3)), (1.0, (2.0, 2.0))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.1, 1.0), (0.5, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, sort_mode: ViewDepth, soft_particle_fade_distance: 0.1, texture: "textures/puff.png"))],
+        ),
+    ],
+)

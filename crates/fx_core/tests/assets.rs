@@ -162,6 +162,16 @@ fn library_effects_validate_cook_and_simulate() {
         "magic_swirl.fx.ron",
         "sword_trail.fx.ron",
         "debris.fx.ron",
+        "shockwave_ring.fx.ron",
+        "lightning_strike.fx.ron",
+        "portal_vortex.fx.ron",
+        "stylized_tornado.fx.ron",
+        "rain_splash.fx.ron",
+        "muzzle_flash.fx.ron",
+        "footstep_dust.fx.ron",
+        "heal_aura.fx.ron",
+        "fireworks_show.fx.ron",
+        "meteor_rain.fx.ron",
     ] {
         assert!(names.iter().any(|n| n == want), "missing library effect {want}");
     }

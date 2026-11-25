@@ -1,0 +1,153 @@
+// Muzzle flash: a gun fires straight up (+Y, as in the tutorial's
+// preview) every 0.4 s: a star of flame petals
+// facing down the barrel, a side flame and a flame cone, a split-second
+// bright flash and a spray of sparks.
+//
+// Niagara tutorial recipe: Gabriel Aguiar Prod., "Unreal Engine 5 - Muzzle
+// Flash VFX - Niagara Tutorial", https://www.youtube.com/watch?v=SGoNF1UTD3I
+//  1. 00:30 Muzzle flash start: Emitter State (0.4 s loops) + Spawn Burst
+//     Instantaneous, very short Lifetime (0.06 s), HDR orange.
+//  2. 01:29 3D bi-plane mesh (two crossed planes along the barrel) -> two
+//     sprites instead: "Side Flame" (CustomAlignment along Y, stretched) and
+//     "Front Petals" (CustomFacingVector X: the star seen down the barrel).
+//  3. 03:58 Niagara adjustments: random size and rotation (RandomRange on
+//     Sprite Size / Sprite Rotation), Scale Sprite Size grows over the life.
+//  4. 06:00 Muzzle flash texture -> textures/muzzle_2x2.png (procedural
+//     petals, 4 variations), SubUV Animation Random picks one per shot.
+//  5. 09:10 Quick material: Additive, colour from the particle.
+//  6. 11:05-15:03 3D cone + muzzle cone texture -> Mesh renderer, built-in
+//     cone along +Y (random spin about Y),
+//     materials/muzzle_cone.wesl.
+//  7. 16:21 more adjustments: scale over life on the cone (Scale Mesh Size).
+//  8. 18:00 Quick bright flash: one large flare sprite, 0.04 s.
+//  9. 19:35 Muzzle sparks: burst, Add Velocity in Cone along Y, Drag,
+//     gravity, Velocity Aligned streaks.
+// Gaps: no bi-plane mesh asset (crossed sprites instead).
+(
+    name: "Muzzle Flash",
+    emitters: [
+        (
+            name: "Front Petals",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(0.4) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.07),
+                    "Position": Vec3((0.0, 1.06, 0.0)),
+                    "Color": Color((8.0, 3.2, 0.8, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.6, 0.6)), Vec2((0.8, 0.8))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "SubUV Animation", inputs: { "SubUV Animation Mode": Random }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (0.4, (1.0, 1.0)), (1.0, (1.1, 1.1))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.8), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, facing_mode: CustomFacingVector, custom_facing_vector: (0.0, 1.0, 0.0), texture: "textures/muzzle_2x2.png", sub_image_size: (2, 2)))],
+        ),
+        (
+            name: "Side Flame",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(0.4) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(2) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.07),
+                    "Position": Vec3((0.0, 1.38, 0.0)),
+                    "Color": Color((7.0, 2.6, 0.6, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.16, 0.7)), Vec2((0.22, 0.9))),
+                }),
+                (module: "SubUV Animation", inputs: { "SubUV Animation Mode": Random }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (0.4, (1.0, 1.0)), (1.0, (1.0, 1.2))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.8), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: CustomAlignment, custom_alignment_vector: (0.0, 1.0, 0.0), texture: "textures/muzzle_2x2.png", sub_image_size: (2, 2)))],
+        ),
+        (
+            name: "Cone",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(0.4) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.06),
+                    "Position": Vec3((0.0, 1.2, 0.0)),
+                    "Color": Color((5.0, 1.8, 0.4, 1.0)),
+                }),
+                (module: "Initialize Mesh", inputs: {
+                    "Mesh Scale": Vec3((0.22, 0.4, 0.22)),
+                    "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 360.0, 0.0))),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Mesh Size", inputs: { "Scale Factor": CurveOverAge(Vec3([(0.0, (0.7, 0.6, 0.7)), (1.0, (1.1, 1.2, 1.1))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Mesh((mesh: "cone", blend_mode: Additive, lit: false, material: "materials/muzzle_cone.wesl"))],
+        ),
+        (
+            name: "Flash",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(0.4) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.05),
+                    "Position": Vec3((0.0, 1.08, 0.0)),
+                    "Color": Color((4.0, 2.0, 0.8, 1.0)),
+                    "Sprite Size": Vec2((0.55, 0.55)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, texture: "textures/flare.png"))],
+        ),
+        (
+            name: "Sparks",
+            sim_target: Gpu,
+            max_particles: 128,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(0.4) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(18) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.12), Float(0.3)),
+                    "Position": Vec3((0.0, 1.08, 0.0)),
+                    "Color": Color((6.0, 2.5, 0.6, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.008, 0.05)), Vec2((0.014, 0.1))),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Axis": Vec3((0.0, 1.0, 0.0)), "Cone Angle": Float(28.0), "Velocity Strength": RandomRange(Float(5.0), Float(10.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(3.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned, texture: "textures/streak.png"))],
+        ),
+    ],
+)

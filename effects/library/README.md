@@ -16,6 +16,16 @@ validate, cook, simulate, header and preview present), compared CPU vs GPU in
 | `magic_swirl.fx.ron` | Magic swirl | Sprite, Ribbon | `previews/magic_swirl_strip.png` |
 | `sword_trail.fx.ron` | Sword / weapon trail | Ribbon | `previews/sword_trail_strip.png` |
 | `debris.fx.ron` | Mesh explosion debris | Mesh, Sprite | `previews/debris_strip.png` |
+| `shockwave_ring.fx.ron` | CGHOW, Radial to Shockwave | Sprite (custom material) | `previews/shockwave_ring_strip.png` |
+| `lightning_strike.fx.ron` | CGHOW, Stylized Lightning | Ribbon (custom materials), Sprite | `previews/lightning_strike_strip.png` |
+| `portal_vortex.fx.ron` | CGHOW, Portal Gate | Sprite, Light | `previews/portal_vortex_strip.png` |
+| `stylized_tornado.fx.ron` | CGHOW, Stylized Tornado | Mesh (torus, erode material), Sprite | `previews/stylized_tornado_strip.png` |
+| `rain_splash.fx.ron` | Matt Aspland, Rain Splashback | Sprite (collision events) | `previews/rain_splash_strip.png` |
+| `muzzle_flash.fx.ron` | Gabriel Aguiar, Muzzle Flash | Sprite (flipbook), Mesh (cone) | `previews/muzzle_flash_strip.png` |
+| `footstep_dust.fx.ron` | Vive Games, Footsteps Dust | Sprite (sorted, soft) | `previews/footstep_dust_strip.png` |
+| `heal_aura.fx.ron` | CGHOW, Healing Aura | Sprite, Mesh (cylinder), Light | `previews/heal_aura_strip.png` |
+| `fireworks_show.fx.ron` | Enrique Ventura, Advanced Fireworks ch. 3 | Sprite (death/location events) | `previews/fireworks_show_strip.png` |
+| `meteor_rain.fx.ron` | Gabriel Aguiar, Meteor Rain | Sprite, Ribbon (location/collision events) | `previews/meteor_rain_strip.png` |
 
 Regenerate the previews (needs the GPU; camera per effect as in `fx_bench`'s
 `SCENES`):
@@ -38,3 +48,16 @@ nix develop /home/zach/helm-projects/bevy-solari-opt -c sh effects/library/previ
 Sim time grows with the number of emitters (about 0.035 ms each), not with
 particle count (all are under 1000 particles), so the two effects over budget
 are over because of fixed per-emitter cost.
+
+## Tutorial batch 2: assets and materials
+
+The batch-2 effects each name their tutorial (YouTube link) and map its
+chapters to modules in the file header, with the steps that could not be
+followed listed as gaps. Their textures are recreated procedurally
+(`textures/make_textures.sh`) and their tutorial materials are WESL files in
+`materials/`. The one tutorial that gives its assets away (the fireworks
+flares) is fetched, with the reference frames used for comparisons, by
+`sh testdata/tutorial_assets.sh` into the git-ignored
+`testdata/tutorial_assets/` (manifest and terms in the script);
+`tutorial_assets` here links to it. Without it, `fireworks_show` draws the
+built-in soft sprite.

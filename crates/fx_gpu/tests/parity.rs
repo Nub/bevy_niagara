@@ -29,6 +29,16 @@ const LIBRARY: &[&str] = &[
     "magic_swirl.fx.ron",
     "sword_trail.fx.ron",
     "debris.fx.ron",
+    // Tutorial batch 2 (lightning_strike and meteor_rain use custom WGSL
+    // modules, which only the GPU runs, so they are not compared here).
+    "shockwave_ring.fx.ron",
+    "portal_vortex.fx.ron",
+    "stylized_tornado.fx.ron",
+    "rain_splash.fx.ron",
+    "muzzle_flash.fx.ron",
+    "footstep_dust.fx.ron",
+    "heal_aura.fx.ron",
+    "fireworks_show.fx.ron",
 ];
 
 fn library(name: &str) -> fx_core::CookedSystem {

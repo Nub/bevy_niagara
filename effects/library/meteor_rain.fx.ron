@@ -1,0 +1,154 @@
+// Meteor rain: glowing orange meteors streak down at an angle, each with a
+// hot ribbon trail and a darker smoke trail behind it; where they hit the
+// ground there is a flash and a spray of bouncing sparks.
+//
+// Niagara tutorial recipe: Gabriel Aguiar Prod., "Unreal Engine 5 - Meteor
+// Rain VFX - Niagara Tutorial", https://www.youtube.com/watch?v=-Cdn0_98PXM
+//  1. 00:42 Meteor emitter: Spawn Rate; Shape Location Box high above the
+//     area; Add Velocity (diagonal, down); Velocity Aligned flare sprite,
+//     HDR orange; Collision with the floor (Kill) + Generate Collision Event.
+//  2. 04:47 Meteor system: emitters combined in one system.
+//  3. 05:53 Trail ribbon emitter: Ribbon renderer Additive, width shrinking
+//     over age (Scale Ribbon Width), colour orange -> red, short life.
+//  4. 08:51 Adding trails to the meteor: the trail spawns from the meteor's
+//     particles (Spawn Particles from Other Emitter) -> Generate Location
+//     Event on the meteor + event handler, Receive Location Event, Initialize
+//     Ribbon with Ribbon ID = Event.ParticleID (one ribbon per meteor).
+//  5. 09:26 Dark trails: a second ribbon emitter, Alpha, dark, wider,
+//     longer-lived.
+//  6. 11:00 Flash for the impact: Collision event handler, one big flare.
+//  7. 13:18 Sparks for the impact: Collision event handler, 18 sparks, Add
+//     Velocity in Cone up, Gravity, Collision (Bounce), Velocity Aligned.
+// Gaps: Ribbon ID is limited to 0..254 and there is no integer modulo
+// dynamic input, so a custom WGSL module "Wrap Ribbon ID" wraps it.
+(
+    name: "Meteor Rain",
+    custom_modules: [
+        (
+            name: "Wrap Ribbon ID",
+            inputs: { "Ribbons": Float(250.0) },
+            outputs: ["Particles.RibbonID"],
+            wgsl: r#"
+    RibbonID = RibbonID % i32(Ribbons);
+"#,
+        ),
+    ],
+    emitters: [
+        (
+            name: "Meteors",
+            sim_target: Gpu,
+            max_particles: 32,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(7.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(3.0),
+                    "Color": Color((8.0, 3.0, 0.8, 1.0)),
+                    "Sprite Size": Vec2((0.22, 0.5)),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Box, "Box Size": Vec3((7.0, 0.5, 4.0)), "Offset": Vec3((-3.5, 7.0, -1.0)) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((4.5, -9.0, 0.0)), Vec3((5.5, -8.0, 0.4))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Generate Location Event"),
+                (module: "Collision", inputs: { "Collision Type": Plane, "Collision Response": Kill }),
+                (module: "Generate Collision Event"),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned, texture: "textures/flare.png"))],
+        ),
+        (
+            name: "Trail",
+            sim_target: Gpu,
+            max_particles: 2048,
+            event_handlers: [
+                (source: "Meteors", event: Location, spawn_number: 1, modules: [
+                    (module: "Receive Location Event"),
+                    (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.14), "Ribbon ID": Link(Int, "Event.ParticleID") }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(0.35), "Color": Color((6.0, 1.8, 0.3, 1.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Wrap Ribbon ID"),
+                (module: "Scale Ribbon Width", inputs: { "Ribbon Width Scale": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.1)])) }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (1.0, (0.6, 0.15, 0.05))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive))],
+        ),
+        (
+            name: "Dark Trail",
+            sim_target: Gpu,
+            max_particles: 4096,
+            event_handlers: [
+                (source: "Meteors", event: Location, spawn_number: 1, modules: [
+                    (module: "Receive Location Event"),
+                    (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.3), "Ribbon ID": Link(Int, "Event.ParticleID") }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(0.8), "Color": Color((0.12, 0.07, 0.05, 0.5)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Wrap Ribbon ID"),
+                (module: "Scale Ribbon Width", inputs: { "Ribbon Width Scale": CurveOverAge(Float([(0.0, 0.5), (1.0, 1.4)])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Ribbon((blend_mode: Alpha))],
+        ),
+        (
+            name: "Impact Flash",
+            sim_target: Gpu,
+            max_particles: 32,
+            event_handlers: [
+                (source: "Meteors", event: Collision, spawn_number: 1, modules: [
+                    (module: "Receive Collision Event", inputs: { "Position Offset": Vec3((0.0, 0.1, 0.0)) }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(0.25), "Color": Color((6.0, 2.4, 0.6, 1.0)), "Sprite Size": Vec2((1.8, 1.8)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (1.2, 1.2))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, texture: "textures/flare.png"))],
+        ),
+        (
+            name: "Impact Sparks",
+            sim_target: Gpu,
+            max_particles: 512,
+            event_handlers: [
+                (source: "Meteors", event: Collision, spawn_number: 18, modules: [
+                    (module: "Receive Collision Event", inputs: { "Position Offset": Vec3((0.0, 0.03, 0.0)) }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.5), Float(1.0)),
+                    "Color": Color((7.0, 2.8, 0.6, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.015, 0.06)), Vec2((0.025, 0.12))),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(60.0), "Velocity Strength": RandomRange(Float(2.0), Float(4.5)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(0.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: { "Collision Type": Plane, "Restitution": Float(0.35), "Friction": Float(0.4) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.7, 0.8), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned, texture: "textures/streak.png"))],
+        ),
+    ],
+)

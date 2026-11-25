@@ -1,0 +1,132 @@
+// Healing aura: a bright green ring on the ground, translucent rays rising
+// from it in two layered heights, sparkles drifting up the cylinder and a
+// green light.
+//
+// Niagara tutorial recipe: CGHOW, "Simple Healing Aura VFX in Unreal Engine 5
+// Niagara! (Ring, Rays & Particles Tutorial)",
+// https://www.youtube.com/watch?v=R1W_8Z1trsY
+//  1. 00:18 Ground ring material, procedural, thickness from a dynamic
+//     parameter -> materials/heal_ring.wesl (Dynamic Material Parameter x).
+//  2. 01:08 Ring emitter, aligned to the ground -> one sprite facing up
+//     (CustomFacingVector (0, 1, 0)), Dynamic Material Parameters
+//     (thickness), Scale Color pulse.
+//  3. 02:44 Vertical rays material + mesh emitter -> Mesh renderer, built-in
+//     cylinder, Additive, unlit, materials/heal_rays.wesl (gradient, caps
+//     hidden).
+//  4. 04:54 Layering and fading ray emitters -> "Rays Tall" and "Rays Short"
+//     (different heights and radii), Spawn Rate with overlapping lives
+//     fading in and out.
+//  5. 05:15 Rising sparkle and aura particles -> Spawn Rate, Shape Location
+//     Cylinder, Add Velocity up, Scale Sprite Size (size-over-life fade),
+//     Scale Color.
+//  6. 07:40 Spawn distribution -> Surface Only on the cylinder, so the
+//     sparkles stay on the aura's wall.
+//  7. 08:14 Point light -> Light renderer, green.
+// Gaps: none.
+(
+    name: "Heal Aura",
+    emitters: [
+        (
+            name: "Ground Ring",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(1.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": Vec3((0.0, 0.02, 0.0)),
+                    "Color": Color((0.4, 4.0, 1.0, 1.0)),
+                    "Sprite Size": Vec2((2.1, 2.1)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Dynamic Material Parameters", inputs: { "Dynamic Material Parameter": Vec4((0.18, 0.0, 0.0, 0.0)) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.5, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, facing_mode: CustomFacingVector, custom_facing_vector: (0.0, 1.0, 0.0), material: "materials/heal_ring.wesl"))],
+        ),
+        (
+            name: "Rays Tall",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(1.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": Vec3((0.0, 0.6, 0.0)),
+                    "Color": Color((0.25, 1.5, 0.45, 1.0)),
+                }),
+                (module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((2.0, 1.2, 2.0)), "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 360.0, 0.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.5, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [Mesh((mesh: "cylinder", blend_mode: Additive, lit: false, material: "materials/heal_rays.wesl"))],
+        ),
+        (
+            name: "Rays Short",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(1.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": Vec3((0.0, 0.35, 0.0)),
+                    "Color": Color((0.35, 2.0, 0.6, 1.0)),
+                }),
+                (module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((2.04, 0.7, 2.04)), "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 360.0, 0.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.5, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [Mesh((mesh: "cylinder", blend_mode: Additive, lit: false, material: "materials/heal_rays.wesl"))],
+        ),
+        (
+            name: "Sparkles",
+            sim_target: Gpu,
+            max_particles: 512,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(140.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.2), Float(2.2)),
+                    "Color": Color((0.8, 5.0, 1.2, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.02, 0.02)), Vec2((0.045, 0.045))),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Cylinder, "Surface Only": Bool(true), "Cylinder Height": Float(0.4), "Cylinder Radius": Float(0.98), "Offset": Vec3((0.0, 0.2, 0.0)) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((0.0, 0.6, 0.0)), Vec3((0.0, 1.3, 0.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.3, 0.3)), (0.2, (1.0, 1.0)), (1.0, (0.0, 0.0))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (1.0, 0.2)])) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+            renderers: [Sprite((blend_mode: Additive, texture: "textures/flare.png"))],
+        ),
+        (
+            name: "Light",
+            sim_target: Gpu,
+            max_particles: 1,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1000.0), "Position": Vec3((0.0, 0.6, 0.0)), "Color": Color((0.3, 1.0, 0.4, 1.0)) }),
+                (module: "Initialize Light", inputs: { "Light Radius": Float(4.0) }),
+            ],
+            particle_update: [(module: "Particle State")],
+            renderers: [Light((intensity: 40000.0))],
+        ),
+    ],
+)

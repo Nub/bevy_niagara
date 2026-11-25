@@ -1,0 +1,52 @@
+// Shockwave ring: an orange ring flashes out from nothing, fast then slowing,
+// with a white-hot inner edge, and fades. Fires every 1.5 s.
+//
+// Niagara tutorial recipe: CGHOW, "Radial to Shockwave in UE5 Niagara! Mini
+// Tutorial #3", https://www.youtube.com/watch?v=_EWOPaYytF4
+//  1. 00:08 Material: Radial Gradient Exponential + 1-Minus -> ring mask
+//     -> materials/shockwave_ring.wesl (same maths: radial, 1 - radial, exponent).
+//  2. 00:39 Multiply the nodes and raise to a power for sharp edges, adjust
+//     radius -> the same wesl (outer edge mask, `pow(ring, 6)` hot rim).
+//  3. Emitter: Simple Sprite Burst template -> Emitter State (Infinite, 1.5 s
+//     loops) + Spawn Burst Instantaneous (1 particle); Initialize Particle
+//     (Lifetime 0.6 s, HDR orange Color).
+//  4. 01:02 Sprite size curve over lifetime -> Scale Sprite Size with a
+//     CurveOverAge (fast ease-out growth 0 -> 2.6 m).
+//  5. 01:10 Color brightness and alpha fade over lifetime -> Scale Color
+//     (RGB brightness falls, alpha 1 -> 0).
+//  6. Sprite renderer Additive with the material.
+// Gaps: none (curves are linear keys, so the ease-out is approximated with
+// five keys).
+(
+    name: "Shockwave Ring",
+    emitters: [
+        (
+            name: "Ring",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(1.5) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.6),
+                    "Position": Vec3((0.0, 1.5, 0.0)),
+                    "Color": Color((7.0, 1.1, 0.15, 1.0)),
+                    "Sprite Size": Vec2((2.6, 2.6)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (0.05, 0.05)), (0.1, (0.45, 0.45)), (0.25, (0.72, 0.72)), (0.5, (0.9, 0.9)), (1.0, (1.0, 1.0))])),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.6, 1.6, 1.6)), (0.3, (1.0, 1.0, 1.0)), (1.0, (0.5, 0.4, 0.4))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.45, 0.9), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, material: "materials/shockwave_ring.wesl"))],
+        ),
+    ],
+)
