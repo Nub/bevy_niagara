@@ -19,6 +19,7 @@ pub mod convert;
 pub mod dump;
 pub mod fx;
 pub mod hlsl;
+pub mod material;
 pub mod niagara;
 pub mod package;
 pub mod pins;

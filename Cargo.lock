@@ -2560,6 +2560,7 @@ version = "0.1.0"
 dependencies = [
  "fx_core",
  "oozextract",
+ "png 0.17.16",
 ]
 
 [[package]]

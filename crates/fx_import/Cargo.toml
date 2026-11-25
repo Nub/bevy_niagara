@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fx_core = { path = "../fx_core" }
 oozextract = { version = "0.5", default-features = false }
+png = "0.17"
 
 [[bin]]
 name = "fximport"

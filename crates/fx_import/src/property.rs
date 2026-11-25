@@ -787,6 +787,54 @@ fn read_native_struct(r: &mut Reader, name: &str, ctx: &mut Ctx) -> Result<Optio
             f
         }
         "SimpleCurveKey" => reals(r, &["Time", "Value"], false)?,
+        // Material graph links (FExpressionInput and FMaterialInput<T>):
+        // the expression, its output, the input's name, the channel mask,
+        // then for the material's own inputs a constant.
+        "ExpressionInput" | "ColorMaterialInput" | "ScalarMaterialInput" | "VectorMaterialInput" | "Vector2MaterialInput"
+        | "ShadingModelMaterialInput" | "SubstrateMaterialInput" | "MaterialAttributesInput" => {
+            let mut f = vec![
+                field("Expression", "ObjectProperty", Value::Object(crate::package::PackageIndex(r.i32()?))),
+                field("OutputIndex", "IntProperty", Value::Int(r.i32()?)),
+                field("InputName", "NameProperty", Value::Name(ctx.fname(r)?)),
+            ];
+            f.extend(ints(r, &["Mask", "MaskR", "MaskG", "MaskB", "MaskA"])?);
+            match name {
+                "ColorMaterialInput" => {
+                    f.push(field("UseConstant", "BoolProperty", Value::Bool(r.u32()? != 0)));
+                    let [b, g, rr, a] = r.array::<4>()?;
+                    f.push(field("Constant", "StructProperty", Value::Struct {
+                        name: "Color".into(),
+                        fields: vec![
+                            field("B", "ByteProperty", Value::Byte(b)),
+                            field("G", "ByteProperty", Value::Byte(g)),
+                            field("R", "ByteProperty", Value::Byte(rr)),
+                            field("A", "ByteProperty", Value::Byte(a)),
+                        ],
+                    }));
+                }
+                "ScalarMaterialInput" => {
+                    f.push(field("UseConstant", "BoolProperty", Value::Bool(r.u32()? != 0)));
+                    f.push(field("Constant", "FloatProperty", Value::Float(r.f32()?)));
+                }
+                "VectorMaterialInput" => {
+                    f.push(field("UseConstant", "BoolProperty", Value::Bool(r.u32()? != 0)));
+                    f.push(field("Constant", "StructProperty", Value::Struct { name: "Vector3f".into(), fields: reals(r, XYZ, false)? }));
+                }
+                "Vector2MaterialInput" => {
+                    f.push(field("UseConstant", "BoolProperty", Value::Bool(r.u32()? != 0)));
+                    f.push(field("Constant", "StructProperty", Value::Struct { name: "Vector2f".into(), fields: reals(r, XY, false)? }));
+                }
+                "ShadingModelMaterialInput" => {
+                    f.push(field("UseConstant", "BoolProperty", Value::Bool(r.u32()? != 0)));
+                    f.push(field("Constant", "IntProperty", Value::Int(r.i32()?)));
+                }
+                "MaterialAttributesInput" => {
+                    f.push(field("PropertyConnectedMask", "Int64Property", Value::Int64(r.i64()?)));
+                }
+                _ => {}
+            }
+            f
+        }
         "SoftObjectPath" | "SoftClassPath" | "StringAssetReference" | "StringClassReference" => {
             vec![field("Path", "SoftObjectProperty", Value::SoftObject(read_soft_path(r, ctx)?))]
         }

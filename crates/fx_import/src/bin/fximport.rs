@@ -76,6 +76,33 @@ fn main() -> ExitCode {
             }
         };
     }
+    if cmd == "material" {
+        // fximport material <package root> <object path> --out DIR: the material as WESL + atlas.
+        let (Some(root), Some(path), Some("--out"), Some(out)) = (args.get(1), args.get(2), args.get(3).map(|s| s.as_str()), args.get(4)) else { return usage() };
+        let mut store = fx_import::material::Store::new(vec![root.into()]);
+        let m = match fx_import::material::Material::load(&mut store, path) { Ok(m) => m, Err(e) => { eprintln!("{path}: {e}"); return ExitCode::from(1) } };
+        println!("chain {:?}\nblend {:?} unlit {} two_sided {} missing {:?}", m.chain, m.blend, m.unlit, m.two_sided, m.missing);
+        let needs = fx_import::material::Needs { dynamic_written: [true; 4], dynamic_available: [true, true, false, false], mesh: false };
+        let c = match fx_import::material::compile(&m, &needs) { Ok(c) => c, Err(e) => { eprintln!("{path}: {e}"); return ExitCode::from(1) } };
+        let mut imgs = Vec::new();
+        for t in &c.textures {
+            match fx_import::material::read_texture(&mut store, t) {
+                Ok(i) => { println!("texture {t}: {}x{} srgb {}", i.width, i.height, i.srgb); imgs.push(i) }
+                Err(e) => println!("texture {t}: {e}"),
+            }
+        }
+        let _ = std::fs::create_dir_all(out);
+        let name = m.name();
+        if !imgs.is_empty() {
+            let a = fx_import::material::atlas(&imgs);
+            let _ = std::fs::write(format!("{out}/{name}.png"), fx_import::material::encode_png(&a.image));
+            let _ = std::fs::write(format!("{out}/{name}.wesl"), fx_import::material::with_rects(&c.wesl, &a.rects));
+        } else {
+            let _ = std::fs::write(format!("{out}/{name}.wesl"), fx_import::material::with_rects(&c.wesl, &[]));
+        }
+        for n in &c.notes { println!("note: {n}"); }
+        return ExitCode::SUCCESS;
+    }
     if cmd == "payloads" {
         // fximport payloads <file.uasset> --out DIR: each export's bulk data payloads, raw.
         let (Some(file), Some("--out"), Some(out)) = (args.get(1), args.get(2).map(|s| s.as_str()), args.get(3)) else { return usage() };
