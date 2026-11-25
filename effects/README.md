@@ -76,6 +76,9 @@ Every input states its type:
 | random range | `RandomRange(Float(1.0), Float(2.0))` (per component, uniform) |
 | curve over normalised age | `CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)]))` (particle stages only, linear keys) |
 | static switch (enum) | `"Shape Primitive": Box`, `"SubUV Animation Mode": InfiniteLoop` (a bare name; `fxc modules` lists the choices) |
+| dynamic input (nestable) | `Dynamic("Multiply Vec3 by Float", { "A": Dynamic("Random Unit Vec3"), "B": Dynamic("Uniform Ranged Float", { "Minimum": Float(1.0), "Maximum": Float(3.0) }) })` |
+
+Dynamic inputs are Niagara's (Uniform Ranged, Random Range by Uniform, `<Type> from Curve` at any normalised index, Add/Subtract/Multiply/Lerp, Make/Break, Normalize, Length, Distance, Sine/Cosine over Time, Select by Bool/Int, Random from List, Random Unit Vec3, Normalized Emitter/System Age, Compare Floats). Their inputs take any form above, nested; left-out inputs take defaults; lists are `[Float(1.0), Float(2.0)]`; a curve input is a bare curve `Float([(0.0, 1.0), (1.0, 0.0)])`. `fxc modules` lists them with their types; `samples/dynamic_inputs.fx.ron` uses most of them.
 
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.
