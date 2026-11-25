@@ -33,12 +33,12 @@ pub fn ron_value(v: &Value) -> String {
     }
 }
 
-/// "Float", or "one of Sphere \| Box" for a static switch.
+/// "Float", or "one of Sphere | Box" for a static switch.
 pub fn input_type(i: &InputDef) -> String {
     if i.choices.is_empty() {
         i.ty.name().into()
     } else {
-        format!("one of {}", i.choices.join(" \\| "))
+        format!("one of {}", i.choices.join(" | "))
     }
 }
 

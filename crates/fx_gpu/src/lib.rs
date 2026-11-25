@@ -38,8 +38,11 @@ pub const WORDS_PER_PARTICLE: u32 = 28;
 /// 32-bit words per particle of an emitter that uses the extended attributes
 /// (`fx_core::cook::CookedEmitter::uses_extended_attributes`): the base 28,
 /// then Scale, MeshOrientation, RibbonID, RibbonWidth, RibbonTwist,
-/// RibbonLinkOrder, LightRadius and DynamicMaterialParameter.
-pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 44;
+/// RibbonLinkOrder, LightRadius, DynamicMaterialParameter (words 28..43),
+/// SubImageIndex (44), Initial.Scale (45..47) and Initial.RibbonWidth (48).
+pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 49;
+/// Word of `Particles.SubImageIndex` in the extended layout.
+pub const WORD_SUB_IMAGE_INDEX: u32 = 44;
 /// `User.` parameters a system may have on the GPU.
 pub const MAX_USER_PARAMS: usize = 16;
 /// Steps that can be recorded between two queue submissions.
@@ -47,7 +50,7 @@ pub const MAX_STEPS_PER_SUBMIT: u32 = 8;
 /// Workgroup size of the per-particle kernels.
 pub const WORKGROUP: u32 = 256;
 
-const FRAME_BYTES: usize = 32 + MAX_USER_PARAMS * 16;
+const FRAME_BYTES: usize = 48 + MAX_USER_PARAMS * 16;
 const FRAME_SLOT: u64 = 512;
 /// Words of the emitter state buffer.
 pub const STATE_WORDS: u64 = 32;
@@ -131,6 +134,8 @@ pub struct GpuEffect {
     /// Simulated seconds (`Engine.Time`).
     pub time: f32,
     pub user: Vec<Value>,
+    /// `Engine.Owner.Velocity` (m/s), read by Inherit Velocity; set by the host.
+    pub owner_velocity: [f32; 3],
     pub emitters: Vec<GpuEmitter>,
     slot: u32,
     scratch: [u8; FRAME_BYTES],
@@ -330,6 +335,7 @@ impl GpuEffect {
             frame: 0,
             time: 0.0,
             user: system.user_params.iter().map(|p| p.value).collect(),
+            owner_velocity: [0.0; 3],
             emitters,
             slot: 0,
             scratch: [0; FRAME_BYTES],
@@ -375,6 +381,7 @@ impl GpuEffect {
                 dt,
                 time: self.time,
                 emitter_age: em.age,
+                owner_velocity: self.owner_velocity,
             };
             let mut request = 0u32;
             if self.frame == 0 {
@@ -409,6 +416,10 @@ impl GpuEffect {
             put(5, self.seed);
             put(6, ei as u32);
             put(7, em.capacity);
+            for (c, v) in self.owner_velocity.iter().enumerate() {
+                put(8 + c, v.to_bits());
+            }
+            put(11, 0);
             for (i, v) in self.user.iter().enumerate() {
                 let a = match *v {
                     Value::Int(x) => [f32::from_bits(x as u32), 0.0, 0.0, 0.0],
@@ -416,7 +427,7 @@ impl GpuEffect {
                     v => v.to_array(),
                 };
                 for (c, x) in a.iter().enumerate() {
-                    put(8 + i * 4 + c, x.to_bits());
+                    put(12 + i * 4 + c, x.to_bits());
                 }
             }
             queue.write_buffer(&em.frame_ubo, offset, &self.scratch);
@@ -512,6 +523,9 @@ impl GpuEffect {
                     p.ribbon_link_order = w(38, i);
                     p.light_radius = w(39, i);
                     p.dynamic_material_parameter = [w(40, i), w(41, i), w(42, i), w(43, i)].into();
+                    p.sub_image_index = w(44, i);
+                    p.initial_scale = [w(45, i), w(46, i), w(47, i)].into();
+                    p.initial_ribbon_width = w(48, i);
                 }
                 ps.push(p);
             }

@@ -71,7 +71,7 @@ fn swizzle(ty: ValueType) -> &'static str {
 /// Generated shader text plus what the host needs to know about it.
 pub struct EmitterShader {
     pub source: String,
-    /// Whether the emitter stores the extended attributes (words 28..43,
+    /// Whether the emitter stores the extended attributes (words 28..48,
     /// see [`CookedEmitter::uses_extended_attributes`]).
     pub extended: bool,
 }
@@ -82,6 +82,8 @@ struct Gen<'a> {
     /// Helper functions (curves), emitted before the stacks.
     helpers: String,
     curves: usize,
+    /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
+    sub_frames: u32,
 }
 
 impl Gen<'_> {
@@ -96,7 +98,12 @@ impl Gen<'_> {
                     t => format!("{v}{}", swizzle(t)),
                 }
             }
-            Namespace::Engine => if r.index == 0 { "fr.dt" } else { "fr.time" }.into(),
+            Namespace::Engine => match r.index {
+                0 => "fr.dt",
+                1 => "fr.time",
+                _ => "fr.owner_velocity",
+            }
+            .into(),
             Namespace::System => "fr.time".into(),
             Namespace::Emitter => "fr.emitter_age".into(),
             Namespace::Particles => match r.index {
@@ -122,6 +129,9 @@ impl Gen<'_> {
                 attr::RIBBON_LINK_ORDER => "(*p).ribbon_link_order",
                 attr::LIGHT_RADIUS => "(*p).light_radius",
                 attr::DYNAMIC_MATERIAL_PARAMETER => "(*p).dynamic_material_parameter",
+                attr::SUB_IMAGE_INDEX => "(*p).sub_image_index",
+                attr::INITIAL_SCALE => "(*p).initial_scale",
+                attr::INITIAL_RIBBON_WIDTH => "(*p).initial_ribbon_width",
                 _ => "0.0",
             }
             .into(),
@@ -352,10 +362,12 @@ impl Gen<'_> {
                     let e = inp(slot, self);
                     writeln!(o, "    (*p).{field} = {e};").unwrap();
                 }
+                writeln!(o, "    (*p).initial_ribbon_width = (*p).ribbon_width;").unwrap();
             }
             ModuleKind::InitializeMesh => {
                 let (s, r) = (inp(0, self), inp(1, self));
                 writeln!(o, "    (*p).scale = {s};").unwrap();
+                writeln!(o, "    (*p).initial_scale = (*p).scale;").unwrap();
                 writeln!(o, "    (*p).mesh_orientation = euler_quat({r});").unwrap();
             }
             ModuleKind::UpdateMeshOrientation => {
@@ -376,6 +388,198 @@ impl Gen<'_> {
                 let e = inp(0, self);
                 writeln!(o, "    (*p).dynamic_material_parameter = {e};").unwrap();
             }
+            ModuleKind::PointAttractionForce => {
+                let (c, s, r, e, kill) = (
+                    inp(0, self),
+                    inp(1, self),
+                    inp(2, self),
+                    inp(3, self),
+                    inp(4, self),
+                );
+                writeln!(o, "    let center = {c};").unwrap();
+                writeln!(o, "    let strength = {s};").unwrap();
+                writeln!(o, "    let radius = {r};").unwrap();
+                writeln!(o, "    let exponent = {e};").unwrap();
+                writeln!(o, "    let kill = {kill};").unwrap();
+                o.push_str(
+                    "    let d = center - (*p).position;
+    let dist = length(d);
+    if (dist < kill) { (*p).alive = false; }
+    if (dist > 0.0 && dist < radius) { (*p).force += d * (strength * falloff(dist, radius, exponent) / dist); }
+",
+                );
+            }
+            ModuleKind::VortexVelocity => {
+                let (a, c, s) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let axis = unit_or_y({a});").unwrap();
+                writeln!(o, "    let origin = {c};").unwrap();
+                writeln!(o, "    let amount = {s};").unwrap();
+                writeln!(o, "    let dirs = vortex_dirs(axis, (*p).position - origin);").unwrap();
+                writeln!(o, "    (*p).velocity += dirs.tangent * amount;").unwrap();
+            }
+            ModuleKind::VortexForce => {
+                let (a, c, s, pull) = (inp(0, self), inp(1, self), inp(2, self), inp(3, self));
+                writeln!(o, "    let axis = unit_or_y({a});").unwrap();
+                writeln!(o, "    let origin = {c};").unwrap();
+                writeln!(o, "    let amount = {s};").unwrap();
+                writeln!(o, "    let pull = {pull};").unwrap();
+                writeln!(o, "    let dirs = vortex_dirs(axis, (*p).position - origin);").unwrap();
+                writeln!(o, "    (*p).force += dirs.tangent * amount + dirs.inward * pull;").unwrap();
+            }
+            ModuleKind::WindForce => {
+                let (w, s, r) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let wind = {w};").unwrap();
+                writeln!(o, "    let speed = {s};").unwrap();
+                writeln!(o, "    let resistance = {r};").unwrap();
+                writeln!(o, "    (*p).force += (wind * speed - (*p).velocity) * resistance;").unwrap();
+            }
+            ModuleKind::LinearForce => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).force += {e};").unwrap();
+            }
+            ModuleKind::LimitForce => {
+                let e = inp(0, self);
+                writeln!(o, "    let limit = max({e}, 0.0);").unwrap();
+                writeln!(o, "    let len = length((*p).force);").unwrap();
+                writeln!(o, "    if (len > limit) {{ (*p).force *= limit / len; }}").unwrap();
+            }
+            ModuleKind::AccelerationForce => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).force += {e} * (*p).mass;").unwrap();
+            }
+            ModuleKind::PointForce => {
+                let (c, s, r, e) = (inp(0, self), inp(1, self), inp(2, self), inp(3, self));
+                writeln!(o, "    let center = {c};").unwrap();
+                writeln!(o, "    let strength = {s};").unwrap();
+                writeln!(o, "    let radius = {r};").unwrap();
+                writeln!(o, "    let exponent = {e};").unwrap();
+                o.push_str(
+                    "    let d = (*p).position - center;
+    let dist = length(d);
+    if (dist > 0.0 && dist < radius) { (*p).force += d * (strength * falloff(dist, radius, exponent) / dist); }
+",
+                );
+            }
+            ModuleKind::InheritVelocity => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).velocity += fr.owner_velocity * {e};").unwrap();
+            }
+            ModuleKind::ShapeLocation => {
+                // "Shape Primitive" is a static switch: only its shape is generated.
+                let primitive = match m.inputs[0] {
+                    CookedInput::Const(Value::Int(i)) => i,
+                    _ => 0,
+                };
+                let surface = inp(1, self);
+                let offset = inp(2, self);
+                writeln!(o, "    let surface = {surface};").unwrap();
+                writeln!(o, "    let offset = {offset};").unwrap();
+                writeln!(
+                    o,
+                    "    let u = array<f32, 5>(rand_unit(k, 128u), rand_unit(k, 129u), rand_unit(k, 130u), rand_unit(k, 131u), rand_unit(k, 132u));"
+                )
+                .unwrap();
+                let call = match primitive {
+                    1 => format!("shape_box({}, surface, u)", inp(4, self)),
+                    2 => format!("shape_cylinder({}, {}, surface, u)", inp(5, self), inp(6, self)),
+                    3 => format!("shape_torus({}, {}, surface, u)", inp(7, self), inp(8, self)),
+                    4 => format!("shape_cone({}, {}, surface, u)", inp(9, self), inp(10, self)),
+                    5 => format!("shape_ring({}, {}, u)", inp(11, self), inp(12, self)),
+                    _ => format!("shape_sphere({}, surface, u)", inp(3, self)),
+                };
+                writeln!(o, "    (*p).position = offset + {call};").unwrap();
+            }
+            ModuleKind::InitialMeshOrientation => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).mesh_orientation = euler_quat({e});").unwrap();
+            }
+            ModuleKind::SpriteRotationRate => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).sprite_rotation += {e} * fr.dt;").unwrap();
+            }
+            ModuleKind::SubUvAnimation => {
+                let mode = match m.inputs[0] {
+                    CookedInput::Const(Value::Int(i)) => i,
+                    _ => 0,
+                };
+                let (n, start, fps) = (inp(1, self), inp(2, self), inp(3, self));
+                writeln!(o, "    let n = {n};").unwrap();
+                writeln!(
+                    o,
+                    "    let frames = select({}, f32(n), n > 0);",
+                    f(self.sub_frames as f32)
+                )
+                .unwrap();
+                writeln!(o, "    let start = f32({start});").unwrap();
+                match mode {
+                    1 => {
+                        // One draw per particle: the key ignores the step.
+                        writeln!(
+                            o,
+                            "    let fi = floor(rand_unit(Key(k.particle, 0u, k.module_id), 128u) * frames);"
+                        )
+                        .unwrap();
+                    }
+                    2 => {
+                        writeln!(o, "    let x = (*p).age * {fps};").unwrap();
+                        writeln!(o, "    let fi = x - frames * floor(x / frames);").unwrap();
+                    }
+                    _ => {
+                        writeln!(
+                            o,
+                            "    let fi = clamp((*p).normalized_age, 0.0, SUB_UV_LAST) * frames;"
+                        )
+                        .unwrap();
+                    }
+                }
+                writeln!(o, "    (*p).sub_image_index = start + fi;").unwrap();
+            }
+            ModuleKind::ScaleMeshSize => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).scale = (*p).initial_scale * {e};").unwrap();
+            }
+            ModuleKind::ScaleRibbonWidth => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).ribbon_width = (*p).initial_ribbon_width * {e};").unwrap();
+            }
+            ModuleKind::Color => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).color = {e};").unwrap();
+            }
+            ModuleKind::ScaleColorBySpeed => {
+                let (t, lo, hi) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let t = speed_fraction((*p).velocity, {t});").unwrap();
+                writeln!(o, "    let lo = {lo};").unwrap();
+                writeln!(o, "    let hi = {hi};").unwrap();
+                writeln!(o, "    (*p).color = (*p).initial_color * (lo + (hi - lo) * t);").unwrap();
+            }
+            ModuleKind::ScaleSpriteSizeBySpeed => {
+                let (t, lo, hi) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let t = speed_fraction((*p).velocity, {t});").unwrap();
+                writeln!(o, "    let lo = {lo};").unwrap();
+                writeln!(o, "    let hi = {hi};").unwrap();
+                writeln!(
+                    o,
+                    "    (*p).sprite_size = (*p).initial_sprite_size * (lo + (hi - lo) * t);"
+                )
+                .unwrap();
+            }
+            ModuleKind::KillParticlesInVolume => {
+                let shape = match m.inputs[0] {
+                    CookedInput::Const(Value::Int(i)) => i,
+                    _ => 0,
+                };
+                let (c, r, size, invert) = (inp(1, self), inp(2, self), inp(3, self), inp(4, self));
+                writeln!(o, "    let d = (*p).position - {c};").unwrap();
+                if shape == 1 {
+                    writeln!(o, "    let h = {size} * 0.5;").unwrap();
+                    writeln!(o, "    let inside = all(abs(d) < h);").unwrap();
+                } else {
+                    writeln!(o, "    let r = {r};").unwrap();
+                    writeln!(o, "    let inside = dot(d, d) < r * r;").unwrap();
+                }
+                writeln!(o, "    if (inside != {invert}) {{ (*p).alive = false; }}").unwrap();
+            }
             ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
         }
         writeln!(o, "    }}").unwrap();
@@ -390,6 +594,7 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
         out: String::new(),
         helpers: String::new(),
         curves: 0,
+        sub_frames: emitter.sub_image_frames(),
     };
     g.out
         .push_str("fn spawn_particle(p: ptr<function, Particle>) {\n");
@@ -406,7 +611,7 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
     EmitterShader {
         extended,
         source: format!(
-            "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..43 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n// ---- curves ----\n{}\n// ---- module stacks ----\n{}",
+            "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..48 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n// ---- curves ----\n{}\n// ---- module stacks ----\n{}",
             emitter.name, sys.name, g.helpers, g.out
         ),
     }

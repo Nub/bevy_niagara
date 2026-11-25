@@ -20,6 +20,7 @@ struct Frame {
     seed: u32,
     emitter: u32,
     capacity: u32,
+    owner_velocity: vec3<f32>,  // Engine.Owner.Velocity; padded to 16 bytes
     user: array<vec4<f32>, 16>,
 }
 
@@ -186,9 +187,109 @@ fn quat_normalize(q: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 
+// ---- common modules (fx_core::sim helpers of the same names) ----
+
+const SUB_UV_LAST: f32 = 0.99999;
+const TAU: f32 = 6.2831855;
+const DEGREES: f32 = 0.017453292;
+
+// (1 - dist / radius) ^ exponent, for 0 <= dist < radius.
+fn falloff(dist: f32, radius: f32, exponent: f32) -> f32 {
+    return pow(1.0 - dist / radius, exponent);
+}
+
+// v normalised, or +Y if it has no direction.
+fn unit_or_y(v: vec3<f32>) -> vec3<f32> {
+    let rl = 1.0 / length(v);
+    if (rl > 0.0 && rl <= 3.4028235e38) {
+        return v * rl;
+    }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+// Unit direction around unit `axis` (counter-clockwise from its tip) and
+// towards it, for offset r from a point on it; zero on the axis.
+struct VortexDirs {
+    tangent: vec3<f32>,
+    inward: vec3<f32>,
+}
+
+fn vortex_dirs(axis: vec3<f32>, r: vec3<f32>) -> VortexDirs {
+    let radial = r - axis * dot(axis, r);
+    let len = length(radial);
+    if (len > 0.0) {
+        let o = radial / len;
+        return VortexDirs(cross(axis, o), -o);
+    }
+    return VortexDirs(vec3<f32>(0.0), vec3<f32>(0.0));
+}
+
+// clamp(|velocity| / threshold, 0, 1); 1 when the threshold is not positive.
+fn speed_fraction(velocity: vec3<f32>, threshold: f32) -> f32 {
+    if (threshold > 0.0) {
+        return clamp(length(velocity) / threshold, 0.0, 1.0);
+    }
+    return 1.0;
+}
+
+fn around(r: f32, phi: f32, y: f32) -> vec3<f32> {
+    return vec3<f32>(r * cos(phi), y, r * sin(phi));
+}
+
+// Shape Location, one function per shape (fx_core::sim::shape_point); u are
+// five uniform draws, radial ones used as 1 - u so they are never 0.
+fn shape_sphere(radius: f32, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    let y = 1.0 - 2.0 * u[0];
+    let phi = TAU * u[1];
+    let ring = sqrt(max(1.0 - y * y, 0.0));
+    let r = radius * select(pow(1.0 - u[2], 1.0 / 3.0), 1.0, surface);
+    return vec3<f32>(ring * cos(phi), y, ring * sin(phi)) * r;
+}
+
+fn shape_box(size: vec3<f32>, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    var p = vec3<f32>(u[0] - 0.5, u[1] - 0.5, u[2] - 0.5) * size;
+    if (surface) {
+        let ax = size.y * size.z;
+        let ay = size.x * size.z;
+        let t = u[3] * (ax + ay + size.x * size.y);
+        let side = select(0.5, -0.5, u[4] < 0.5);
+        if (t < ax) {
+            p.x = side * size.x;
+        } else if (t < ax + ay) {
+            p.y = side * size.y;
+        } else {
+            p.z = side * size.z;
+        }
+    }
+    return p;
+}
+
+fn shape_cylinder(height: f32, radius: f32, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    let r = select(sqrt(1.0 - u[1]), 1.0, surface);
+    return around(radius * r, TAU * u[0], (u[2] - 0.5) * height);
+}
+
+fn shape_torus(large: f32, handle: f32, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    let theta = TAU * u[0];
+    let psi = TAU * u[1];
+    let rho = handle * select(sqrt(1.0 - u[2]), 1.0, surface);
+    return around(large + rho * cos(psi), theta, rho * sin(psi));
+}
+
+fn shape_cone(len: f32, angle: f32, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    let h = len * select(pow(1.0 - u[0], 1.0 / 3.0), sqrt(1.0 - u[0]), surface);
+    let r = h * tan(clamp(angle, 0.0, 89.9) * DEGREES) * select(sqrt(1.0 - u[1]), 1.0, surface);
+    return around(r, TAU * u[2], h);
+}
+
+fn shape_ring(radius: f32, coverage: f32, u: array<f32, 5>) -> vec3<f32> {
+    return around(radius * sqrt(1.0 - clamp(coverage, 0.0, 1.0) * u[1]), TAU * u[0], 0.0);
+}
+
 // ---- particles: structure of arrays, word w of particle i at w * capacity + i ----
-// Words 0..27 are the base attributes every emitter stores. Words 28..43 (Scale,
-// MeshOrientation, the Ribbon attributes, LightRadius, DynamicMaterialParameter)
+// Words 0..27 are the base attributes every emitter stores. Words 28..48 (Scale,
+// MeshOrientation, the Ribbon attributes, LightRadius, DynamicMaterialParameter,
+// SubImageIndex, Initial.Scale, Initial.RibbonWidth)
 // exist only when the generated `EXT` is true; otherwise they stay at their
 // defaults in registers and the buffers end at word 27.
 
@@ -214,6 +315,9 @@ struct Particle {
     ribbon_link_order: f32,
     light_radius: f32,
     dynamic_material_parameter: vec4<f32>,
+    sub_image_index: f32,
+    initial_scale: vec3<f32>,
+    initial_ribbon_width: f32,
     id: u32,
     alive: bool,
 }
@@ -241,6 +345,9 @@ fn new_particle(id: u32) -> Particle {
     p.ribbon_link_order = 0.0;
     p.light_radius = 1.0;
     p.dynamic_material_parameter = vec4<f32>(0.0);
+    p.sub_image_index = 0.0;
+    p.initial_scale = vec3<f32>(1.0);
+    p.initial_ribbon_width = 0.1;
     p.id = id;
     p.alive = true;
     return p;
@@ -274,6 +381,9 @@ fn load_particle(i: u32) -> Particle {
         p.ribbon_link_order = ld(38u, i);
         p.light_radius = ld(39u, i);
         p.dynamic_material_parameter = vec4<f32>(ld(40u, i), ld(41u, i), ld(42u, i), ld(43u, i));
+        p.sub_image_index = ld(44u, i);
+        p.initial_scale = vec3<f32>(ld(45u, i), ld(46u, i), ld(47u, i));
+        p.initial_ribbon_width = ld(48u, i);
     }
     return p;
 }
@@ -308,6 +418,9 @@ fn store_particle(i: u32, p: Particle) {
         st(39u, i, p.light_radius);
         st(40u, i, p.dynamic_material_parameter.x); st(41u, i, p.dynamic_material_parameter.y);
         st(42u, i, p.dynamic_material_parameter.z); st(43u, i, p.dynamic_material_parameter.w);
+        st(44u, i, p.sub_image_index);
+        st(45u, i, p.initial_scale.x); st(46u, i, p.initial_scale.y); st(47u, i, p.initial_scale.z);
+        st(48u, i, p.initial_ribbon_width);
     }
 }
 

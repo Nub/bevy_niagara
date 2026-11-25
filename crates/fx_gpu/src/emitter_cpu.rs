@@ -16,6 +16,7 @@ pub(crate) struct Env<'a> {
     pub dt: f32,
     pub time: f32,
     pub emitter_age: f32,
+    pub owner_velocity: [f32; 3],
 }
 
 fn read_param(r: ParamRef, env: &Env) -> Value {
@@ -25,7 +26,11 @@ fn read_param(r: ParamRef, env: &Env) -> Value {
             .get(r.index as usize)
             .copied()
             .unwrap_or(Value::Float(0.0)),
-        Namespace::Engine => Value::Float(if r.index == 0 { env.dt } else { env.time }),
+        Namespace::Engine => match r.index {
+            0 => Value::Float(env.dt),
+            1 => Value::Float(env.time),
+            _ => Value::Vec3(env.owner_velocity),
+        },
         Namespace::System => Value::Float(env.time),
         Namespace::Emitter => Value::Float(env.emitter_age),
         Namespace::Particles => Value::Float(0.0),

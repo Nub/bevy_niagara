@@ -64,6 +64,9 @@ fn fields(p: &Particle) -> Vec<(&'static str, f32)> {
         "dynamic_material_parameter",
         &p.dynamic_material_parameter.to_array(),
     );
+    put("sub_image_index", &[p.sub_image_index]);
+    put("initial_scale", &p.initial_scale.to_array());
+    put("initial_ribbon_width", &[p.initial_ribbon_width]);
     v
 }
 
@@ -162,6 +165,71 @@ fn extended_system() -> fx_core::CookedSystem {
     c.cooked.unwrap_or_else(|| panic!("extended: {errs:?}"))
 }
 
+/// Niagara's common modules (forces, every Shape Location shape, rotation,
+/// SubUV modes, scaling, Kill Particles in Volume): one emitter per shape,
+/// with the other modules spread over them. The owner moves, so Inherit
+/// Velocity has something to inherit.
+fn common_modules_system() -> fx_core::CookedSystem {
+    let shapes = ["Sphere", "Box", "Cylinder", "Torus", "Cone", "Ring"];
+    let modes = ["Linear", "Random", "InfiniteLoop"];
+    let emitters: Vec<String> = shapes
+        .iter()
+        .enumerate()
+        .map(|(i, shape)| {
+            let surface = i % 2 == 1;
+            let mode = modes[i % 3];
+            format!(
+                r#"(
+        name: "{shape}",
+        max_particles: 1500,
+        emitter_update: [(module: "Spawn Rate", inputs: {{ "Spawn Rate": Float(250.0) }})],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {{ "Lifetime": RandomRange(Float(0.5), Float(1.5)), "Mass": RandomRange(Float(0.5), Float(2.0)) }}),
+            (module: "Shape Location", inputs: {{
+                "Shape Primitive": {shape}, "Surface Only": Bool({surface}), "Offset": Vec3((0.25, 0.5, -0.25)),
+                "Sphere Radius": Float(1.5), "Box Size": Vec3((1.0, 2.0, 3.0)), "Cylinder Height": Float(2.0),
+                "Cylinder Radius": RandomRange(Float(0.5), Float(1.0)), "Large Radius": Float(1.5), "Handle Radius": Float(0.3),
+                "Cone Length": Float(2.0), "Cone Angle": Float(40.0), "Ring Radius": Float(1.2), "Disc Coverage": Float(0.5) }}),
+            (module: "Inherit Velocity", inputs: {{ "Velocity Scale": Float(0.5) }}),
+            (module: "Vortex Velocity", inputs: {{ "Vortex Axis": Vec3((0.2, 1.0, 0.1)), "Velocity Amount": Float(1.5) }}),
+            (module: "Initialize Mesh", inputs: {{ "Mesh Scale": RandomRange(Vec3((0.5, 0.5, 0.5)), Vec3((1.5, 1.5, 1.5))) }}),
+            (module: "Initial Mesh Orientation", inputs: {{ "Rotation": RandomRange(Vec3((-180.0, -180.0, -180.0)), Vec3((180.0, 180.0, 180.0))) }}),
+            (module: "Initialize Ribbon", inputs: {{ "Ribbon Width": RandomRange(Float(0.05), Float(0.2)) }}),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Point Attraction Force", inputs: {{ "Attraction Strength": Float(3.0), "Attraction Radius": Float(2.5), "Falloff Exponent": Float(1.5), "Kill Radius": Float(0.05) }}),
+            (module: "Vortex Force", inputs: {{ "Vortex Force Amount": Float(2.0), "Origin Pull Amount": Float(0.5) }}),
+            (module: "Wind Force", inputs: {{ "Wind Velocity": Vec3((1.0, 0.0, 0.5)), "Wind Speed": Float(1.5), "Air Resistance": Float(0.3) }}),
+            (module: "Linear Force", inputs: {{ "Linear Force": Vec3((0.0, 0.5, 0.0)) }}),
+            (module: "Acceleration Force", inputs: {{ "Acceleration": Vec3((0.0, -1.0, 0.0)) }}),
+            (module: "Point Force", inputs: {{ "Point Position": Vec3((0.5, 0.0, 0.5)), "Point Force Strength": Float(4.0), "Falloff Radius": Float(1.5), "Falloff Exponent": Float(2.0) }}),
+            (module: "Limit Force", inputs: {{ "Force Limit": Float(3.0) }}),
+            (module: "Solve Forces and Velocity"),
+            (module: "Sprite Rotation Rate", inputs: {{ "Rotation Rate": RandomRange(Float(-90.0), Float(90.0)) }}),
+            (module: "SubUV Animation", inputs: {{ "SubUV Animation Mode": {mode}, "Start Frame": Int(1), "Frames Per Second": Float(12.0) }}),
+            (module: "Color", inputs: {{ "Color": CurveOverAge(Color([(0.0, (1.0, 0.5, 0.0, 1.0)), (1.0, (0.0, 0.5, 1.0, 0.0))])) }}),
+            (module: "Scale Color by Speed", inputs: {{ "Velocity Threshold": Float(3.0) }}),
+            (module: "Scale Sprite Size by Speed", inputs: {{ "Velocity Threshold": Float(2.0) }}),
+            (module: "Scale Mesh Size", inputs: {{ "Scale Factor": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (1.0, (0.0, 2.0, 0.5))])) }}),
+            (module: "Scale Ribbon Width", inputs: {{ "Ribbon Width Scale": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }}),
+            (module: "Kill Particles in Volume", inputs: {{ "Volume Shape": Box, "Box Size": Vec3((8.0, 8.0, 8.0)), "Invert Volume": Bool(true) }}),
+            (module: "Kill Particles in Volume", inputs: {{ "Volume Center": Vec3((3.0, 0.0, 0.0)), "Sphere Radius": Float(1.0) }}),
+        ],
+        renderers: [Sprite((sub_image_size: (4, 4)))],
+    )"#
+            )
+        })
+        .collect();
+    let src = format!(
+        "(name: \"Common modules\", emitters: [{}])",
+        emitters.join(",\n")
+    );
+    let c = fx_core::check_source("common.fx.ron", &src);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    c.cooked.unwrap_or_else(|| panic!("common modules: {errs:?}"))
+}
+
 #[test]
 fn gpu_matches_cpu_reference() {
     let (device, queue, info) = match fx_gpu::headless_device() {
@@ -174,6 +242,7 @@ fn gpu_matches_cpu_reference() {
         .map(|n| (n, sample(n), WORDS_PER_PARTICLE))
         .collect();
     systems.push(("extended", extended_system(), WORDS_PER_PARTICLE_EXTENDED));
+    systems.push(("common modules", common_modules_system(), WORDS_PER_PARTICLE_EXTENDED));
     // The reference effect library (effects/library); words per particle vary
     // by emitter there, so 0 skips that check.
     for n in LIBRARY {
@@ -183,6 +252,9 @@ fn gpu_matches_cpu_reference() {
         let seed = 42;
         let mut cpu = Simulation::new(sys.clone(), seed);
         let mut gpu = GpuEffect::new(&device, &sys, seed).unwrap();
+        // A moving owner, for Inherit Velocity.
+        cpu.owner_velocity = bevy_math::Vec3::new(0.5, 0.25, -1.0);
+        gpu.owner_velocity = cpu.owner_velocity.to_array();
         assert!(
             words == 0 || gpu.emitters.iter().all(|e| e.words == words),
             "{name}: words per particle"
