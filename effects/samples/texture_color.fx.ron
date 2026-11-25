@@ -1,0 +1,54 @@
+// Texture colour: particles on a flat sheet take their colour from a texture
+// (Niagara's Sample Texture on a Texture Sample data interface), then drift
+// up and apart, so the picture dissolves into coloured smoke. The UV is the
+// spawn position mapped onto the 4 x 4 m sheet with dynamic inputs; a camera
+// query adds a small push away from the camera, and Camera Offset draws the
+// particles a little in front of where they are.
+(
+    name: "Texture Colour",
+    user_parameters: {
+        "User.Picture": Texture("textures/rainbow_star.png"),
+        "User.Camera": CameraQuery,
+        "User.Fade": FloatCurve([(0.0, 0.0), (0.1, 1.0), (0.7, 1.0), (1.0, 0.0)]),
+    },
+    emitters: [(
+        name: "Sheet",
+        max_particles: 60000,
+        emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(20000.0) })],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": RandomRange(Float(1.5), Float(2.5)),
+                "Sprite Size": Vec2((0.05, 0.05)),
+            }),
+            // A 4 x 4 m sheet standing in the XY plane, 0.5 m above the ground.
+            (module: "Shape Location", inputs: {
+                "Shape Primitive": Box, "Box Size": Vec3((4.0, 4.0, 0.0)), "Offset": Vec3((0.0, 2.5, 0.0)),
+            }),
+            // UV = ((x + 2) / 4, (4.5 - y) / 4): the picture upright on the sheet.
+            (module: "Sample Texture", inputs: {
+                "Texture": Link(Texture, "User.Picture"),
+                "UV": Dynamic("Make Vec2 from Floats", {
+                    "X": Dynamic("Divide Float", { "A": Dynamic("Add Float", { "A": Dynamic("Break Vec3", { "Value": Link(Vec3, "Particles.Position"), "Component": Int(0) }), "B": Float(2.0) }), "B": Float(4.0) }),
+                    "Y": Dynamic("Divide Float", { "A": Dynamic("Subtract Float", { "A": Float(4.5), "B": Dynamic("Break Vec3", { "Value": Link(Vec3, "Particles.Position"), "Component": Int(1) }) }), "B": Float(4.0) }),
+                }),
+                "Color Scale": Color((1.5, 1.5, 1.5, 1.0)),
+            }),
+            (module: "Add Velocity", inputs: {
+                "Velocity": Dynamic("Multiply Vec3 by Float", {
+                    "A": Dynamic("Get Camera Forward Vector", { "Camera": Link(CameraQuery, "User.Camera") }),
+                    "B": Float(0.15),
+                }),
+            }),
+            (module: "Camera Offset", inputs: { "Camera Offset Amount": Float(0.05) }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Curl Noise Force", inputs: { "Noise Strength": Float(0.6), "Noise Frequency": Float(0.8) }),
+            (module: "Acceleration Force", inputs: { "Acceleration": Vec3((0.0, 0.25, 0.0)) }),
+            (module: "Drag", inputs: { "Drag": Float(0.5) }),
+            (module: "Scale Color", inputs: { "Scale Alpha": Dynamic("Float from Curve", { "Curve": Link(FloatCurve, "User.Fade") }) }),
+            (module: "Solve Forces and Velocity"),
+        ],
+        renderers: [Sprite((blend_mode: Alpha))],
+    )],
+)

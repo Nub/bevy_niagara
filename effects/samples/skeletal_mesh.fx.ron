@@ -1,0 +1,64 @@
+// Skeletal mesh: embers stream off the surface of an animated character
+// (Niagara's Skeletal Mesh Location on a Skeletal Mesh data interface).
+// "User.Character" defaults to the glTF fox in models/ (about 80 units tall:
+// the fox is modelled in centimetre-like units, so sizes and speeds here are
+// in the same units); a game binds its own skinned entity instead
+// (fx_render: `ParticleEffect::bind_entity("User.Character", entity)`).
+// Particles inherit part of the surface's own motion, so they trail the legs
+// and tail as the fox runs. A second emitter puts a few sparks on the joints.
+(
+    name: "Skeletal Mesh",
+    user_parameters: {
+        "User.Character": SkeletalMesh("models/Fox.glb"),
+    },
+    emitters: [
+        (
+            name: "Surface",
+            max_particles: 20000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(6000.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.5), Float(1.1)),
+                    "Color": Color((3.0, 1.1, 0.3, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((1.2, 1.2)), Vec2((2.2, 2.2))),
+                }),
+                (module: "Skeletal Mesh Location", inputs: {
+                    "Skeletal Mesh": Link(SkeletalMesh, "User.Character"),
+                    "Surface Offset": Float(0.5),
+                    "Inherit Velocity Scale": Float(0.4),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-6.0, 8.0, -6.0)), Vec3((6.0, 20.0, 6.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(1.5) }),
+                (module: "Curl Noise Force", inputs: { "Noise Strength": Float(60.0), "Noise Frequency": Float(0.05) }),
+                (module: "Scale Color", inputs: { "Scale RGB": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (1.0, (0.6, 0.2, 0.6))])), "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Joints",
+            max_particles: 2000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(400.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.6),
+                    "Color": Color((0.4, 1.2, 3.0, 1.0)),
+                    "Sprite Size": Vec2((2.5, 2.5)),
+                }),
+                (module: "Skeletal Mesh Location", inputs: {
+                    "Skeletal Mesh": Link(SkeletalMesh, "User.Character"),
+                    "Sampling Mode": Bones,
+                    "Inherit Velocity Scale": Float(0.0),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)
