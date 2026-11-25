@@ -27,8 +27,8 @@ struct Params {
 @group(0) @binding(1) var<storage, read> particles: array<f32>;
 @group(0) @binding(2) var<storage, read> vals: array<u32>;
 @group(0) @binding(3) var<storage, read> draw: array<u32>;
-// meta[0] = n (sorted particles), meta[1] = blocks of WG.
-@group(0) @binding(4) var<storage, read_write> meta: array<u32>;
+// rrmeta[0] = n (sorted particles), rmeta[1] = blocks of WG.
+@group(0) @binding(4) var<storage, read_write> rmeta: array<u32>;
 // (start, end) per ribbon id.
 @group(0) @binding(5) var<storage, read_write> ribbons: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> dist: array<f32>;
@@ -58,8 +58,8 @@ fn ribbon_prep(@builtin(local_invocation_id) lid: vec3<u32>) {
     if (t == 0u) {
         let n = draw[1];
         let blocks = (n + WG - 1u) / WG;
-        meta[0] = n;
-        meta[1] = blocks;
+        rmeta[0] = n;
+        rmeta[1] = blocks;
         args[0] = blocks;
         args[1] = 1u;
         args[2] = 1u;
@@ -77,7 +77,7 @@ fn ribbon_link(
 ) {
     let k = gid.x;
     let t = lid.x;
-    let n = meta[0];
+    let n = rmeta[0];
     var seg = 0.0;
     if (k < n) {
         let i = vals[k];
@@ -117,7 +117,7 @@ fn ribbon_link(
 fn ribbon_scan(@builtin(local_invocation_id) lid: vec3<u32>) {
     let t = lid.x;
     if (t == 0u) {
-        wg_blocks = meta[1];
+        wg_blocks = rmeta[1];
     }
     // Uniform for the barriers in the loop.
     let blocks = workgroupUniformLoad(&wg_blocks);
@@ -153,7 +153,7 @@ fn ribbon_add(
     @builtin(workgroup_id) wid: vec3<u32>,
 ) {
     let k = gid.x;
-    if (k < meta[0]) {
+    if (k < rmeta[0]) {
         dist[k] += block_sums[wid.x];
     }
 }

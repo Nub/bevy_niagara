@@ -1063,12 +1063,11 @@ fn prepare_effects(
                     }
                 }
                 Settings::Light(l) => {
-                    // Lights are culled against one view (the first), nearest first.
-                    let first = views.iter().map(|v| v.retained_view_entity).min();
-                    let keep = rd
-                        .light
-                        .as_ref()
-                        .is_some_and(|ls| Some(ls.view) == first);
+                    // Lights are culled against one view (kept while it exists), nearest first.
+                    let first = views.iter().map(|v| v.retained_view_entity).next();
+                    let keep = rd.light.as_ref().is_some_and(|ls| {
+                        views.iter().any(|v| v.retained_view_entity == ls.view)
+                    });
                     if !keep {
                         rd.light = first.map(|view| {
                             let draw = ViewDraw::with_config(

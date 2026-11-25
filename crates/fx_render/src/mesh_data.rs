@@ -2,7 +2,6 @@
 //! Bevy [`Mesh`] (triangle list) to the vertex-pulling layout `mesh.wesl`
 //! reads (position, normal, uv: 8 floats per vertex, u32 indices).
 
-use bevy::math::primitives::{Capsule3d, Cone, Cuboid, Cylinder, Sphere, Torus};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
