@@ -65,6 +65,8 @@ struct Bench {
     warm: u32,
     measured: u32,
     last: Option<(Instant, u64)>,
+    /// When the scene started waiting to be ready.
+    started: Option<Instant>,
     samples: Arc<Mutex<Samples>>,
 }
 
@@ -92,6 +94,14 @@ pub fn run(def: &SceneDef, frames: u32, warm_frames: u32, (w, h): (u32, u32)) ->
                 exit_condition: ExitCondition::DontExit,
                 ..default()
             })
+            // Textures and materials load relative to the effect file, as in fxpreview.
+            .set(bevy::asset::AssetPlugin {
+                file_path: std::fs::canonicalize(path.parent().unwrap_or(&path))
+                    .unwrap_or_else(|_| path.parent().unwrap_or(&path).to_path_buf())
+                    .to_string_lossy()
+                    .into_owned(),
+                ..default()
+            })
             .disable::<PipelinedRenderingPlugin>()
             .disable::<bevy::winit::WinitPlugin>(),
         ScheduleRunnerPlugin::run_loop(Duration::ZERO),
@@ -105,6 +115,7 @@ pub fn run(def: &SceneDef, frames: u32, warm_frames: u32, (w, h): (u32, u32)) ->
         warm: 0,
         measured: 0,
         last: None,
+        started: None,
         samples: samples.clone(),
     });
     let (camera, target) = (def.camera, def.target);
@@ -172,6 +183,11 @@ fn measure(
     mut exit: MessageWriter<AppExit>,
 ) {
     if !ready.get() {
+        // A texture, material or pipeline that never loads would hang the run.
+        let started = *bench.started.get_or_insert_with(Instant::now);
+        if started.elapsed() > Duration::from_secs(120) {
+            panic!("scene never became ready (an asset failed to load?)");
+        }
         return;
     }
     clock.request_steps(1);
