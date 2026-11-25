@@ -241,7 +241,8 @@ fn data_image(slots: u32) -> Image {
     image
 }
 
-/// Spawns, replaces and despawns the proxies of ray-traced sprite renderers,
+/// Spawns, replaces and despawns the proxies of ray-traced sprite renderers
+/// (only while a Solari camera is active),
 /// and keeps their emission in step with the Solari camera's exposure.
 #[allow(clippy::too_many_arguments)]
 fn sync_proxies(
@@ -255,9 +256,8 @@ fn sync_proxies(
     asset_server: Res<AssetServer>,
 ) {
     let proxies = &mut *proxies;
-    let exposure = cameras
-        .iter()
-        .find(|(c, _)| c.is_active)
+    let solari_camera = cameras.iter().find(|(c, _)| c.is_active);
+    let exposure = solari_camera
         .map(|(_, e)| e.copied().unwrap_or_default())
         .unwrap_or_default()
         .exposure();
@@ -273,7 +273,8 @@ fn sync_proxies(
     }
 
     let mut live = HashSet::new();
-    for (effect, fx) in &effects {
+    // Without an active Solari camera nothing traces rays: no proxies, no cost.
+    for (effect, fx) in effects.iter().filter(|_| solari_camera.is_some()) {
         let system_ptr = Arc::as_ptr(&fx.system) as usize;
         for (ri, (ei, r)) in renderers(&fx.system).enumerate() {
             let CookedRenderer::Sprite(s) = r else { continue };
