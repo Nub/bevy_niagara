@@ -20,7 +20,8 @@ pub struct Span {
     pub col: u32,
 }
 
-/// A Niagara stage (script). Events are reserved for later.
+/// A Niagara stage (script). `ParticleEvent` is the module stack of an event
+/// handler (Niagara's Event Handler script).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     SystemSpawn,
@@ -29,16 +30,18 @@ pub enum Stage {
     EmitterUpdate,
     ParticleSpawn,
     ParticleUpdate,
+    ParticleEvent,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 6] = [
+    pub const ALL: [Stage; 7] = [
         Stage::SystemSpawn,
         Stage::SystemUpdate,
         Stage::EmitterSpawn,
         Stage::EmitterUpdate,
         Stage::ParticleSpawn,
         Stage::ParticleUpdate,
+        Stage::ParticleEvent,
     ];
 
     /// The field name in `.fx.ron`.
@@ -50,6 +53,7 @@ impl Stage {
             Stage::EmitterUpdate => "emitter_update",
             Stage::ParticleSpawn => "particle_spawn",
             Stage::ParticleUpdate => "particle_update",
+            Stage::ParticleEvent => "event_handlers[..].modules",
         }
     }
 
@@ -62,11 +66,15 @@ impl Stage {
             Stage::EmitterUpdate => "Emitter Update",
             Stage::ParticleSpawn => "Particle Spawn",
             Stage::ParticleUpdate => "Particle Update",
+            Stage::ParticleEvent => "Event Handler",
         }
     }
 
     pub fn is_particle(self) -> bool {
-        matches!(self, Stage::ParticleSpawn | Stage::ParticleUpdate)
+        matches!(
+            self,
+            Stage::ParticleSpawn | Stage::ParticleUpdate | Stage::ParticleEvent
+        )
     }
     pub fn is_emitter(self) -> bool {
         matches!(self, Stage::EmitterSpawn | Stage::EmitterUpdate)
@@ -104,6 +112,9 @@ pub struct EmitterSource {
     pub emitter_update: Vec<ModuleCall>,
     pub particle_spawn: Vec<ModuleCall>,
     pub particle_update: Vec<ModuleCall>,
+    /// Niagara event handlers: what this emitter does with other emitters' (or its own) events.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub event_handlers: Vec<crate::events::EventHandlerSource>,
     /// How particles are drawn; empty means the emitter draws nothing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub renderers: Vec<RendererSource>,
@@ -330,7 +341,7 @@ impl EmitterSource {
             Stage::EmitterUpdate => &self.emitter_update,
             Stage::ParticleSpawn => &self.particle_spawn,
             Stage::ParticleUpdate => &self.particle_update,
-            Stage::SystemSpawn | Stage::SystemUpdate => &[],
+            Stage::SystemSpawn | Stage::SystemUpdate | Stage::ParticleEvent => &[],
         }
     }
 }

@@ -6,13 +6,14 @@
 
 use crate::diag::{Diags, suggest};
 use crate::dynamic::{self, ArgDefault, ArgKind};
+use crate::events::{EventExecutionMode, EventKind};
 use crate::model::*;
 use crate::modules::{self, ModuleDef, ModuleKind};
 use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 5;
+pub const COOKED_FORMAT_VERSION: u32 = 6;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -41,6 +42,29 @@ pub struct CookedEmitter {
     pub particle_update: Vec<CookedModule>,
     /// How the particles are drawn, in source order; empty draws nothing.
     pub renderers: Vec<CookedRenderer>,
+    /// Event handlers, in source order.
+    pub event_handlers: Vec<CookedEventHandler>,
+}
+
+/// An event handler with its source resolved.
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CookedEventHandler {
+    /// Index of the source emitter.
+    pub source: u32,
+    /// [`EventKind::index`].
+    pub event: u8,
+    /// EveryParticle (else SpawnedParticles).
+    pub every_particle: bool,
+    pub spawn_number: u32,
+    /// 0 = every event.
+    pub max_events: u32,
+    pub modules: Vec<CookedModule>,
+}
+
+impl CookedEventHandler {
+    pub fn kind(&self) -> EventKind {
+        EventKind::from_index(self.event)
+    }
 }
 
 impl CookedEmitter {
@@ -73,21 +97,34 @@ impl CookedEmitter {
                     if r.ns == Namespace::Particles && r.index >= attr::FIRST_EXTENDED)
             })
         };
-        renders
-            || self
-                .particle_spawn
-                .iter()
-                .chain(&self.particle_update)
-                .any(module)
+        renders || self.particle_modules().any(module)
+    }
+
+    /// Every particle-stage module: spawn, update and the event handlers'.
+    pub fn particle_modules(&self) -> impl Iterator<Item = &CookedModule> {
+        self.particle_spawn
+            .iter()
+            .chain(&self.particle_update)
+            .chain(self.event_handlers.iter().flat_map(|h| h.modules.iter()))
+    }
+
+    /// Whether the particle update writes events of `kind`.
+    pub fn generates(&self, kind: EventKind) -> bool {
+        let generator = match kind {
+            EventKind::Death => ModuleKind::GenerateDeathEvent,
+            EventKind::Collision => ModuleKind::GenerateCollisionEvent,
+            EventKind::Location => ModuleKind::GenerateLocationEvent,
+        };
+        self.particle_update
+            .iter()
+            .any(|m| modules::from_id(m.module) == Some(generator))
     }
 
     /// Whether a module sets Particles.SubImageIndex (SubUV Animation): the
     /// sprite renderer then shows that frame instead of playing the flipbook
     /// over the particle's life.
     pub fn sets_sub_image_index(&self) -> bool {
-        self.particle_spawn
-            .iter()
-            .chain(&self.particle_update)
+        self.particle_modules()
             .any(|m| modules::from_id(m.module) == Some(ModuleKind::SubUvAnimation))
     }
 
@@ -527,7 +564,16 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             particle_spawn: ps,
             particle_update: pu,
             renderers: e.renderers.iter().map(|r| cook_renderer(r, d)).collect(),
+            event_handlers: Vec::new(),
         });
+    }
+    for (e, ce) in src.emitters.iter().zip(emitters.iter_mut()) {
+        ce.event_handlers = cx.handlers(src, e, d);
+    }
+    if !d.has_errors() {
+        for (e, ce) in src.emitters.iter().zip(&emitters) {
+            lint_events(src, e, ce, d);
+        }
     }
     if d.has_errors() {
         return None;
@@ -548,8 +594,97 @@ fn enabled_kinds(calls: &[ModuleCall]) -> impl Iterator<Item = ModuleKind> + '_ 
         .map(|m| m.kind)
 }
 
+/// Warnings about events and collisions that cook but probably do not do
+/// what was meant.
+fn lint_events(src: &SystemSource, e: &EmitterSource, ce: &CookedEmitter, d: &mut Diags) {
+    let update: Vec<(ModuleKind, Span)> = e
+        .particle_update
+        .iter()
+        .filter(|c| c.enabled)
+        .filter_map(|c| modules::by_name(&c.module).map(|m| (m.kind, c.span)))
+        .collect();
+    let pos = |k: ModuleKind| update.iter().position(|(m, _)| *m == k);
+    for (i, (k, span)) in update.iter().enumerate() {
+        match k {
+            ModuleKind::Collision => {
+                if pos(ModuleKind::SolveForcesAndVelocity).is_none_or(|s| s > i) {
+                    d.warning(
+                        *span,
+                        "\"Collision\" runs before \"Solve Forces and Velocity\"; it tests the move the solver makes, so place it after",
+                        Some("move `(module: \"Collision\")` below \"Solve Forces and Velocity\"".into()),
+                    );
+                }
+            }
+            ModuleKind::GenerateCollisionEvent => {
+                if pos(ModuleKind::Collision).is_none_or(|c| c > i) {
+                    d.warning(
+                        *span,
+                        "\"Generate Collision Event\" has no \"Collision\" module before it, so it never fires",
+                        Some("add `(module: \"Collision\")` above it".into()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    for (eg, kind) in EventKind::ALL.iter().map(|k| (ce.generates(*k), *k)) {
+        let received = src
+            .emitters
+            .iter()
+            .flat_map(|o| &o.event_handlers)
+            .any(|h| h.source == e.name && h.event == kind);
+        if eg && !received {
+            d.warning(
+                e.span,
+                format!(
+                    "emitter \"{}\" writes {} events but no emitter handles them",
+                    e.name,
+                    kind.name()
+                ),
+                Some(format!(
+                    "add `event_handlers: [(source: \"{}\", event: {}, ...)]` to the receiving emitter",
+                    e.name,
+                    kind.name()
+                )),
+            );
+        }
+    }
+    for h in &e.event_handlers {
+        if h.execution_mode == EventExecutionMode::SpawnedParticles && h.spawn_number == 0 {
+            d.warning(
+                h.span,
+                "this SpawnedParticles handler has `spawn_number: 0`, so it spawns nothing",
+                Some("set e.g. `spawn_number: 20`".into()),
+            );
+        }
+        for c in h.modules.iter().filter(|c| c.enabled) {
+            let want = match modules::by_name(&c.module).map(|m| m.kind) {
+                Some(ModuleKind::ReceiveDeathEvent) => EventKind::Death,
+                Some(ModuleKind::ReceiveCollisionEvent) => EventKind::Collision,
+                Some(ModuleKind::ReceiveLocationEvent) => EventKind::Location,
+                _ => continue,
+            };
+            if want != h.event {
+                d.warning(
+                    c.span,
+                    format!(
+                        "\"{}\" in a handler of {} events",
+                        c.module,
+                        h.event.name()
+                    ),
+                    Some(format!("use \"Receive {} Event\"", h.event.name())),
+                );
+            }
+        }
+    }
+}
+
 fn lint_emitter(e: &EmitterSource, d: &mut Diags) {
-    let spawns = enabled_kinds(&e.emitter_update).any(|k| {
+    let event_spawns = e
+        .event_handlers
+        .iter()
+        .any(|h| h.execution_mode == EventExecutionMode::SpawnedParticles);
+    let spawns = event_spawns || enabled_kinds(&e.emitter_update).any(|k| {
         matches!(
             k,
             ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous
@@ -708,6 +843,76 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Cooks emitter `e`'s event handlers, resolving their sources.
+    fn handlers(
+        &self,
+        src: &SystemSource,
+        e: &EmitterSource,
+        d: &mut Diags,
+    ) -> Vec<CookedEventHandler> {
+        let mut out = Vec::new();
+        for h in &e.event_handlers {
+            let modules = self.stack(Stage::ParticleEvent, &h.modules, d);
+            let Some(si) = src.emitters.iter().position(|o| o.name == h.source) else {
+                let names = src.emitters.iter().map(|o| o.name.as_str());
+                let help = match suggest(&h.source, names) {
+                    Some(s) => format!("did you mean \"{s}\"?"),
+                    None => format!(
+                        "emitters: {}",
+                        src.emitters
+                            .iter()
+                            .map(|o| format!("\"{}\"", o.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                d.error(
+                    h.span,
+                    format!("event handler source \"{}\" is not an emitter of this effect", h.source),
+                    Some(help),
+                );
+                continue;
+            };
+            let source = &src.emitters[si];
+            let generator = h.event.generator();
+            let generates = source
+                .particle_update
+                .iter()
+                .any(|c| c.enabled && c.module == generator);
+            if !generates {
+                d.error(
+                    h.span,
+                    format!(
+                        "emitter \"{}\" writes no {} events, so this handler would never run",
+                        h.source,
+                        h.event.name()
+                    ),
+                    Some(format!(
+                        "add `(module: \"{generator}\")` to the `particle_update` of \"{}\"",
+                        h.source
+                    )),
+                );
+            }
+            let every = h.execution_mode == EventExecutionMode::EveryParticle;
+            if every && source.name == e.name {
+                d.error(
+                    h.span,
+                    "an EveryParticle handler cannot receive its own emitter's events",
+                    Some("handle them in another emitter, or use `execution_mode: SpawnedParticles`".into()),
+                );
+            }
+            out.push(CookedEventHandler {
+                source: si as u32,
+                event: h.event.index() as u8,
+                every_particle: every,
+                spawn_number: if every { 0 } else { h.spawn_number },
+                max_events: h.max_events_per_frame,
+                modules,
+            });
+        }
+        out
+    }
+
     fn stack(&self, stage: Stage, calls: &[ModuleCall], d: &mut Diags) -> Vec<CookedModule> {
         let mut out = Vec::new();
         for call in calls {

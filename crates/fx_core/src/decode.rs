@@ -116,15 +116,13 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
     let emitter_update = stack("emitter_update", d);
     let particle_spawn = stack("particle_spawn", d);
     let particle_update = stack("particle_update", d);
-    if let Some(ev) = f.take("event_handlers")
-        && !matches!(&ev.kind, SKind::List(l) if l.is_empty())
-    {
-        d.error(
-            ev.span,
-            "event handlers are not supported yet",
-            Some("remove `event_handlers` (or leave it as `[]`)".into()),
-        );
-    }
+    let event_handlers = match f.take("event_handlers") {
+        Some(v) => list(v, "`event_handlers`", d)
+            .iter()
+            .filter_map(|h| decode_handler(h, d))
+            .collect(),
+        None => Vec::new(),
+    };
     let renderers = match f.take("renderers") {
         Some(v) => list(v, "`renderers`", d)
             .iter()
@@ -141,6 +139,7 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
         emitter_update,
         particle_spawn,
         particle_update,
+        event_handlers,
         renderers,
         span: v.span,
     })
@@ -1245,4 +1244,62 @@ impl<'a> Fields<'a> {
             }
         }
     }
+}
+
+const HANDLER_HELP: &str = "write a handler as `(source: \"Shell\", event: Death, spawn_number: 50, modules: [ ... ])`";
+
+/// One entry of `event_handlers: [ ... ]`.
+fn decode_handler(v: &SValue, d: &mut Diags) -> Option<crate::events::EventHandlerSource> {
+    use crate::events::{EventExecutionMode, EventHandlerSource, EventKind, handler_field_names};
+    if !matches!(v.kind, SKind::Struct(..)) {
+        d.error(
+            v.span,
+            format!("an event handler must be a struct, found {}", v.kind.describe()),
+            Some(HANDLER_HELP.into()),
+        );
+        return None;
+    }
+    let mut f = Fields::new(v, "an event handler", handler_field_names(), d)?;
+    let source = f.required_string("source", d).unwrap_or_default();
+    let event = f
+        .take("event")
+        .and_then(|v| ident_enum::<EventKind>(v, "event", d))
+        .unwrap_or_default();
+    let execution_mode = f
+        .take("execution_mode")
+        .and_then(|v| ident_enum::<EventExecutionMode>(v, "execution_mode", d))
+        .unwrap_or_default();
+    let count = |f: &mut Fields, name: &str, default: u32, help: &str, d: &mut Diags| {
+        f.take(name)
+            .and_then(|v| whole_in_range(v, name, 0..=1_000_000, help, d))
+            .unwrap_or(default)
+    };
+    let spawn_number = count(
+        &mut f,
+        "spawn_number",
+        1,
+        "write e.g. `spawn_number: 50` (particles per event)",
+        d,
+    );
+    let max_events_per_frame = count(
+        &mut f,
+        "max_events_per_frame",
+        0,
+        "write e.g. `max_events_per_frame: 10` (0 handles every event)",
+        d,
+    );
+    let modules = f
+        .take("modules")
+        .map(|v| decode_stack(v, d))
+        .unwrap_or_default();
+    f.finish(d);
+    Some(EventHandlerSource {
+        source,
+        event,
+        execution_mode,
+        spawn_number,
+        max_events_per_frame,
+        modules,
+        span: v.span,
+    })
 }

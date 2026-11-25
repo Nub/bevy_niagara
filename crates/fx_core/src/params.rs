@@ -13,15 +13,18 @@ pub enum Namespace {
     Emitter,
     Particles,
     Engine,
+    /// The event being handled (event handler modules only).
+    Event,
 }
 
 impl Namespace {
-    pub const ALL: [Namespace; 5] = [
+    pub const ALL: [Namespace; 6] = [
         Namespace::User,
         Namespace::System,
         Namespace::Emitter,
         Namespace::Particles,
         Namespace::Engine,
+        Namespace::Event,
     ];
     pub fn prefix(self) -> &'static str {
         match self {
@@ -30,6 +33,7 @@ impl Namespace {
             Namespace::Emitter => "Emitter",
             Namespace::Particles => "Particles",
             Namespace::Engine => "Engine",
+            Namespace::Event => "Event",
         }
     }
     /// Whether a module in `stage` may read parameters of this namespace.
@@ -38,6 +42,7 @@ impl Namespace {
             Namespace::User | Namespace::System | Namespace::Engine => true,
             Namespace::Emitter => !matches!(stage, Stage::SystemSpawn | Stage::SystemUpdate),
             Namespace::Particles => stage.is_particle(),
+            Namespace::Event => stage == Stage::ParticleEvent,
         }
     }
 }
@@ -65,6 +70,18 @@ pub const ENGINE: &[Builtin] = &[
         ValueType::Vec3,
         "velocity of the entity that owns the effect (m/s; set by the host, 0 by default)",
     ),
+];
+/// The event a handler is running for (`Event.` namespace), as in Niagara's event payloads.
+pub const EVENT: &[Builtin] = &[
+    b("Position", ValueType::Vec3, "where the source particle was (metres, effect space)"),
+    b("Velocity", ValueType::Vec3, "the source particle's velocity (m/s)"),
+    b(
+        "Normal",
+        ValueType::Vec3,
+        "surface normal of a collision event; zero for death and location events",
+    ),
+    b("Age", ValueType::Float, "the source particle's age (seconds)"),
+    b("ParticleID", ValueType::Int, "the source particle's UniqueID"),
 ];
 pub const SYSTEM: &[Builtin] = &[b("Age", ValueType::Float, "seconds the system has run")];
 pub const EMITTER: &[Builtin] = &[b("Age", ValueType::Float, "seconds the emitter has run")];
@@ -192,6 +209,7 @@ pub fn builtins(ns: Namespace) -> &'static [Builtin] {
         Namespace::System => SYSTEM,
         Namespace::Emitter => EMITTER,
         Namespace::Particles => PARTICLES,
+        Namespace::Event => EVENT,
         Namespace::User => &[],
     }
 }

@@ -56,6 +56,8 @@ macro_rules! ident_enum {
     };
 }
 
+pub(crate) use ident_enum;
+
 ident_enum! {
     /// How a sprite or ribbon combines with what is behind it (Niagara's material blend mode).
     BlendMode {

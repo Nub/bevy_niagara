@@ -48,6 +48,13 @@ pub enum ModuleKind {
     ScaleColorBySpeed = 34,
     ScaleSpriteSizeBySpeed = 35,
     KillParticlesInVolume = 36,
+    Collision = 37,
+    GenerateDeathEvent = 38,
+    GenerateCollisionEvent = 39,
+    GenerateLocationEvent = 40,
+    ReceiveDeathEvent = 41,
+    ReceiveCollisionEvent = 42,
+    ReceiveLocationEvent = 43,
 }
 
 pub struct InputDef {
@@ -73,7 +80,20 @@ impl ModuleDef {
     pub fn input(&self, name: &str) -> Option<(usize, &'static InputDef)> {
         self.inputs.iter().enumerate().find(|(_, i)| i.name == name)
     }
+    /// Event handler stacks take the particle modules too, except the ones that
+    /// only make sense once per update (collisions and event generators).
     pub fn allowed_in(&self, stage: Stage) -> bool {
+        if stage == ParticleEvent && !self.stages.contains(&ParticleEvent) {
+            return (self.stages.contains(&ParticleSpawn) || self.stages.contains(&ParticleUpdate))
+                && !matches!(
+                    self.kind,
+                    ModuleKind::Collision
+                        | ModuleKind::GenerateDeathEvent
+                        | ModuleKind::GenerateCollisionEvent
+                        | ModuleKind::GenerateLocationEvent
+                        | ModuleKind::ParticleState
+                );
+        }
         self.stages.contains(&stage)
     }
     /// "Spawn Rate (Float), ..." for error messages.
@@ -862,6 +882,131 @@ pub static MODULES: &[ModuleDef] = &[
         ],
         doc: "Kills particles strictly inside the volume (or outside it, with Invert Volume).",
     },
+    ModuleDef {
+        kind: ModuleKind::Collision,
+        name: "Collision",
+        stages: &[ParticleUpdate],
+        inputs: &[
+            e(
+                "Collision Type",
+                &["Plane", "SceneDepth", "RayTraced"],
+                0,
+                "Plane: the analytic plane below (CPU and GPU); SceneDepth: the camera's depth buffer (GPU; on-screen only); RayTraced: Solari's ray-tracing scene (GPU with fx_solari, else SceneDepth). On the CPU, SceneDepth and RayTraced collide with the host's colliders",
+            ),
+            e(
+                "Collision Response",
+                &["Bounce", "Stop", "Kill"],
+                0,
+                "Bounce: reflect with Restitution and Friction; Stop: velocity becomes zero at the contact; Kill: the particle dies",
+            ),
+            i(
+                "Plane Normal",
+                T::Vec3,
+                Value::Vec3([0.0, 1.0, 0.0]),
+                "Plane: the side particles stay on (normalised for you)",
+            ),
+            i(
+                "Plane Origin",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "Plane: a point on the plane (metres, effect space)",
+            ),
+            i(
+                "Particle Radius",
+                T::Float,
+                Value::Float(0.0),
+                "metres kept between the particle centre and the surface",
+            ),
+            i(
+                "Restitution",
+                T::Float,
+                Value::Float(0.5),
+                "Bounce: fraction of the speed into the surface kept, out of it",
+            ),
+            i(
+                "Friction",
+                T::Float,
+                Value::Float(0.0),
+                "Bounce: the sliding speed lost is Friction times the speed into the surface",
+            ),
+            i(
+                "Rest Speed",
+                T::Float,
+                Value::Float(0.1),
+                "Bounce: hits slower than this (m/s, into the surface) do not bounce or count as collisions; the particle rests or slides",
+            ),
+            i(
+                "Surface Thickness",
+                T::Float,
+                Value::Float(0.5),
+                "SceneDepth: how far behind the depth buffer a particle still counts as inside the surface (metres)",
+            ),
+        ],
+        doc: "Collides particles with the scene after Solve Forces and Velocity: a particle that crossed the surface this step is moved back onto it (Particle Radius away) and bounces, stops or dies. Sets the collision a Generate Collision Event reports.",
+    },
+    ModuleDef {
+        kind: ModuleKind::GenerateDeathEvent,
+        name: "Generate Death Event",
+        stages: &[ParticleUpdate],
+        inputs: &[],
+        doc: "Writes a Death event (position, velocity, age, UniqueID) for each particle that dies in this update, wherever the module sits in the stack. Receivers handle it with `event_handlers: [(source: ..., event: Death)]`.",
+    },
+    ModuleDef {
+        kind: ModuleKind::GenerateCollisionEvent,
+        name: "Generate Collision Event",
+        stages: &[ParticleUpdate],
+        inputs: &[],
+        doc: "Writes a Collision event (position, velocity after the hit, surface normal, age, UniqueID) when a Collision module earlier in the stack hit something this step. Place it after the Collision module.",
+    },
+    ModuleDef {
+        kind: ModuleKind::GenerateLocationEvent,
+        name: "Generate Location Event",
+        stages: &[ParticleUpdate],
+        inputs: &[i(
+            "Event Probability",
+            T::Float,
+            Value::Float(1.0),
+            "chance per step that the particle writes an event (0..1)",
+        )],
+        doc: "Writes a Location event (position, velocity, age, UniqueID) each step, with probability Event Probability.",
+    },
+    ModuleDef {
+        kind: ModuleKind::ReceiveDeathEvent,
+        name: "Receive Death Event",
+        stages: &[ParticleEvent],
+        inputs: &RECEIVE_INPUTS,
+        doc: "In a Death event handler: Particles.Position = Event.Position + Position Offset; Particles.Velocity += Event.Velocity * Inherit Velocity Scale.",
+    },
+    ModuleDef {
+        kind: ModuleKind::ReceiveCollisionEvent,
+        name: "Receive Collision Event",
+        stages: &[ParticleEvent],
+        inputs: &RECEIVE_INPUTS,
+        doc: "In a Collision event handler: Particles.Position = Event.Position + Position Offset; Particles.Velocity += Event.Velocity * Inherit Velocity Scale. Event.Normal gives the surface normal.",
+    },
+    ModuleDef {
+        kind: ModuleKind::ReceiveLocationEvent,
+        name: "Receive Location Event",
+        stages: &[ParticleEvent],
+        inputs: &RECEIVE_INPUTS,
+        doc: "In a Location event handler: Particles.Position = Event.Position + Position Offset; Particles.Velocity += Event.Velocity * Inherit Velocity Scale.",
+    },
+];
+
+/// Inputs of the Receive ... Event modules.
+const RECEIVE_INPUTS: [InputDef; 2] = [
+    i(
+        "Position Offset",
+        T::Vec3,
+        Value::Vec3([0.0; 3]),
+        "added to Event.Position (metres)",
+    ),
+    i(
+        "Inherit Velocity Scale",
+        T::Float,
+        Value::Float(0.0),
+        "fraction of Event.Velocity added to the particle's velocity",
+    ),
 ];
 
 pub fn by_name(name: &str) -> Option<&'static ModuleDef> {

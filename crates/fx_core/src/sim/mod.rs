@@ -7,10 +7,16 @@
 //! Each [`Simulation::step`], per emitter, in order:
 //! 1. on the first step, the Emitter Spawn stack;
 //! 2. the Emitter Update stack, which decides how many particles to spawn;
-//! 3. the Particle Update stack over the living particles, then dead ones are
+//! 3. the emitter's events of the previous step are cleared; the Particle
+//!    Update stack runs over the living particles, each followed by the
+//!    EveryParticle event handlers (once per event); then the events the
+//!    update wrote are sorted by source UniqueID and dead particles are
 //!    removed (order kept);
-//! 4. new particles are created (capped at `max_particles`) and run the
-//!    Particle Spawn stack. They first update on the next step.
+//! 4. new particles are created (capped at `max_particles`): first the
+//!    emitter stack's request, then `spawn_number` per event of each
+//!    SpawnedParticles handler, in handler and event order. They run the
+//!    Particle Spawn stack (and the handler's modules) and first update on
+//!    the next step.
 //!
 //! `Engine.Time` and the ages read during a step are their values at the
 //! start of the step.
@@ -21,6 +27,7 @@ pub mod rng;
 use bevy_math::{Quat, Vec2, Vec3, Vec4};
 
 use crate::cook::{CookedInput, CookedModule, CookedSystem};
+use crate::events::{self as fx_events, Event, EventKind};
 use crate::modules::{self, ModuleKind};
 use crate::params::{Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
@@ -179,6 +186,60 @@ pub struct EmitterState {
     pub next_id: u32,
     pub spawned_last_step: u32,
     pub particles: Vec<Particle>,
+    /// Events written by the last particle update, by [`EventKind::index`],
+    /// sorted by source UniqueID.
+    pub events: [Vec<Event>; 3],
+}
+
+/// A host-provided collision shape for the CPU path of the Collision
+/// module's SceneDepth and RayTraced types (the GPU uses the depth buffer or
+/// the ray-tracing scene instead). In the effect's simulation space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Collider {
+    /// Half-space below the plane through `origin` facing `normal`.
+    Plane { normal: Vec3, origin: Vec3 },
+    Sphere { center: Vec3, radius: f32 },
+    /// Axis-aligned box.
+    Box { center: Vec3, half_extents: Vec3 },
+}
+
+impl Collider {
+    /// The plane a particle at `pos` (radius `r`) is pushed out through, if
+    /// it is inside the shape: `(normal, point on the surface)`.
+    pub fn contact(&self, pos: Vec3, r: f32) -> Option<(Vec3, Vec3)> {
+        match *self {
+            Collider::Plane { normal, origin } => Some((unit_or_y(normal), origin)),
+            Collider::Sphere { center, radius } => {
+                let v = pos - center;
+                let dist = v.length();
+                (dist < radius + r).then(|| {
+                    let n = if dist > 0.0 { v / dist } else { Vec3::Y };
+                    (n, center + n * radius)
+                })
+            }
+            Collider::Box {
+                center,
+                half_extents: h,
+            } => {
+                let q = pos - center;
+                let depth = h + Vec3::splat(r) - q.abs();
+                if depth.min_element() <= 0.0 {
+                    return None;
+                }
+                // Out through the nearest face.
+                let axis = if depth.x <= depth.y && depth.x <= depth.z {
+                    0
+                } else if depth.y <= depth.z {
+                    1
+                } else {
+                    2
+                };
+                let mut n = Vec3::ZERO;
+                n[axis] = if q[axis] < 0.0 { -1.0 } else { 1.0 };
+                Some((n, center + n * h[axis]))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +255,8 @@ pub struct Simulation {
     /// `Engine.Owner.Velocity`: the owning entity's velocity (m/s), set by
     /// the host; read by Inherit Velocity.
     pub owner_velocity: Vec3,
+    /// What SceneDepth and RayTraced collisions hit on the CPU (set by the host).
+    pub colliders: Vec<Collider>,
     pub emitters: Vec<EmitterState>,
 }
 
@@ -211,6 +274,41 @@ struct Env<'a> {
     owner_velocity: Vec3,
     /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
     sub_image_frames: u32,
+    colliders: &'a [Collider],
+}
+
+/// Per-particle state of one pass over a module stack that is not a
+/// particle attribute: the event being handled, the collision found and the
+/// events to write.
+#[derive(Default)]
+struct ParticleCx<'a> {
+    /// The event a handler runs for (`Event.` parameters).
+    event: Option<&'a Event>,
+    /// A Collision module hit this step: the surface normal.
+    collision: Option<Vec3>,
+    /// Events to write at the end of the update, by kind.
+    pending: [Option<Event>; 3],
+    /// Generate Death Event ran: write a death event if the particle dies.
+    death: bool,
+}
+
+fn event_of(p: &Particle, normal: Vec3) -> Event {
+    Event {
+        position: p.position.to_array(),
+        velocity: p.velocity.to_array(),
+        normal: normal.to_array(),
+        age: p.age,
+        particle_id: p.unique_id,
+    }
+}
+
+/// The events handler `h` reads: `(events in order, how many it takes)`.
+fn handled(events: &[Event], max: u32) -> usize {
+    if max == 0 {
+        events.len()
+    } else {
+        events.len().min(max as usize)
+    }
 }
 
 impl Simulation {
@@ -224,6 +322,7 @@ impl Simulation {
             time: 0.0,
             user,
             owner_velocity: Vec3::ZERO,
+            colliders: Vec::new(),
             emitters,
         }
     }
@@ -241,6 +340,11 @@ impl Simulation {
 
     pub fn particles(&self, emitter: usize) -> &[Particle] {
         &self.emitters[emitter].particles
+    }
+
+    /// Events of `kind` emitter `emitter` wrote in its last update, sorted by source UniqueID.
+    pub fn events(&self, emitter: usize, kind: EventKind) -> &[Event] {
+        &self.emitters[emitter].events[kind.index()]
     }
 
     pub fn particle_count(&self) -> usize {
@@ -279,6 +383,20 @@ impl Simulation {
 
     fn step_emitter(&mut self, ei: usize, dt: f32) {
         let emitter = &self.system.emitters[ei];
+        // Other emitters' events the EveryParticle handlers read (a handler
+        // never reads its own emitter's, which this step clears).
+        let every: Vec<Vec<Event>> = emitter
+            .event_handlers
+            .iter()
+            .map(|h| {
+                if h.every_particle {
+                    let ev = &self.emitters[h.source as usize].events[h.event as usize];
+                    ev[..handled(ev, h.max_events)].to_vec()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
         let state = &mut self.emitters[ei];
         let env = Env {
             user: &self.user,
@@ -287,9 +405,11 @@ impl Simulation {
             emitter_age: state.age,
             owner_velocity: self.owner_velocity,
             sub_image_frames: emitter.sub_image_frames(),
+            colliders: &self.colliders,
         };
+        let (seed, frame) = (self.seed, self.frame);
         let key = |stage: u32, module: usize, particle: u32, frame: u32| RandKey {
-            seed: self.seed,
+            seed,
             emitter: ei as u32,
             particle,
             frame,
@@ -298,14 +418,14 @@ impl Simulation {
 
         // 1-2. Emitter stages.
         let mut spawn_count: u32 = 0;
-        if self.frame == 0 {
+        if frame == 0 {
             run_emitter_stack(
                 &emitter.emitter_spawn,
                 STAGE_EMITTER_SPAWN,
                 &env,
                 state,
                 &mut spawn_count,
-                &|m| key(STAGE_EMITTER_SPAWN, m, u32::MAX, self.frame),
+                &|m| key(STAGE_EMITTER_SPAWN, m, u32::MAX, frame),
             );
         }
         run_emitter_stack(
@@ -314,33 +434,91 @@ impl Simulation {
             &env,
             state,
             &mut spawn_count,
-            &|m| key(STAGE_EMITTER_UPDATE, m, u32::MAX, self.frame),
+            &|m| key(STAGE_EMITTER_UPDATE, m, u32::MAX, frame),
         );
 
-        // 3. Particle Update, then remove the dead.
+        // 3. Particle Update and EveryParticle handlers, then remove the dead.
+        let events = &mut state.events;
+        events.iter_mut().for_each(Vec::clear);
         for p in &mut state.particles {
+            let mut cx = ParticleCx::default();
             for (mi, m) in emitter.particle_update.iter().enumerate() {
-                let k = key(STAGE_PARTICLE_UPDATE, mi, p.unique_id, self.frame + 1);
-                run_particle_module(m, &env, p, k);
+                let k = key(STAGE_PARTICLE_UPDATE, mi, p.unique_id, frame + 1);
+                run_particle_module(m, &env, p, k, &mut cx);
             }
+            for (hi, h) in emitter.event_handlers.iter().enumerate() {
+                for (rank, ev) in every[hi].iter().enumerate() {
+                    let mut hcx = ParticleCx {
+                        event: Some(ev),
+                        ..Default::default()
+                    };
+                    let kf = fx_events::every_particle_frame(frame, rank as u32);
+                    for (mi, m) in h.modules.iter().enumerate() {
+                        let k = key(fx_events::handler_stage(hi), mi, p.unique_id, kf);
+                        run_particle_module(m, &env, p, k, &mut hcx);
+                    }
+                }
+            }
+            if cx.death && !p.alive {
+                cx.pending[EventKind::Death.index()] = Some(event_of(p, Vec3::ZERO));
+            }
+            for (kind, ev) in cx.pending.into_iter().enumerate() {
+                if let Some(ev) = ev {
+                    events[kind].push(ev);
+                }
+            }
+        }
+        for ev in events.iter_mut() {
+            ev.sort_by_key(|e| e.particle_id);
         }
         state.particles.retain(|p| p.alive);
 
-        // 4. Spawn.
-        let room = (emitter.max_particles as usize).saturating_sub(state.particles.len()) as u32;
+        // 4. Spawn: the emitter stack's request, then the handlers'.
+        let mut room = (emitter.max_particles as usize).saturating_sub(state.particles.len()) as u32;
         let n = spawn_count.min(room);
-        for _ in 0..n {
+        room -= n;
+        let mut spawned = n;
+        let spawn_one = |state: &mut EmitterState, h: Option<(usize, &Event)>| {
             let mut p = Particle::new(state.next_id);
             state.next_id = state.next_id.wrapping_add(1);
+            let mut cx = ParticleCx::default();
             for (mi, m) in emitter.particle_spawn.iter().enumerate() {
                 let k = key(STAGE_PARTICLE_SPAWN, mi, p.unique_id, 0);
-                run_particle_module(m, &env, &mut p, k);
+                run_particle_module(m, &env, &mut p, k, &mut cx);
+            }
+            if let Some((hi, ev)) = h {
+                let mut cx = ParticleCx {
+                    event: Some(ev),
+                    ..Default::default()
+                };
+                for (mi, m) in emitter.event_handlers[hi].modules.iter().enumerate() {
+                    let k = key(fx_events::handler_stage(hi), mi, p.unique_id, 0);
+                    run_particle_module(m, &env, &mut p, k, &mut cx);
+                }
             }
             if p.alive {
                 state.particles.push(p);
             }
+        };
+        for _ in 0..n {
+            spawn_one(state, None);
         }
-        state.spawned_last_step = n;
+        for (hi, h) in emitter.event_handlers.iter().enumerate() {
+            if h.every_particle || h.spawn_number == 0 {
+                continue;
+            }
+            let src = self.emitters[h.source as usize].events[h.event as usize].clone();
+            let state = &mut self.emitters[ei];
+            let want = handled(&src, h.max_events) as u64 * h.spawn_number as u64;
+            let count = want.min(room as u64) as u32;
+            room -= count;
+            spawned += count;
+            for k in 0..count {
+                spawn_one(state, Some((hi, &src[(k / h.spawn_number) as usize])));
+            }
+        }
+        let state = &mut self.emitters[ei];
+        state.spawned_last_step = spawned;
         state.age += dt;
     }
 }
@@ -355,11 +533,12 @@ pub trait InputEnv {
 struct ParticleEnv<'a, 'b> {
     env: &'a Env<'b>,
     p: Option<&'a Particle>,
+    event: Option<&'a Event>,
 }
 
 impl InputEnv for ParticleEnv<'_, '_> {
     fn param(&self, r: ParamRef) -> Value {
-        read_param(r, self.env, self.p)
+        read_param(r, self.env, self.p, self.event)
     }
     fn normalized_age(&self) -> f32 {
         self.p.map_or(0.0, |p| p.normalized_age)
@@ -522,7 +701,7 @@ fn eval_dynamic(m: &CookedModule, index: usize, env: &dyn InputEnv, key: &RandKe
     }
 }
 
-fn read_param(r: ParamRef, env: &Env, p: Option<&Particle>) -> Value {
+fn read_param(r: ParamRef, env: &Env, p: Option<&Particle>, event: Option<&Event>) -> Value {
     match r.ns {
         Namespace::User => env
             .user
@@ -537,6 +716,16 @@ fn read_param(r: ParamRef, env: &Env, p: Option<&Particle>) -> Value {
         Namespace::System => Value::Float(env.time),
         Namespace::Emitter => Value::Float(env.emitter_age),
         Namespace::Particles => p.map_or(Value::Float(0.0), |p| p.get(r.index)),
+        Namespace::Event => {
+            let e = event.copied().unwrap_or_default();
+            match r.index {
+                0 => Value::Vec3(e.position),
+                1 => Value::Vec3(e.velocity),
+                2 => Value::Vec3(e.normal),
+                3 => Value::Float(e.age),
+                _ => Value::Int(e.particle_id as i32),
+            }
+        }
     }
 }
 
@@ -550,7 +739,11 @@ fn run_emitter_stack(
 ) {
     for (mi, m) in stack.iter().enumerate() {
         let k = key(mi);
-        let pe = ParticleEnv { env, p: None };
+        let pe = ParticleEnv {
+            env,
+            p: None,
+            event: None,
+        };
         let input = |slot: usize| eval_input(m, slot, &pe, &k);
         match modules::from_id(m.module) {
             Some(ModuleKind::SpawnRate) => {
@@ -752,14 +945,78 @@ pub fn shape_point(primitive: i32, s: &ShapeInputs, u: [f32; 5]) -> Vec3 {
     }
 }
 
+/// Collision Type values of the Collision module.
+pub const COLLISION_PLANE: i32 = 0;
+pub const COLLISION_SCENE_DEPTH: i32 = 1;
+pub const COLLISION_RAY_TRACED: i32 = 2;
+/// Collision Response values.
+pub const RESPONSE_BOUNCE: i32 = 0;
+pub const RESPONSE_STOP: i32 = 1;
+pub const RESPONSE_KILL: i32 = 2;
+
+/// The Collision module's response inputs.
+pub struct CollisionResponse {
+    pub response: i32,
+    pub restitution: f32,
+    pub friction: f32,
+    pub rest_speed: f32,
+}
+
+/// Collides particle `p` (radius `radius`) with the plane through `o` facing
+/// unit `n`: if it is behind the plane it moves back onto it and bounces,
+/// stops or dies. Returns whether this counts as a collision (an impact at
+/// `rest_speed` or faster into the surface). `collide_plane` in fx_gpu's
+/// `sim_common.wgsl` is the same code.
+pub fn collide_plane(p: &mut Particle, n: Vec3, o: Vec3, radius: f32, c: &CollisionResponse) -> bool {
+    let d = (p.position - o).dot(n) - radius;
+    if !(d < 0.0) {
+        return false;
+    }
+    p.position -= n * d;
+    let vn = p.velocity.dot(n);
+    if vn >= 0.0 {
+        // Already leaving the surface.
+        return false;
+    }
+    let speed_in = -vn;
+    let impact = speed_in >= c.rest_speed;
+    match c.response {
+        RESPONSE_KILL => {
+            p.alive = false;
+            return true;
+        }
+        RESPONSE_STOP => {
+            p.velocity = Vec3::ZERO;
+            return impact;
+        }
+        _ => {}
+    }
+    let mut vt = p.velocity - n * vn;
+    let t = vt.length();
+    if t > 0.0 {
+        vt *= (1.0 - c.friction * speed_in / t).max(0.0);
+    }
+    let out = if impact { speed_in * c.restitution } else { 0.0 };
+    p.velocity = vt + n * out;
+    impact
+}
+
 /// Radians per degree.
 const DEGREES: f32 = std::f32::consts::PI / 180.0;
 
-fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandKey) {
+fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandKey, cx: &mut ParticleCx) {
     let Some(kind) = modules::from_id(m.module) else {
         return;
     };
-    let input = |slot: usize, p: &Particle| eval_input(m, slot, &ParticleEnv { env, p: Some(p) }, &key);
+    let event = cx.event;
+    let input = |slot: usize, p: &Particle| {
+        let pe = ParticleEnv {
+            env,
+            p: Some(p),
+            event,
+        };
+        eval_input(m, slot, &pe, &key)
+    };
     match kind {
         ModuleKind::InitializeParticle => {
             p.lifetime = input(0, p).as_f32();
@@ -988,6 +1245,45 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             if inside != input(4, p).as_bool() {
                 p.alive = false;
             }
+        }
+        ModuleKind::Collision => {
+            let ty = input(0, p).as_i32();
+            let response = input(1, p).as_i32();
+            let radius = input(4, p).as_f32();
+            let c = CollisionResponse {
+                response,
+                restitution: input(5, p).as_f32(),
+                friction: input(6, p).as_f32(),
+                rest_speed: input(7, p).as_f32(),
+            };
+            let contact = if ty == COLLISION_PLANE {
+                Some((unit_or_y(input(2, p).as_vec3()), input(3, p).as_vec3()))
+            } else {
+                env.colliders.iter().find_map(|c| c.contact(p.position, radius))
+            };
+            if let Some((n, o)) = contact
+                && collide_plane(p, n, o, radius, &c)
+            {
+                cx.collision = Some(n);
+            }
+        }
+        ModuleKind::GenerateDeathEvent => cx.death = true,
+        ModuleKind::GenerateCollisionEvent => {
+            if let Some(n) = cx.collision {
+                cx.pending[EventKind::Collision.index()] = Some(event_of(p, n));
+            }
+        }
+        ModuleKind::GenerateLocationEvent => {
+            if key.unit(128) < input(0, p).as_f32() {
+                cx.pending[EventKind::Location.index()] = Some(event_of(p, Vec3::ZERO));
+            }
+        }
+        ModuleKind::ReceiveDeathEvent
+        | ModuleKind::ReceiveCollisionEvent
+        | ModuleKind::ReceiveLocationEvent => {
+            let e = cx.event.copied().unwrap_or_default();
+            p.position = Vec3::from_array(e.position) + input(0, p).as_vec3();
+            p.velocity += Vec3::from_array(e.velocity) * input(1, p).as_f32();
         }
         ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
     }
