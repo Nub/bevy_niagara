@@ -859,6 +859,15 @@ impl<'a> Cx<'a> {
             self.report.renderers.push(format!("{}: {} disabled: left out", e.name, r.class));
             return None;
         }
+        if material.as_deref().is_some_and(|m| { let l = m.to_lowercase(); l.contains("distort") || l.contains("refract") }) {
+            self.report.renderers.push(format!(
+                "{}: {} with a distortion material (`{}`): no equivalent, left out",
+                e.name,
+                r.class,
+                material.as_deref().unwrap_or("")
+            ));
+            return None;
+        }
         let what = match r.class.as_str() {
             "NiagaraSpriteRendererProperties" => {
                 fields.push(format!("blend_mode: {blend}"));
