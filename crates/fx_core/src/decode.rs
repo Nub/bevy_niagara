@@ -4,8 +4,9 @@
 use crate::diag::{Diags, suggest};
 use crate::model::*;
 use crate::render::{
-    IdentEnum, MESH_BUILTINS, RENDERER_KINDS, is_mesh_asset_path, light_field_names,
-    mesh_field_names, ribbon_field_names, sprite_field_names,
+    IdentEnum, MESH_BUILTINS, RENDERER_KINDS, component_field_names, decal_field_names, is_mesh_asset_path,
+    light_field_names, mesh_field_names, ribbon_field_names, sprite_field_names,
+    volumetric_field_names,
 };
 use crate::ron_parse::{Field, SKind, SValue};
 use crate::types::{Curve, Value, ValueType};
@@ -197,7 +198,7 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
     })
 }
 
-const RENDERER_HELP: &str = "write a renderer as `Kind(( field: value, ... ))` with Kind one of Sprite, Ribbon, Mesh or Light, e.g. `Sprite((blend_mode: Additive))`; every field is optional";
+const RENDERER_HELP: &str = "write a renderer as `Kind(( field: value, ... ))` with Kind one of Sprite, Ribbon, Mesh, Light, Decal, Component or Volumetric, e.g. `Sprite((blend_mode: Additive))`; every field is optional";
 
 fn decode_renderer(v: &SValue, d: &mut Diags) -> Option<RendererSource> {
     // `Sprite((...))`, `Sprite(...fields...)`, `Sprite(())`, `Sprite()` or bare `Sprite`.
@@ -233,6 +234,9 @@ fn decode_renderer(v: &SValue, d: &mut Diags) -> Option<RendererSource> {
         "Ribbon" => decode_ribbon(body, v, d).map(RendererSource::Ribbon),
         "Mesh" => decode_mesh(body, v, d).map(RendererSource::Mesh),
         "Light" => decode_light(body, v, d).map(RendererSource::Light),
+        "Decal" => decode_decal(body, v, d).map(RendererSource::Decal),
+        "Component" => decode_component(body, v, d).map(RendererSource::Component),
+        "Volumetric" => decode_volumetric(body, v, d).map(RendererSource::Volumetric),
         _ => {
             let kinds = RENDERER_KINDS.join(", ");
             let help = match suggest(tag, RENDERER_KINDS.iter().copied()) {
@@ -532,6 +536,159 @@ fn decode_light(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<
     Some(l)
 }
 
+
+/// A number of at least 0 for `field`, or an error with `example`.
+fn non_negative(v: &SValue, field: &str, example: &str, d: &mut Diags) -> Option<f32> {
+    match v.kind {
+        SKind::Number(n, _) if n >= 0.0 && n.is_finite() => Some(n as f32),
+        _ => {
+            d.error(
+                v.span,
+                format!("`{field}` must be a number of at least 0, found {}", v.kind.describe()),
+                Some(format!("write e.g. `{field}: {example}`")),
+            );
+            None
+        }
+    }
+}
+
+fn decode_decal(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<DecalSource> {
+    let mut s = DecalSource {
+        span: whole.span,
+        ..DecalSource::default()
+    };
+    let Some(body) = body else {
+        return Some(s);
+    };
+    let mut f = Fields::new(body, "a Decal renderer", decal_field_names(), d)?;
+    if let Some(v) = f.take("size") {
+        match floats::<3>(v, "size", "(1.0, 0.5, 1.0)", d) {
+            Some(x) if x.iter().all(|c| *c > 0.0) => s.size = x,
+            Some(_) => d.error(
+                v.span,
+                "`size` must be more than 0 metres on every axis",
+                Some("write e.g. `size: (1.0, 0.5, 1.0)` (Y is the projection depth)".into()),
+            ),
+            None => {}
+        }
+    }
+    if let Some(v) = f.take("blend_mode") {
+        s.blend_mode = ident_enum(v, "blend_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("lit") {
+        s.lit = boolean(v, "lit", d).unwrap_or(s.lit);
+    }
+    if let Some(v) = f.take("fade_start") {
+        match v.kind {
+            SKind::Number(n, _) if (0.0..=1.0).contains(&n) => s.fade_start = n as f32,
+            _ => d.error(
+                v.span,
+                format!("`fade_start` must be a number from 0 to 1, found {}", v.kind.describe()),
+                Some("write e.g. `fade_start: 0.75` (1 = no fade with age)".into()),
+            ),
+        }
+    }
+    if let Some(v) = f.take("texture") {
+        s.texture = asset_path(
+            v,
+            "texture",
+            "write e.g. `texture: \"textures/scorch.png\"`, or leave it out for the built-in soft round sprite",
+            d,
+        );
+    }
+    f.finish(d);
+    Some(s)
+}
+
+fn decode_component(
+    body: Option<&SValue>,
+    whole: &SValue,
+    d: &mut Diags,
+) -> Option<ComponentSource> {
+    let mut s = ComponentSource {
+        span: whole.span,
+        ..ComponentSource::default()
+    };
+    let Some(body) = body else {
+        return Some(s);
+    };
+    let mut f = Fields::new(body, "a Component renderer", component_field_names(), d)?;
+    if let Some(v) = f.take("component") {
+        match &v.kind {
+            SKind::Str(n) | SKind::Ident(n) if !n.is_empty() => s.component = n.clone(),
+            other => d.error(
+                v.span,
+                format!("`component` must be a name \"string\", found {}", other.describe()),
+                Some("write e.g. `component: \"Debris\"` (the name the game registers)".into()),
+            ),
+        }
+    }
+    if let Some(v) = f.take("max_components") {
+        s.max_components = whole_in_range(
+            v,
+            "max_components",
+            1..=1024,
+            "write e.g. `max_components: 32` (the oldest particles are kept)",
+            d,
+        )
+        .unwrap_or(s.max_components);
+    }
+    if let Some(v) = f.take("transform") {
+        s.transform = boolean(v, "transform", d).unwrap_or(s.transform);
+    }
+    f.finish(d);
+    Some(s)
+}
+
+fn decode_volumetric(
+    body: Option<&SValue>,
+    whole: &SValue,
+    d: &mut Diags,
+) -> Option<VolumetricSource> {
+    let mut s = VolumetricSource {
+        span: whole.span,
+        ..VolumetricSource::default()
+    };
+    let Some(body) = body else {
+        return Some(s);
+    };
+    let mut f = Fields::new(body, "a Volumetric renderer", volumetric_field_names(), d)?;
+    if let Some(v) = f.take("resolution") {
+        s.resolution = whole_in_range(v, "resolution", 8..=128, "write e.g. `resolution: 48`", d)
+            .unwrap_or(s.resolution);
+    }
+    if let Some(v) = f.take("bounds") {
+        if let Some([lo, hi]) = fixed_bounds(v, d) {
+            if (0..3).all(|c| hi[c] > lo[c]) {
+                s.bounds = Some([lo, hi]);
+            } else {
+                d.error(
+                    v.span,
+                    "`bounds` must have some size on every axis",
+                    Some("write e.g. `bounds: ((-2.0, 0.0, -2.0), (2.0, 3.0, 2.0))`".into()),
+                );
+            }
+        }
+    }
+    if let Some(v) = f.take("density_scale") {
+        s.density_scale = non_negative(v, "density_scale", "4.0", d).unwrap_or(s.density_scale);
+    }
+    if let Some(v) = f.take("radius_scale") {
+        s.radius_scale = non_negative(v, "radius_scale", "0.5", d).unwrap_or(s.radius_scale);
+    }
+    if let Some(v) = f.take("lit") {
+        s.lit = boolean(v, "lit", d).unwrap_or(s.lit);
+    }
+    if let Some(v) = f.take("emissive") {
+        s.emissive = non_negative(v, "emissive", "1.0", d).unwrap_or(s.emissive);
+    }
+    if let Some(v) = f.take("steps") {
+        s.steps = whole_in_range(v, "steps", 8..=256, "write e.g. `steps: 64`", d)
+            .unwrap_or(s.steps);
+    }
+    f.finish(d);
+    Some(s)
+}
 fn asset_path(v: &SValue, field: &str, help: &str, d: &mut Diags) -> Option<String> {
     match &v.kind {
         SKind::Str(p) => Some(p.clone()),

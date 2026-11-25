@@ -1,0 +1,69 @@
+// Volumetric smoke: a rising, curling smoke column splatted into a density
+// volume and ray-marched (lit by the scene, occluded by it), over a small
+// glowing fire core drawn as a second, emissive volume.
+(
+    name: "Volumetric Smoke",
+    emitters: [
+        (
+            name: "Smoke",
+            max_particles: 600,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.5), Float(3.5)),
+                    "Position": RandomRange(Vec3((-0.2, 0.2, -0.2)), Vec3((0.2, 0.3, 0.2))),
+                    "Color": Color((0.55, 0.55, 0.58, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.35, 0.35)), Vec2((0.5, 0.5))),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-0.1, 0.6, -0.1)), Vec3((0.1, 0.9, 0.1))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: { "Noise Strength": Float(1.2), "Noise Frequency": Float(0.9) }),
+                (module: "Drag", inputs: { "Drag": Float(0.6) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (1.0, (2.2, 2.2))])),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (0.6, 0.6), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Volumetric((
+                resolution: 48,
+                bounds: ((-1.5, 0.0, -1.5), (1.5, 3.2, 1.5)),
+                density_scale: 3.0,
+                radius_scale: 0.5,
+            ))],
+        ),
+        (
+            name: "Fire",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(50.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.5), Float(0.8)),
+                    "Position": RandomRange(Vec3((-0.15, 0.05, -0.15)), Vec3((0.15, 0.1, 0.15))),
+                    "Color": RandomRange(Color((1.0, 0.35, 0.05, 1.0)), Color((1.0, 0.6, 0.15, 1.0))),
+                    "Sprite Size": Vec2((0.3, 0.3)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-0.05, 0.6, -0.05)), Vec3((0.05, 1.0, 0.05))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Volumetric((
+                resolution: 32,
+                bounds: ((-0.6, 0.0, -0.6), (0.6, 1.2, 0.6)),
+                density_scale: 6.0,
+                radius_scale: 0.5,
+                lit: false,
+                emissive: 6.0,
+            ))],
+        ),
+    ],
+)

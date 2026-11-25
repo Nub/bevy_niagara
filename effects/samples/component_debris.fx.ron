@@ -1,0 +1,48 @@
+// Component debris: a fountain of sparks (sprites) bouncing on the floor, of which the 12 oldest
+// living ones each drive a pooled Bevy entity (Component renderer). Games
+// register a component under the name "Debris"; fxpreview draws each
+// driven entity as a small cube, coloured by its particle.
+(
+    name: "Component Debris",
+    emitters: [
+        (
+            name: "Debris",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(24.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.4), Float(3.0)),
+                    "Position": Vec3((0.0, 0.1, 0.0)),
+                    "Color": RandomRange(Color((1.0, 0.45, 0.1, 1.0)), Color((1.0, 0.8, 0.3, 1.0))),
+                    "Sprite Size": Vec2((0.06, 0.06)),
+                }),
+                (module: "Initialize Mesh", inputs: {
+                    "Mesh Scale": RandomRange(Vec3((0.6, 0.6, 0.6)), Vec3((1.2, 1.2, 1.2))),
+                    "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((360.0, 360.0, 360.0))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(25.0),
+                    "Velocity Strength": RandomRange(Float(3.0), Float(4.2)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Update Mesh Orientation", inputs: { "Rotation Rate": Vec3((200.0, 120.0, 60.0)) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": Plane,
+                    "Collision Response": Bounce,
+                    "Restitution": Float(0.35),
+                    "Friction": Float(0.4),
+                    "Particle Radius": Float(0.06),
+                }),
+            ],
+            renderers: [
+                Sprite((blend_mode: Additive)),
+                Component((component: "Debris", max_components: 12)),
+            ],
+        ),
+    ],
+)

@@ -178,6 +178,12 @@ pub enum RendererSource {
     Mesh(MeshSource),
     /// `Light(( ... ))`: one point light per particle (Niagara's Light Renderer).
     Light(LightSource),
+    /// `Decal(( ... ))`: textures projected onto scene surfaces (Niagara's Decal Renderer).
+    Decal(DecalSource),
+    /// `Component(( ... ))`: particles drive pooled Bevy entities (Niagara's Component Renderer).
+    Component(ComponentSource),
+    /// `Volumetric(( ... ))`: particles splat density into a ray-marched volume (fog, smoke).
+    Volumetric(VolumetricSource),
 }
 
 impl RendererSource {
@@ -188,6 +194,9 @@ impl RendererSource {
             RendererSource::Ribbon(r) => r.span,
             RendererSource::Mesh(m) => m.span,
             RendererSource::Light(l) => l.span,
+            RendererSource::Decal(r) => r.span,
+            RendererSource::Component(r) => r.span,
+            RendererSource::Volumetric(r) => r.span,
         }
     }
 }
@@ -375,6 +384,109 @@ impl Default for LightSource {
     }
 }
 
+
+/// Decal renderer settings, with defaults filled in. Each particle projects
+/// its texture onto the scene surfaces inside a box at `Particles.Position`,
+/// `size * Particles.Scale` metres, rotated by `Particles.MeshOrientation`;
+/// the box projects along its Y axis (down onto floors by default).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DecalSource {
+    /// Box size in metres (X, Y = projection depth, Z), times `Particles.Scale`.
+    pub size: [f32; 3],
+    pub blend_mode: BlendMode,
+    pub lit: bool,
+    /// `Particles.NormalizedAge` at which the decal starts fading out (1 = no age fade).
+    pub fade_start: f32,
+    /// Asset path; `None` uses the built-in soft round sprite.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_path"
+    )]
+    pub texture: Option<String>,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for DecalSource {
+    fn default() -> Self {
+        DecalSource {
+            size: [1.0, 0.5, 1.0],
+            blend_mode: BlendMode::default(),
+            lit: false,
+            fade_start: 0.75,
+            texture: None,
+            span: Span::default(),
+        }
+    }
+}
+
+/// Component renderer settings, with defaults filled in. The first
+/// `max_components` particles (oldest first) each drive a pooled Bevy entity.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ComponentSource {
+    /// Name games register a component type under (`add_particle_component`).
+    pub component: String,
+    /// Most entities driven per emitter instance, 1..=1024.
+    pub max_components: u32,
+    /// Whether the entities' `Transform` follows the particle.
+    pub transform: bool,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for ComponentSource {
+    fn default() -> Self {
+        ComponentSource {
+            component: "Particle".into(),
+            max_components: 32,
+            transform: true,
+            span: Span::default(),
+        }
+    }
+}
+
+/// Volumetric renderer settings, with defaults filled in. Particles splat
+/// density (`Particles.Color` alpha) and colour into a 3D grid over `bounds`,
+/// which is ray-marched against the scene depth.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VolumetricSource {
+    /// Grid cells per axis, 8..=128.
+    pub resolution: u32,
+    /// `(min, max)` in effect space; `None`: the emitter's `fixed_bounds`, else
+    /// a cube of the system's `bounds_radius`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalability::serialize_plain"
+    )]
+    pub bounds: Option<[[f32; 3]; 2]>,
+    /// Extinction per metre at a particle's centre (alpha 1).
+    pub density_scale: f32,
+    /// Splat radius as a fraction of `Particles.SpriteSize.x`.
+    pub radius_scale: f32,
+    /// Lit by the scene's ambient and directional lights.
+    pub lit: bool,
+    /// Particle colour emitted per unit density (glowing smoke, fire).
+    pub emissive: f32,
+    /// Ray-march steps across the volume, 8..=256.
+    pub steps: u32,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for VolumetricSource {
+    fn default() -> Self {
+        VolumetricSource {
+            resolution: 48,
+            bounds: None,
+            density_scale: 4.0,
+            radius_scale: 0.5,
+            lit: true,
+            emissive: 0.0,
+            steps: 64,
+            span: Span::default(),
+        }
+    }
+}
 /// Written as a plain string (the source form), not `Some("...")`.
 fn serialize_path<S: Serializer>(t: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
     match t {

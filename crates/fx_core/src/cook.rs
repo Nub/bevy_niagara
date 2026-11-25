@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 10;
+pub const COOKED_FORMAT_VERSION: u32 = 11;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -224,6 +224,9 @@ pub enum CookedRenderer {
     Ribbon(CookedRibbon),
     Mesh(CookedMesh),
     Light(CookedLight),
+    Decal(CookedDecal),
+    Component(CookedComponent),
+    Volumetric(CookedVolumetric),
 }
 
 /// Sprite renderer settings (Niagara's Sprite Renderer properties).
@@ -381,6 +384,94 @@ fn cook_light(l: &LightSource) -> CookedLight {
     }
 }
 
+/// Decal renderer settings (Niagara's Decal Renderer properties).
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CookedDecal {
+    /// Box size in metres (X, Y = projection depth, Z), times `Particles.Scale`.
+    pub size: [f32; 3],
+    pub blend_mode: BlendMode,
+    pub lit: bool,
+    /// `Particles.NormalizedAge` at which the decal starts fading out.
+    pub fade_start: f32,
+    /// Asset path; `None` uses the built-in soft round sprite.
+    pub texture: Option<String>,
+}
+
+impl Default for CookedDecal {
+    fn default() -> Self {
+        cook_decal(&DecalSource::default())
+    }
+}
+
+fn cook_decal(s: &DecalSource) -> CookedDecal {
+    CookedDecal {
+        size: s.size,
+        blend_mode: s.blend_mode,
+        lit: s.lit,
+        fade_start: s.fade_start,
+        texture: s.texture.clone(),
+    }
+}
+
+/// Component renderer settings (Niagara's Component Renderer properties).
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CookedComponent {
+    /// Name games register a component type under.
+    pub component: String,
+    /// Most entities driven per emitter instance, 1..=1024.
+    pub max_components: u32,
+    /// Whether the entities' `Transform` follows the particle.
+    pub transform: bool,
+}
+
+impl Default for CookedComponent {
+    fn default() -> Self {
+        cook_component(&ComponentSource::default())
+    }
+}
+
+fn cook_component(s: &ComponentSource) -> CookedComponent {
+    CookedComponent {
+        component: s.component.clone(),
+        max_components: s.max_components,
+        transform: s.transform,
+    }
+}
+
+/// Volumetric renderer settings.
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CookedVolumetric {
+    /// Grid cells per axis, 8..=128.
+    pub resolution: u32,
+    /// `(min, max)` in effect space; `None`: the emitter's fixed bounds, else
+    /// a cube of the system's bounds radius.
+    pub bounds: Option<[[f32; 3]; 2]>,
+    pub density_scale: f32,
+    pub radius_scale: f32,
+    pub lit: bool,
+    pub emissive: f32,
+    /// Ray-march steps across the volume, 8..=256.
+    pub steps: u32,
+}
+
+impl Default for CookedVolumetric {
+    fn default() -> Self {
+        cook_volumetric(&VolumetricSource::default())
+    }
+}
+
+fn cook_volumetric(s: &VolumetricSource) -> CookedVolumetric {
+    CookedVolumetric {
+        resolution: s.resolution,
+        bounds: s.bounds,
+        density_scale: s.density_scale,
+        radius_scale: s.radius_scale,
+        lit: s.lit,
+        emissive: s.emissive,
+        steps: s.steps,
+    }
+}
+
 fn cook_renderer(r: &RendererSource, d: &mut Diags) -> CookedRenderer {
     // The decoder rejects bad values; models built in code may still hold them.
     match r {
@@ -447,6 +538,68 @@ fn cook_renderer(r: &RendererSource, d: &mut Diags) -> CookedRenderer {
                 );
             }
             CookedRenderer::Light(cook_light(l))
+        }
+        RendererSource::Decal(s) => {
+            if !s.size.iter().all(|v| *v > 0.0 && v.is_finite()) {
+                d.error(
+                    s.span,
+                    "`size` must be more than 0 metres on every axis",
+                    Some("write e.g. `size: (1.0, 0.5, 1.0)`".into()),
+                );
+            }
+            if !(0.0..=1.0).contains(&s.fade_start) {
+                d.error(
+                    s.span,
+                    "`fade_start` must be from 0 to 1",
+                    Some("write e.g. `fade_start: 0.75` (1 = no fade with age)".into()),
+                );
+            }
+            CookedRenderer::Decal(cook_decal(s))
+        }
+        RendererSource::Component(s) => {
+            if !(1..=1024).contains(&s.max_components) {
+                d.error(
+                    s.span,
+                    "`max_components` must be from 1 to 1024",
+                    Some("write e.g. `max_components: 32`".into()),
+                );
+            }
+            CookedRenderer::Component(cook_component(s))
+        }
+        RendererSource::Volumetric(s) => {
+            if !(8..=128).contains(&s.resolution) {
+                d.error(
+                    s.span,
+                    "`resolution` must be from 8 to 128",
+                    Some("write e.g. `resolution: 48`".into()),
+                );
+            }
+            if !(8..=256).contains(&s.steps) {
+                d.error(
+                    s.span,
+                    "`steps` must be from 8 to 256",
+                    Some("write e.g. `steps: 64`".into()),
+                );
+            }
+            if let Some([lo, hi]) = s.bounds
+                && !(0..3).all(|i| hi[i] > lo[i])
+            {
+                d.error(
+                    s.span,
+                    "`bounds` max must be above min on every axis",
+                    Some("write e.g. `bounds: ((-2.0, 0.0, -2.0), (2.0, 3.0, 2.0))`".into()),
+                );
+            }
+            for (name, v) in [
+                ("density_scale", s.density_scale),
+                ("radius_scale", s.radius_scale),
+                ("emissive", s.emissive),
+            ] {
+                if !(v >= 0.0 && v.is_finite()) {
+                    d.error(s.span, format!("`{name}` must be at least 0"), None);
+                }
+            }
+            CookedRenderer::Volumetric(cook_volumetric(s))
         }
     }
 }

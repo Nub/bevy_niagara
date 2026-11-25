@@ -34,7 +34,7 @@ use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::window::ExitCondition;
-use fx_render::{FxClock, FxPlugin, FxReady, ParticleEffect};
+use fx_render::{FxClock, FxPlugin, FxReady, ParticleAttributes, ParticleComponent, ParticleEffect};
 
 /// Simulation step: fixed, whatever the output frame rate.
 const SIM_HZ: u32 = 60;
@@ -204,7 +204,8 @@ fn main() -> ExitCode {
         result: result.clone(),
     })
     .add_systems(Startup, setup)
-    .add_systems(Update, drive);
+    .add_systems(Update, drive)
+    .add_systems(PostUpdate, show_particle_components.after(fx_render::apply_particle_components));
     app.run();
 
     let result = result.lock().unwrap().take();
@@ -317,6 +318,33 @@ fn setup(
     }
     let effect = preview.effect.take().unwrap();
     commands.spawn((effect, PreviewEffect, orbit_transform(o.orbit, 0.0)));
+}
+
+/// Draws each entity a Component renderer drives as a small cube in its
+/// particle's colour, so previews show which particles drive entities.
+fn show_particle_components(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut cube: Local<Option<Handle<Mesh>>>,
+    added: Query<(Entity, &ParticleAttributes), (Added<ParticleComponent>, Without<Mesh3d>)>,
+    changed: Query<(&ParticleAttributes, &MeshMaterial3d<StandardMaterial>), Changed<ParticleAttributes>>,
+) {
+    let cube = cube.get_or_insert_with(|| meshes.add(Cuboid::new(0.12, 0.12, 0.12))).clone();
+    let color = |a: &ParticleAttributes| Color::linear_rgb(a.color.x, a.color.y, a.color.z);
+    for (e, a) in &added {
+        let material = materials.add(StandardMaterial {
+            base_color: color(a),
+            perceptual_roughness: 0.5,
+            ..default()
+        });
+        commands.entity(e).insert((Mesh3d(cube.clone()), MeshMaterial3d(material)));
+    }
+    for (a, m) in &changed {
+        if let Some(mut mat) = materials.get_mut(&m.0) {
+            mat.base_color = color(a);
+        }
+    }
 }
 
 /// The effect fxpreview renders.

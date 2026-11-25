@@ -1,5 +1,5 @@
 //! Renderer settings: how an emitter's particles are drawn (Niagara's
-//! renderer properties): Sprite, Ribbon, Mesh and Light renderers, the
+//! renderer properties): Sprite, Ribbon, Mesh, Light, Decal, Component and Volumetric renderers, the
 //! variants of [`RendererSource`](crate::model::RendererSource) and
 //! [`CookedRenderer`](crate::cook::CookedRenderer).
 //!
@@ -176,7 +176,15 @@ pub fn is_mesh_asset_path(mesh: &str) -> bool {
 }
 
 /// Names of the renderer variants, as written in `renderers: [ ... ]`.
-pub const RENDERER_KINDS: &[&str] = &["Sprite", "Ribbon", "Mesh", "Light"];
+pub const RENDERER_KINDS: &[&str] = &[
+    "Sprite",
+    "Ribbon",
+    "Mesh",
+    "Light",
+    "Decal",
+    "Component",
+    "Volumetric",
+];
 
 /// One field of a renderer, for `fxc modules` and error help.
 pub struct RendererField {
@@ -432,12 +440,117 @@ pub const LIGHT_FIELDS: &[RendererField] = &[
     ),
 ];
 
+/// Fields of `Decal(( ... ))`, all optional.
+pub const DECAL_FIELDS: &[RendererField] = &[
+    field(
+        "size",
+        "(x, y, z) metres",
+        "(1.0, 0.5, 1.0)",
+        "decal box (Y = projection depth), times Particles.Scale; turned by Particles.MeshOrientation",
+    ),
+    field(
+        "blend_mode",
+        "Alpha | Additive | Premultiplied",
+        "Alpha",
+        "how the decal blends with the surface",
+    ),
+    field(
+        "lit",
+        "bool",
+        "false",
+        "lit by scene lights (normal = the box's up axis) instead of emissive-only",
+    ),
+    field(
+        "fade_start",
+        "0..=1",
+        "0.75",
+        "Particles.NormalizedAge at which the decal fades out; 1 = no fade with age",
+    ),
+    field(
+        "texture",
+        "\"asset/path.png\"",
+        "none",
+        "decal texture (projected on the box's XZ); none = built-in soft round sprite",
+    ),
+];
+
+/// Fields of `Component(( ... ))`, all optional.
+pub const COMPONENT_FIELDS: &[RendererField] = &[
+    field(
+        "component",
+        "\"Name\"",
+        "\"Particle\"",
+        "name a game registers its component under (fx_render add_particle_component)",
+    ),
+    field(
+        "max_components",
+        "1..=1024",
+        "32",
+        "most entities driven per effect instance (the oldest particles win)",
+    ),
+    field(
+        "transform",
+        "bool",
+        "true",
+        "the entity's Transform follows Position, MeshOrientation and Scale",
+    ),
+];
+
+/// Fields of `Volumetric(( ... ))`, all optional.
+pub const VOLUMETRIC_FIELDS: &[RendererField] = &[
+    field(
+        "resolution",
+        "8..=128",
+        "48",
+        "density grid cells per axis",
+    ),
+    field(
+        "bounds",
+        "((min x, y, z), (max x, y, z))",
+        "emitter fixed_bounds, else ±bounds_radius",
+        "volume box in effect space",
+    ),
+    field(
+        "density_scale",
+        "number >= 0",
+        "4.0",
+        "extinction per metre at a particle's centre (times Color alpha)",
+    ),
+    field(
+        "radius_scale",
+        "number >= 0",
+        "0.5",
+        "splat radius as a fraction of Particles.SpriteSize.x",
+    ),
+    field(
+        "lit",
+        "bool",
+        "true",
+        "scatters the scene's ambient and directional light",
+    ),
+    field(
+        "emissive",
+        "number >= 0",
+        "0.0",
+        "particle colour emitted per unit density (fire, glowing smoke)",
+    ),
+    field(
+        "steps",
+        "8..=256",
+        "64",
+        "ray-march steps across the volume",
+    ),
+];
+
 /// `(renderer name, its fields)`, in [`RENDERER_KINDS`] order.
 pub const RENDERER_FIELDS: &[(&str, &[RendererField])] = &[
     ("Sprite", SPRITE_FIELDS),
     ("Ribbon", RIBBON_FIELDS),
     ("Mesh", MESH_FIELDS),
     ("Light", LIGHT_FIELDS),
+    ("Decal", DECAL_FIELDS),
+    ("Component", COMPONENT_FIELDS),
+    ("Volumetric", VOLUMETRIC_FIELDS),
 ];
 
 macro_rules! field_names {
@@ -463,3 +576,6 @@ field_names!(sprite_field_names, SPRITE_FIELDS);
 field_names!(ribbon_field_names, RIBBON_FIELDS);
 field_names!(mesh_field_names, MESH_FIELDS);
 field_names!(light_field_names, LIGHT_FIELDS);
+field_names!(decal_field_names, DECAL_FIELDS);
+field_names!(component_field_names, COMPONENT_FIELDS);
+field_names!(volumetric_field_names, VOLUMETRIC_FIELDS);

@@ -1,5 +1,5 @@
-//! Bevy plugin for GPU-simulated effects drawn by Niagara's four core
-//! renderers in Bevy's raster pipeline:
+//! Bevy plugin for GPU-simulated effects drawn by Niagara's core renderers
+//! in Bevy's raster pipeline:
 //! - **Sprite**: one camera-facing quad per particle (`sprite.wesl`);
 //! - **Ribbon**: particles linked by `Particles.RibbonID` and link order into
 //!   strips whose geometry the GPU builds (`ribbon.wesl`, `fx_gpu::ribbon`);
@@ -7,6 +7,14 @@
 //!   indirect draw (`mesh.wesl`);
 //! - **Light**: per-particle point lights, culled and capped on the GPU, read
 //!   back (only the capped list) and applied as Bevy `PointLight`s.
+//! - **Decal**: a box per particle (`decal.wesl`) projecting the texture onto
+//!   the scene surfaces the depth prepass shows inside it; drawn only on
+//!   cameras with a `DepthPrepass` (Solari cameras have one);
+//! - **Component**: the oldest particles drive pooled child entities
+//!   ([`component`]): attributes read back, capped, like lights;
+//! - **Volumetric**: particles splatted into a density texture per instance
+//!   (`fx_gpu::volume`), ray-marched over the volume box (`volume.wesl`)
+//!   against the scene depth.
 //!
 //! Sprites, ribbons and meshes draw in the Transparent3d phase, depth-tested
 //! against the scene and sorted with other transparents by effect centre;
@@ -29,6 +37,7 @@
 //! No particle counts are read back; the per-frame CPU→GPU traffic is a few
 //! uniform writes from fixed-size scratch arrays.
 
+pub mod component;
 pub mod data;
 pub mod game;
 mod mesh_data;
@@ -37,6 +46,10 @@ pub mod stats;
 mod textures;
 
 pub use stats::{EffectStats, EmitterStats, FxStats, FxStatsData, FxStatsPlugin};
+pub use component::{
+    FromParticle, FxComponentAppExt, ParticleAttributes, ParticleComponent,
+    apply_particle_components,
+};
 pub use data::DataBinding;
 pub use game::{
     CullReason, EffectControl, EffectMode, FxCommandsExt, FxPoolStats, FxQuality, FxScalability,
@@ -68,7 +81,7 @@ use bevy::render::render_phase::{
     RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
 };
 use bevy::render::render_resource::binding_types::{
-    sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer_sized,
+    sampler, storage_buffer_read_only_sized, texture_2d, texture_3d, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
@@ -79,13 +92,18 @@ use bevy::render::{
     Extract, ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy::shader::{Shader, ShaderDefVal, load_shader_library};
-use fx_core::cook::{CookedLight, CookedMesh, CookedRenderer, CookedRibbon, CookedSprite, CookedSystem};
+use fx_core::cook::{
+    CookedComponent, CookedDecal, CookedLight, CookedMesh, CookedRenderer, CookedRibbon,
+    CookedSprite, CookedSystem, CookedVolumetric,
+};
 use fx_core::render::{
     BlendMode, FacingMode, MeshBlendMode, MeshFacingMode, RibbonFacingMode, RibbonLinkOrderMode,
     RibbonUvMode, SortMode, SpriteAlignment,
 };
 use fx_gpu::{GpuBatch, GpuEffect};
+use fx_gpu::gather::{GatherPipelines, ParticleGather};
 use fx_gpu::lights::{GpuLight, LightGather, LightPipelines};
+use fx_gpu::volume::{VolumeParams, VolumePipelines, VolumeSplat};
 use fx_gpu::ribbon::{RibbonBuild, RibbonPipelines};
 use fx_gpu::view::{BatchDraw, CullRadius, ViewDraw, ViewDrawConfig, ViewParams, ViewPipelines};
 use fx_gpu::wgpu;
@@ -288,8 +306,11 @@ impl Plugin for FxPlugin {
         embedded_asset!(app, "sprite.wesl");
         embedded_asset!(app, "ribbon.wesl");
         embedded_asset!(app, "mesh.wesl");
+        embedded_asset!(app, "decal.wesl");
+        embedded_asset!(app, "volume.wesl");
         let ready = FxReady::default();
         let inbox = LightInbox::default();
+        let components = component::ComponentInbox::default();
         let builtins = {
             let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
             BuiltinMeshes(
@@ -317,6 +338,12 @@ impl Plugin for FxPlugin {
             .insert_resource(inbox.clone())
             .insert_resource(builtins)
             .init_resource::<LightPools>()
+            .insert_resource(components.clone())
+            .init_resource::<component::ComponentPools>()
+            .add_systems(
+                PostUpdate,
+                apply_particle_components.before(TransformSystems::Propagate),
+            )
             .init_resource::<data::DataInterfaces>()
             .add_systems(
                 PostUpdate,
@@ -339,6 +366,7 @@ impl Plugin for FxPlugin {
         render_app
             .insert_resource(ready)
             .insert_resource(inbox)
+            .insert_resource(components)
             .insert_resource(FxDeterministic(self.deterministic))
             .insert_resource(pool_stats)
             .insert_resource(done)
@@ -545,7 +573,10 @@ fn renderer_paths(r: &CookedRenderer) -> (Option<&String>, Option<&String>) {
         CookedRenderer::Sprite(s) => (s.texture.as_ref(), s.material.as_ref()),
         CookedRenderer::Ribbon(s) => (s.texture.as_ref(), s.material.as_ref()),
         CookedRenderer::Mesh(s) => (s.texture.as_ref(), s.material.as_ref()),
-        CookedRenderer::Light(_) => (None, None),
+        CookedRenderer::Decal(s) => (s.texture.as_ref(), None),
+        CookedRenderer::Light(_) | CookedRenderer::Component(_) | CookedRenderer::Volumetric(_) => {
+            (None, None)
+        }
     }
 }
 
@@ -663,6 +694,10 @@ struct ParticlePipeline {
     sprite: Handle<Shader>,
     ribbon: Handle<Shader>,
     mesh: Handle<Shader>,
+    decal: Handle<Shader>,
+    volume: Handle<Shader>,
+    /// Group 1 of the volumetric renderer: uniform, density texture, sampler.
+    volume_layout: BindGroupLayoutDescriptor,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -670,6 +705,8 @@ enum DrawKind {
     Sprite,
     Ribbon,
     Mesh,
+    Decal,
+    Volume,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -765,12 +802,21 @@ impl SpecializedRenderPipeline for ParticlePipeline {
             DrawKind::Sprite => ("fx sprite", &self.sprite),
             DrawKind::Ribbon => ("fx ribbon", &self.ribbon),
             DrawKind::Mesh => ("fx mesh", &self.mesh),
+            DrawKind::Decal => ("fx decal", &self.decal),
+            DrawKind::Volume => ("fx volume", &self.volume),
         };
         let fragment_shader = key.material.clone().unwrap_or_else(|| shader.clone());
         let view_layout = self.mesh_pipeline.get_view_layout(key.view_key.into());
         RenderPipelineDescriptor {
             label: Some(label.into()),
-            layout: vec![view_layout.main_layout.clone(), self.layout.clone()],
+            layout: vec![
+                view_layout.main_layout.clone(),
+                if key.kind == DrawKind::Volume {
+                    self.volume_layout.clone()
+                } else {
+                    self.layout.clone()
+                },
+            ],
             vertex: VertexState {
                 shader: shader.clone(),
                 shader_defs: defs.clone(),
@@ -790,17 +836,22 @@ impl SpecializedRenderPipeline for ParticlePipeline {
                 ..default()
             }),
             primitive: PrimitiveState {
-                cull_mode: if key.kind == DrawKind::Mesh && key.blend == Blend::Opaque {
-                    Some(Face::Back)
-                } else {
-                    None
+                cull_mode: match key.kind {
+                    DrawKind::Mesh if key.blend == Blend::Opaque => Some(Face::Back),
+                    // Boxes shade their back faces: the camera may be inside.
+                    DrawKind::Decal | DrawKind::Volume => Some(Face::Front),
+                    _ => None,
                 },
                 ..default()
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
                 depth_write_enabled: Some(key.blend == Blend::Opaque),
-                depth_compare: Some(CompareFunction::GreaterEqual),
+                // Decals and volumes test the scene depth themselves (prepass).
+                depth_compare: Some(match key.kind {
+                    DrawKind::Decal | DrawKind::Volume => CompareFunction::Always,
+                    _ => CompareFunction::GreaterEqual,
+                }),
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),
@@ -816,6 +867,19 @@ impl SpecializedRenderPipeline for ParticlePipeline {
 
 /// The `FxRenderer` uniform of `particle_io.wesl`.
 const UNIFORM_BYTES: usize = 44 * 4;
+/// The `Volume` uniform of `volume.wesl`.
+const VOLUME_UNIFORM_BYTES: u64 = 176;
+
+/// A volumetric renderer's box in effect space: its `bounds`, else the
+/// emitter's fixed bounds, else a cube of the system's bounds radius.
+fn volume_bounds(v: &CookedVolumetric, sys: &CookedSystem, emitter: usize) -> [[f32; 3]; 2] {
+    v.bounds
+        .or_else(|| sys.emitters.get(emitter).and_then(|e| e.fixed_bounds))
+        .unwrap_or_else(|| {
+            let r = sys.scalability.bounds_radius.max(0.01);
+            [[-r; 3], [r; 3]]
+        })
+}
 
 // ---------------------------------------------------------------- GPU state
 
@@ -840,11 +904,29 @@ struct LightState {
     gather: LightGather,
 }
 
+/// A component renderer: every particle by UniqueID, the first rows gathered.
+struct ComponentState {
+    draw: ViewDraw,
+    gather: ParticleGather,
+}
+
+/// A volumetric renderer: its living particles splatted into a 3D texture.
+struct VolumeState {
+    draw: ViewDraw,
+    splat: VolumeSplat,
+    /// The `Volume` uniform of volume.wesl.
+    uniform: wgpu::Buffer,
+    bind_group: BindGroup,
+}
+
 enum Settings {
     Sprite(CookedSprite),
     Ribbon(CookedRibbon),
     Mesh(CookedMesh),
     Light(CookedLight),
+    Decal(CookedDecal),
+    Component(CookedComponent),
+    Volumetric(CookedVolumetric),
 }
 
 /// A renderer of one instance: ribbons and lights (per instance, reading the
@@ -857,6 +939,8 @@ struct RendererDraw {
     assets: RendererAssets,
     ribbon: Option<RibbonState>,
     light: Option<LightState>,
+    component: Option<ComponentState>,
+    volume: Option<VolumeState>,
     scratch: [u8; UNIFORM_BYTES],
 }
 
@@ -950,6 +1034,8 @@ pub struct FxState {
     view_pipelines: ViewPipelines,
     ribbon_pipelines: RibbonPipelines,
     light_pipelines: LightPipelines,
+    gather_pipelines: GatherPipelines,
+    volume_pipelines: VolumePipelines,
     effects: HashMap<Entity, EffectInstance>,
     /// Batches by index (`None`: dropped).
     batches: Vec<Option<Batch>>,
@@ -997,18 +1083,34 @@ fn init_render(
             ),
         ),
     );
+    let volume_layout = BindGroupLayoutDescriptor::new(
+        "fx volume",
+        &BindGroupLayoutEntries::sequential(
+            stages,
+            (
+                uniform_buffer_sized(false, None),
+                texture_3d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+            ),
+        ),
+    );
     commands.insert_resource(ParticlePipeline {
         mesh_pipeline: mesh_pipeline.clone(),
         layout,
         sprite: load_embedded_asset!(asset_server.as_ref(), "sprite.wesl"),
         ribbon: load_embedded_asset!(asset_server.as_ref(), "ribbon.wesl"),
         mesh: load_embedded_asset!(asset_server.as_ref(), "mesh.wesl"),
+        decal: load_embedded_asset!(asset_server.as_ref(), "decal.wesl"),
+        volume: load_embedded_asset!(asset_server.as_ref(), "volume.wesl"),
+        volume_layout,
     });
     let wd = device.wgpu_device();
     commands.insert_resource(FxState {
         view_pipelines: ViewPipelines::new(wd),
         ribbon_pipelines: RibbonPipelines::new(wd),
         light_pipelines: LightPipelines::new(wd),
+        gather_pipelines: GatherPipelines::new(wd),
+        volume_pipelines: VolumePipelines::new(wd),
         effects: HashMap::default(),
         batches: Vec::new(),
         builtin: textures::Builtin::new(wd),
@@ -1146,6 +1248,7 @@ fn prepare_effects(
     let frame = state.frame;
     let wd = device.wgpu_device();
     let layout = cache.get_bind_group_layout(&pipeline.layout);
+    let volume_layout = cache.get_bind_group_layout(&pipeline.volume_layout);
 
     for (id, data) in pending.ready.drain(..) {
         use wgpu::util::DeviceExt;
@@ -1291,7 +1394,13 @@ fn prepare_effects(
 
         // Ribbons and lights: per instance.
         for rd in &mut inst.draws {
-            if !matches!(rd.settings, Settings::Ribbon(_) | Settings::Light(_)) {
+            if !matches!(
+                rd.settings,
+                Settings::Ribbon(_)
+                    | Settings::Light(_)
+                    | Settings::Component(_)
+                    | Settings::Volumetric(_)
+            ) {
                 continue;
             }
             let em = &inst.gpu.emitters[rd.emitter];
@@ -1364,6 +1473,100 @@ fn prepare_effects(
                         });
                     }
                 }
+                Settings::Component(c) => {
+                    if rd.component.is_none() {
+                        // Oldest first (by UniqueID), nothing culled.
+                        let draw = ViewDraw::with_config(
+                            wd,
+                            &state.view_pipelines,
+                            em,
+                            ViewDrawConfig {
+                                sort_mode: fx_gpu::view::SortMode::UniqueId,
+                                vertex_count: 0,
+                                cull: CullRadius::Off,
+                            },
+                        );
+                        let gather = ParticleGather::new(
+                            wd,
+                            &state.gather_pipelines,
+                            em,
+                            &draw,
+                            c.max_components,
+                            &component::WORDS,
+                        );
+                        rd.component = Some(ComponentState { draw, gather });
+                    }
+                }
+                Settings::Volumetric(v) => {
+                    if rd.volume.is_none() {
+                        let draw = ViewDraw::with_config(
+                            wd,
+                            &state.view_pipelines,
+                            em,
+                            ViewDrawConfig {
+                                sort_mode: fx_gpu::view::SortMode::None,
+                                vertex_count: 0,
+                                cull: CullRadius::Off,
+                            },
+                        );
+                        let splat = VolumeSplat::new(wd, &state.volume_pipelines, em, &draw, v.resolution);
+                        let uniform = wd.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("fx volume uniform"),
+                            size: VOLUME_UNIFORM_BYTES,
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        let sampler = wd.create_sampler(&wgpu::SamplerDescriptor {
+                            label: Some("fx volume"),
+                            mag_filter: wgpu::FilterMode::Linear,
+                            min_filter: wgpu::FilterMode::Linear,
+                            ..Default::default()
+                        });
+                        let bind_group = BindGroup::from(wd.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("fx volume"),
+                            layout: &volume_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: uniform.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&splat.view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(&sampler),
+                                },
+                            ],
+                        }));
+                        rd.volume = Some(VolumeState {
+                            draw,
+                            splat,
+                            uniform,
+                            bind_group,
+                        });
+                    }
+                    let vs = rd.volume.as_ref().unwrap();
+                    let bounds = volume_bounds(v, &inst.gpu.system, rd.emitter);
+                    vs.splat.set_params(
+                        &queue,
+                        &VolumeParams {
+                            bounds,
+                            density_scale: v.density_scale,
+                            radius_scale: v.radius_scale,
+                        },
+                    );
+                    let mut u: Vec<u32> = Vec::with_capacity(VOLUME_UNIFORM_BYTES as usize / 4);
+                    u.extend(inst.world_from_local.to_cols_array().map(f32::to_bits));
+                    u.extend(inst.world_from_local.inverse().to_cols_array().map(f32::to_bits));
+                    u.extend(bounds[0].map(f32::to_bits));
+                    u.push(v.steps);
+                    u.extend(bounds[1].map(f32::to_bits));
+                    u.push(v.lit as u32);
+                    u.extend([v.emissive.to_bits(), 0, 0, 0]);
+                    queue.write_buffer(&vs.uniform, 0, bytemuck_bytes(&u));
+                }
                 _ => {}
             }
         }
@@ -1428,6 +1631,17 @@ fn prepare_effects(
                         &mesh.vertices,
                     )
                 }
+                Settings::Decal(d) => (
+                    ViewDrawConfig {
+                        sort_mode: view_sort_mode(SortMode::None, deterministic.0),
+                        vertex_count: 36,
+                        // Half the box diagonal, times Particles.Scale.
+                        cull: CullRadius::MeshScale {
+                            scale: 0.5 * Vec3::from_array(d.size).length(),
+                        },
+                    },
+                    &state.dummy,
+                ),
                 _ => continue,
             };
             for view in &views {
@@ -1578,6 +1792,7 @@ impl FxState {
                 let settings = match r {
                     CookedRenderer::Sprite(s) => Settings::Sprite(s.clone()),
                     CookedRenderer::Mesh(s) => Settings::Mesh(s.clone()),
+                    CookedRenderer::Decal(s) => Settings::Decal(s.clone()),
                     _ => return None,
                 };
                 Some(BatchRendererDraw {
@@ -1720,7 +1935,13 @@ fn write_uniform(
                 },
             );
         }
-        Settings::Light(_) => {}
+        Settings::Decal(d) => {
+            for c in 0..3 {
+                put(16 + c, d.size[c].to_bits());
+            }
+            put(32, d.fade_start.to_bits());
+        }
+        Settings::Light(_) | Settings::Component(_) | Settings::Volumetric(_) => {}
     }
 }
 
@@ -1759,7 +1980,7 @@ fn queue_particles(
             }))
         });
         let ribbon_items = state.effects.iter().filter(|(_, i)| !i.paused).map(|(main, inst)| {
-            inst.draws.iter().enumerate().filter(|(_, rd)| matches!(rd.settings, Settings::Ribbon(_))).map(|(i, rd)| {
+            inst.draws.iter().enumerate().filter(|(_, rd)| matches!(rd.settings, Settings::Ribbon(_) | Settings::Volumetric(_))).map(|(i, rd)| {
                 (*main, i, inst.world_from_local.w_axis.truncate(), &rd.settings, &rd.assets, true)
             })
         });
@@ -1804,7 +2025,31 @@ fn queue_particles(
                             material,
                         }
                     }
-                    Settings::Light(_) => continue,
+                    Settings::Decal(d) => {
+                        // Decals project onto the depth prepass: none without one.
+                        if !view_key.contains(MeshPipelineKey::DEPTH_PREPASS) {
+                            continue;
+                        }
+                        ParticleKey {
+                            view_key,
+                            kind: DrawKind::Decal,
+                            blend: d.blend_mode.into(),
+                            lit: d.lit,
+                            soft: false,
+                            textured: true,
+                            material: None,
+                        }
+                    }
+                    Settings::Volumetric(v) => ParticleKey {
+                        view_key,
+                        kind: DrawKind::Volume,
+                        blend: Blend::Premultiplied,
+                        lit: v.lit,
+                        soft: false,
+                        textured: false,
+                        material: None,
+                    },
+                    Settings::Light(_) | Settings::Component(_) => continue,
                 };
                 let id = pipelines.specialize(&cache, &pipeline, key);
                 if cache.get_render_pipeline(id).is_none() {
@@ -2001,6 +2246,35 @@ fn simulate(
         }
     }
     span.end(encoder);
+    let span = diagnostics.time_span(encoder, "fx_volumes");
+    for inst in state.effects.values_mut() {
+        if inst.paused {
+            continue;
+        }
+        for rd in &mut inst.draws {
+            let em = &inst.gpu.emitters[rd.emitter];
+            if let Some(vs) = &mut rd.volume {
+                vs.draw.record(&queue, encoder, &state.view_pipelines, em, &NO_VIEW);
+                vs.splat.record(encoder, &state.volume_pipelines, em);
+            }
+        }
+    }
+    span.end(encoder);
+    let span = diagnostics.time_span(encoder, "fx_components");
+    for inst in state.effects.values_mut() {
+        if inst.paused {
+            continue;
+        }
+        let tag = inst.gpu.frame as u64;
+        for rd in &mut inst.draws {
+            let em = &inst.gpu.emitters[rd.emitter];
+            if let Some(cs) = &mut rd.component {
+                cs.draw.record(&queue, encoder, &state.view_pipelines, em, &NO_VIEW);
+                cs.gather.record(encoder, &state.gather_pipelines, em, tag);
+            }
+        }
+    }
+    span.end(encoder);
     let span = diagnostics.time_span(encoder, "fx_lights");
     for inst in state.effects.values_mut() {
         if inst.paused {
@@ -2029,6 +2303,7 @@ fn read_lights(
     mut state: ResMut<FxState>,
     device: Res<RenderDevice>,
     inbox: Res<LightInbox>,
+    components: Res<component::ComponentInbox>,
     deterministic: Res<FxDeterministic>,
 ) {
     let mut any = false;
@@ -2036,6 +2311,10 @@ fn read_lights(
         for rd in &mut inst.draws {
             if let Some(ls) = &mut rd.light {
                 ls.gather.after_submit();
+                any = true;
+            }
+            if let Some(cs) = &mut rd.component {
+                cs.gather.after_submit();
                 any = true;
             }
         }
@@ -2062,6 +2341,24 @@ fn read_lights(
                     renderer: ri,
                     settings: settings.clone(),
                     lights: ls.gather.lights.clone(),
+                });
+            }
+        }
+    }
+    drop(out);
+    let mut out = components.0.lock().unwrap();
+    for (&effect, inst) in &mut state.effects {
+        for (ri, rd) in inst.draws.iter_mut().enumerate() {
+            let (Some(cs), Settings::Component(settings)) = (&mut rd.component, &rd.settings) else {
+                continue;
+            };
+            if cs.gather.collect() {
+                out.retain(|u| !(u.effect == effect && u.renderer == ri));
+                out.push(component::ComponentUpdate {
+                    effect,
+                    renderer: ri,
+                    settings: settings.clone(),
+                    rows: cs.gather.rows.clone(),
                 });
             }
         }
@@ -2126,6 +2423,13 @@ impl<P: PhaseItem> RenderCommand<P> for DrawParticles {
                 };
                 pass.set_bind_group(1, &rs.view.bind_groups[parity], &[]);
                 pass.draw_indirect(&rs.view.draw_args, 0);
+            }
+            Settings::Volumetric(_) => {
+                let Some(vs) = &rd.volume else {
+                    return RenderCommandResult::Skip;
+                };
+                pass.set_bind_group(1, &vs.bind_group, &[]);
+                pass.draw(0..36, 0..1);
             }
             _ => return RenderCommandResult::Skip,
         }
@@ -2282,6 +2586,9 @@ fn new_instance(
                 CookedRenderer::Ribbon(s) => Settings::Ribbon(s.clone()),
                 CookedRenderer::Mesh(s) => Settings::Mesh(s.clone()),
                 CookedRenderer::Light(s) => Settings::Light(s.clone()),
+                CookedRenderer::Decal(s) => Settings::Decal(s.clone()),
+                CookedRenderer::Component(s) => Settings::Component(s.clone()),
+                CookedRenderer::Volumetric(s) => Settings::Volumetric(s.clone()),
             },
             uniform: wd.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("fx renderer uniform"),
@@ -2292,6 +2599,8 @@ fn new_instance(
             assets: ex.assets.get(i).cloned().unwrap_or_default(),
             ribbon: None,
             light: None,
+            component: None,
+            volume: None,
             scratch: [0; UNIFORM_BYTES],
         })
         .collect();

@@ -3,7 +3,10 @@
 mod common;
 
 use common::*;
-use fx_core::cook::{self, CookedLight, CookedMesh, CookedRenderer, CookedRibbon, CookedSprite};
+use fx_core::cook::{
+    self, CookedComponent, CookedDecal, CookedLight, CookedMesh, CookedRenderer, CookedRibbon,
+    CookedSprite, CookedVolumetric,
+};
 use fx_core::model::{
     BlendMode, FacingMode, MeshBlendMode, MeshFacingMode, RibbonFacingMode, RibbonLinkOrderMode,
     RibbonUvMode, SortMode, SpriteAlignment,
@@ -144,7 +147,7 @@ fn renderers_survive_the_cooked_binary() {
     ));
     let bytes = cook::to_bytes(&sys);
     assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
-    assert_eq!(cook::COOKED_FORMAT_VERSION, 10);
+    assert_eq!(cook::COOKED_FORMAT_VERSION, 11);
 }
 
 #[test]
@@ -514,4 +517,86 @@ fn new_renderers_serialise_to_ron_that_parses_back() {
     let again = fx_core::check_source("roundtrip.fx.ron", &ron_text);
     assert!(again.ok(), "{ron_text}");
     assert_eq!(again.cooked.unwrap(), c.cooked.unwrap());
+}
+
+#[test]
+fn decal_component_volumetric_decode_with_defaults() {
+    let rs = renderers("Decal, Component(()), Volumetric()");
+    assert_eq!(
+        rs,
+        vec![
+            CookedRenderer::Decal(CookedDecal {
+                size: [1.0, 0.5, 1.0],
+                blend_mode: BlendMode::Alpha,
+                lit: false,
+                fade_start: 0.75,
+                texture: None,
+            }),
+            CookedRenderer::Component(CookedComponent {
+                component: "Particle".into(),
+                max_components: 32,
+                transform: true,
+            }),
+            CookedRenderer::Volumetric(CookedVolumetric {
+                resolution: 48,
+                bounds: None,
+                density_scale: 4.0,
+                radius_scale: 0.5,
+                lit: true,
+                emissive: 0.0,
+                steps: 64,
+            }),
+        ]
+    );
+    let rs = renderers(
+        r#"Decal((size: (2.0, 1.0, 0.5), blend_mode: Premultiplied, lit: true, fade_start: 1.0, texture: "t/scorch.png")),
+        Component((component: "Debris", max_components: 1024, transform: false)),
+        Volumetric((resolution: 8, bounds: ((-1.0, 0.0, -1.0), (1.0, 2.0, 1.0)), density_scale: 0.0,
+            radius_scale: 2.0, lit: false, emissive: 3.0, steps: 256))"#,
+    );
+    assert_eq!(
+        rs,
+        vec![
+            CookedRenderer::Decal(CookedDecal {
+                size: [2.0, 1.0, 0.5],
+                blend_mode: BlendMode::Premultiplied,
+                lit: true,
+                fade_start: 1.0,
+                texture: Some("t/scorch.png".into()),
+            }),
+            CookedRenderer::Component(CookedComponent {
+                component: "Debris".into(),
+                max_components: 1024,
+                transform: false,
+            }),
+            CookedRenderer::Volumetric(CookedVolumetric {
+                resolution: 8,
+                bounds: Some([[-1.0, 0.0, -1.0], [1.0, 2.0, 1.0]]),
+                density_scale: 0.0,
+                radius_scale: 2.0,
+                lit: false,
+                emissive: 3.0,
+                steps: 256,
+            }),
+        ]
+    );
+    let sys = compile(&with_renderers("Decal, Component, Volumetric((resolution: 16))"));
+    assert_eq!(cook::from_bytes(&cook::to_bytes(&sys)).unwrap(), sys);
+}
+
+#[test]
+fn decal_component_volumetric_errors() {
+    for (src, msg) in [
+        ("Decal((size: (1.0, 0.0, 1.0)))", "more than 0 metres"),
+        ("Decal((fade_start: 1.5))", "from 0 to 1"),
+        ("Component((max_components: 0))", "max_components"),
+        ("Component((component: 3))", "name \"string\""),
+        ("Volumetric((resolution: 200))", "resolution"),
+        ("Volumetric((steps: 4))", "steps"),
+        ("Volumetric((bounds: ((0.0, 0.0, 0.0), (1.0, 0.0, 1.0))))", "size on every axis"),
+        ("Volumetric((density_scale: -1.0))", "at least 0"),
+    ] {
+        let e = error(src);
+        assert!(e.contains(msg), "{src}: {e}");
+    }
 }

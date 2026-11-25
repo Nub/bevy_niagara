@@ -28,9 +28,11 @@ pub mod codegen;
 mod data;
 mod emitter_cpu;
 pub mod events;
+pub mod gather;
 pub mod lights;
 pub mod ribbon;
 pub mod view;
+pub mod volume;
 
 use std::borrow::Cow;
 use std::sync::Arc;

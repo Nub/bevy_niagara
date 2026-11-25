@@ -200,6 +200,28 @@ pub const SCENES: &[SceneDef] = &[
         target: [0.0, 0.5, 0.0],
         budget_gpu_ms: None,
     },
+    // Decal, component and volumetric renderers (effects/samples).
+    SceneDef {
+        name: "decal_splats",
+        file: "effects/samples/decal_splats.fx.ron",
+        camera: [0.0, 2.6, 3.4],
+        target: [0.0, 0.0, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "component_debris",
+        file: "effects/samples/component_debris.fx.ron",
+        camera: [0.0, 1.5, 5.0],
+        target: [0.0, 1.0, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "volumetric_smoke",
+        file: "effects/samples/volumetric_smoke.fx.ron",
+        camera: [0.0, 1.6, 4.5],
+        target: [0.0, 1.3, 0.0],
+        budget_gpu_ms: Some(1.0),
+    },
     // Custom WGSL modules and simulation stages.
     SceneDef {
         name: "wgsl_swirl",
@@ -241,6 +263,9 @@ pub struct GpuMs {
     /// Ray-tracing acceleration-structure build for particles (not yet
     /// rendered: null until the Solari path lands).
     pub rt_build: Option<f64>,
+    /// `fx_volumes` + `fx_components`: volumetric splats and component gathers.
+    #[serde(default)]
+    pub other: Option<f64>,
     /// Sum of the above.
     pub total: f64,
 }
@@ -274,6 +299,7 @@ const SIM_SPAN: &str = "fx_sim";
 const SORT_SPAN: &str = "fx_cull_sort";
 const DRAW_SPAN: &str = "main_transparent_pass_3d";
 const RT_SPAN: &str = "fx_rt_build";
+const OTHER_SPANS: &[&str] = &["fx_volumes", "fx_components"];
 
 impl SceneResult {
     pub fn new(
@@ -294,7 +320,10 @@ impl SceneResult {
         };
         let (sim, sort, draw, rt) = (find(SIM_SPAN), find(SORT_SPAN), find(DRAW_SPAN), find(RT_SPAN));
         let gpu = |t: &Option<PassTiming>| t.as_ref().and_then(|t| t.gpu_ms);
-        let total = [&sim, &sort, &draw, &rt].iter().filter_map(|t| gpu(t)).sum();
+        let others: Vec<f64> = OTHER_SPANS.iter().filter_map(|s| gpu(&find(s))).collect();
+        let other = (!others.is_empty()).then(|| others.iter().sum::<f64>());
+        let total = [&sim, &sort, &draw, &rt].iter().filter_map(|t| gpu(t)).sum::<f64>()
+            + other.unwrap_or(0.0);
         let cpu: Vec<f64> = [&sim, &sort, &draw]
             .iter()
             .filter_map(|t| t.as_ref().and_then(|t| t.cpu_ms))
@@ -310,6 +339,7 @@ impl SceneResult {
                 sort: gpu(&sort),
                 draw: gpu(&draw),
                 rt_build: gpu(&rt),
+                other,
                 total,
             },
             cpu_ms: CpuMs {
