@@ -671,29 +671,10 @@ fn decode_module(v: &SValue, d: &mut Diags) -> Option<ModuleCall> {
             true
         }
     };
-    let mut inputs = InputMap::default();
-    if let Some(m) = f.take("inputs") {
-        for (k, val) in map(m, "`inputs`", d) {
-            let Some(name) = key_string(k, d) else {
-                continue;
-            };
-            if inputs.0.iter().any(|e| e.name == name) {
-                d.error(
-                    k.span,
-                    format!("input \"{name}\" is set twice in this module"),
-                    Some("keep one of the two entries".into()),
-                );
-                continue;
-            }
-            if let Some(input) = decode_input(val, &name, d) {
-                inputs.0.push(InputEntry {
-                    name,
-                    input,
-                    span: k.span,
-                });
-            }
-        }
-    }
+    let inputs = match f.take("inputs") {
+        Some(m) => decode_input_map(m, "module", d),
+        None => InputMap::default(),
+    };
     f.finish(d);
     // Point module diagnostics at the module name, not the opening bracket.
     let span = match &v.kind {
@@ -709,6 +690,50 @@ fn decode_module(v: &SValue, d: &mut Diags) -> Option<ModuleCall> {
         inputs,
         span,
     })
+}
+
+/// `{ "Name": input, ... }` of a module or dynamic input (`owner` names it in errors).
+fn decode_input_map(m: &SValue, owner: &str, d: &mut Diags) -> InputMap {
+    let mut inputs = InputMap::default();
+    for (k, val) in map(m, "`inputs`", d) {
+        let Some(name) = key_string(k, d) else {
+            continue;
+        };
+        if inputs.0.iter().any(|e| e.name == name) {
+            d.error(
+                k.span,
+                format!("input \"{name}\" is set twice in this {owner}"),
+                Some("keep one of the two entries".into()),
+            );
+            continue;
+        }
+        if let Some(input) = decode_input(val, &name, d) {
+            inputs.0.push(InputEntry {
+                name,
+                input,
+                span: k.span,
+            });
+        }
+    }
+    inputs
+}
+
+/// `Float([...])`, `Vec3([(t, (x, y, z)), ...])`: a typed tag around one
+/// list of keys (tuples), as opposed to `Vec3([x, y, z])`.
+fn is_curve_literal(tag: &str, items: &[SValue]) -> bool {
+    let Some(ty) = ValueType::from_name(tag) else {
+        return false;
+    };
+    match items {
+        [SValue {
+            kind: SKind::List(keys),
+            ..
+        }] => {
+            ty.interpolable()
+                && (keys.is_empty() || matches!(keys[0].kind, SKind::Tuple(None, _)))
+        }
+        _ => false,
+    }
 }
 
 fn decode_params(v: &SValue, d: &mut Diags) -> ParamMap {
@@ -730,7 +755,7 @@ fn decode_params(v: &SValue, d: &mut Diags) -> ParamMap {
     out
 }
 
-const INPUT_FORMS: &str = "an input is a typed literal (`Float(1.0)`, `Int(5)`, `Bool(true)`, `Vec2((x, y))`, `Vec3((x, y, z))`, `Vec4((x, y, z, w))`, `Color((r, g, b, a))`, `Quat((x, y, z, w))`), `Link(Type, \"Namespace.Name\")`, `RandomRange(min, max)` or `CurveOverAge(Type([(time, value), ...]))`";
+const INPUT_FORMS: &str = "an input is a typed literal (`Float(1.0)`, `Int(5)`, `Bool(true)`, `Vec2((x, y))`, `Vec3((x, y, z))`, `Vec4((x, y, z, w))`, `Color((r, g, b, a))`, `Quat((x, y, z, w))`), `Link(Type, \"Namespace.Name\")`, `RandomRange(min, max)`, `CurveOverAge(Type([(time, value), ...]))` or `Dynamic(\"Name\", { inputs })` (see the dynamic input list)";
 
 fn decode_input(v: &SValue, name: &str, d: &mut Diags) -> Option<Input> {
     match &v.kind {
@@ -787,8 +812,45 @@ fn decode_input(v: &SValue, name: &str, d: &mut Diags) -> Option<Input> {
                     };
                     decode_curve(c, d).map(Input::CurveOverAge)
                 }
+                "Dynamic" => {
+                    let help = "e.g. `Dynamic(\"Uniform Ranged Float\", { \"Minimum\": Float(1.0), \"Maximum\": Float(2.0) })`";
+                    let (dyn_name, map_v) = match items.as_slice() {
+                        [SValue { kind: SKind::Str(n), .. }] => (n, None),
+                        [SValue { kind: SKind::Str(n), .. }, m] => (n, Some(m)),
+                        _ => {
+                            d.error(
+                                v.span,
+                                format!("`Dynamic` for \"{name}\" must be `Dynamic(\"Name\", {{ inputs }})`"),
+                                Some(help.into()),
+                            );
+                            return None;
+                        }
+                    };
+                    let inputs = match map_v {
+                        Some(m) => decode_input_map(m, "dynamic input", d),
+                        None => InputMap::default(),
+                    };
+                    Some(Input::Dynamic(DynamicCall {
+                        name: dyn_name.clone(),
+                        inputs,
+                        span: v.span,
+                    }))
+                }
+                t if is_curve_literal(t, items) => decode_curve(v, d).map(Input::Curve),
                 _ => decode_literal(v, d).map(Input::Literal),
             }
+        }
+        SKind::List(items) => {
+            let mut out = Vec::new();
+            for (i, item) in items.iter().enumerate() {
+                let iname = format!("{name}[{i}]");
+                out.push(InputEntry {
+                    input: decode_input(item, &iname, d)?,
+                    name: iname,
+                    span: item.span,
+                });
+            }
+            Some(Input::List(out))
         }
         SKind::Ident(choice) => Some(Input::Choice(choice.clone())),
         SKind::Number(..) => {

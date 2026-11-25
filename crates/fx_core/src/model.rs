@@ -402,6 +402,23 @@ pub enum Input {
     /// `Box`: a bare name, the value of a static-switch input (an enum such
     /// as Shape Location's "Shape Primitive"); cooks to its index.
     Choice(String),
+    /// `Dynamic("Multiply Vec3 by Float", { "A": ..., "B": ... })`: a Niagara
+    /// dynamic input from [`crate::dynamic::DYNAMIC_INPUTS`]; its inputs nest.
+    Dynamic(DynamicCall),
+    /// `[Float(1.0), Float(2.0)]`: the list input of a dynamic input
+    /// (Select ... by Int, Random ... from List).
+    List(Vec<InputEntry>),
+    /// `Float([(0.0, 1.0), (1.0, 0.0)])`: a bare curve, the "Curve" input of
+    /// a "... from Curve" dynamic input.
+    Curve(Curve),
+}
+
+/// A dynamic input with its own inputs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynamicCall {
+    pub name: String,
+    pub inputs: InputMap,
+    pub span: Span,
 }
 
 impl Input {
@@ -412,6 +429,9 @@ impl Input {
             Input::RandomRange(a, _) => a.ty(),
             Input::CurveOverAge(c) => c.ty(),
             Input::Choice(_) => ValueType::Int,
+            Input::Dynamic(c) => crate::dynamic::by_name(&c.name).map_or(ValueType::Float, |(_, d)| d.ty),
+            Input::List(items) => items.first().map_or(ValueType::Float, |e| e.input.ty()),
+            Input::Curve(c) => c.ty(),
         }
     }
 }
@@ -439,6 +459,14 @@ impl Serialize for Input {
                 Some(c) => s.serialize_unit_variant("Input", 4, c),
                 None => s.serialize_str(name),
             },
+            Input::Dynamic(c) => {
+                let mut tv = s.serialize_tuple_variant("Input", 5, "Dynamic", 2)?;
+                tv.serialize_field(&c.name)?;
+                tv.serialize_field(&c.inputs)?;
+                tv.end()
+            }
+            Input::List(items) => s.collect_seq(items.iter().map(|e| &e.input)),
+            Input::Curve(c) => c.serialize(s),
         }
     }
 }

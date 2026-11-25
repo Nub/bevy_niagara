@@ -2,7 +2,7 @@
 //! values (never particles), so the CPU decides each step's spawn request
 //! exactly as `fx_core::sim` does and the GPU clamps it to the free room.
 
-use fx_core::cook::{CookedInput, CookedModule};
+use fx_core::cook::CookedModule;
 use fx_core::modules::{self, ModuleKind};
 use fx_core::params::{Namespace, ParamRef};
 use fx_core::sim::rng::RandKey;
@@ -37,30 +37,12 @@ fn read_param(r: ParamRef, env: &Env) -> Value {
     }
 }
 
-fn eval(input: &CookedInput, slot: usize, env: &Env, key: &RandKey) -> Value {
-    match input {
-        CookedInput::Const(v) => *v,
-        CookedInput::Link(r) => read_param(*r, env),
-        CookedInput::Random(a, b) => {
-            let base = slot as u32 * 8;
-            match (a, b) {
-                (Value::Int(lo), Value::Int(hi)) => {
-                    let (lo, hi) = (*lo.min(hi), *lo.max(hi));
-                    let span = (hi as i64 - lo as i64 + 1) as f32;
-                    let k = (key.unit(base) * span).floor() as i64;
-                    Value::Int((lo as i64 + k).min(hi as i64) as i32)
-                }
-                _ => {
-                    let (lo, hi) = (a.to_array(), b.to_array());
-                    let mut out = [0.0f32; 4];
-                    for c in 0..a.ty().components() {
-                        out[c] = lo[c] + (hi[c] - lo[c]) * key.unit(base + c as u32);
-                    }
-                    Value::from_array(a.ty(), out)
-                }
-            }
-        }
-        CookedInput::Curve(c) => Value::from_array(c.ty, c.sample(0.0)),
+impl fx_core::sim::InputEnv for Env<'_> {
+    fn param(&self, r: ParamRef) -> Value {
+        read_param(r, self)
+    }
+    fn normalized_age(&self) -> f32 {
+        0.0
     }
 }
 
@@ -83,7 +65,7 @@ pub(crate) fn run_stack(
             frame,
             module: stage * 256 + mi as u32,
         };
-        let input = |slot: usize| eval(&m.inputs[slot], slot, env, &k);
+        let input = |slot: usize| fx_core::sim::eval_input(m, slot, env, &k);
         match modules::from_id(m.module) {
             Some(ModuleKind::SpawnRate) => {
                 let rate = input(0).as_f32().max(0.0);

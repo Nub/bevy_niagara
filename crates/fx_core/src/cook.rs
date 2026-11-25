@@ -5,13 +5,14 @@
 //! rkyv so the runtime can read the asset in place (zero-copy).
 
 use crate::diag::{Diags, suggest};
+use crate::dynamic::{self, ArgDefault, ArgKind};
 use crate::model::*;
 use crate::modules::{self, ModuleDef, ModuleKind};
 use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 4;
+pub const COOKED_FORMAT_VERSION: u32 = 5;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -67,7 +68,7 @@ impl CookedEmitter {
                         | ModuleKind::ScaleMeshSize
                         | ModuleKind::ScaleRibbonWidth
                 )
-            ) || m.inputs.iter().any(|i| {
+            ) || m.all_inputs().any(|i| {
                 matches!(i, CookedInput::Link(r)
                     if r.ns == Namespace::Particles && r.index >= attr::FIRST_EXTENDED)
             })
@@ -341,6 +342,25 @@ fn cook_renderer(r: &RendererSource, d: &mut Diags) -> CookedRenderer {
 pub struct CookedModule {
     pub module: u16,
     pub inputs: Vec<CookedInput>,
+    /// The dynamic inputs used by `inputs` (and by each other), referred to by
+    /// [`CookedInput::Dynamic`] index. A parent comes before its children.
+    pub dynamics: Vec<CookedDynamic>,
+}
+
+impl CookedModule {
+    /// Every input, the module's own and its dynamic inputs'.
+    pub fn all_inputs(&self) -> impl Iterator<Item = &CookedInput> {
+        self.inputs.iter().chain(self.dynamics.iter().flat_map(|n| n.args.iter()))
+    }
+}
+
+/// A dynamic input: [`crate::dynamic::DYNAMIC_INPUTS`] index and one input per
+/// [`crate::dynamic::DynamicDef::args`] entry, in order; a list input
+/// (always last) gives one input per item.
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CookedDynamic {
+    pub def: u16,
+    pub args: Vec<CookedInput>,
 }
 
 #[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -349,6 +369,8 @@ pub enum CookedInput {
     Link(ParamRef),
     Random(Value, Value),
     Curve(CookedCurve),
+    /// Index into the module's [`CookedModule::dynamics`].
+    Dynamic(u16),
 }
 
 /// Piecewise-linear curve sampled at `Particles.NormalizedAge`.
@@ -587,71 +609,63 @@ fn lint_emitter(e: &EmitterSource, d: &mut Diags) {
 /// A static-switch input (`"Shape Primitive": Box`), or a bare name given to an
 /// input that is not one. Static switches are fixed when the effect is
 /// written, so they take a name (or its index as `Int`), never a link,
-/// random range or curve.
+/// random range or curve. `owner` is the module or dynamic input's name.
 fn choice_input(
-    def: &ModuleDef,
-    idef: &modules::InputDef,
+    owner: &str,
+    iname: &str,
+    ty: ValueType,
+    choices: &[&str],
     e: &InputEntry,
     d: &mut Diags,
 ) -> Option<CookedInput> {
     let names = || {
-        idef.choices
+        choices
             .iter()
             .map(|c| format!("`{c}`"))
             .collect::<Vec<_>>()
             .join(", ")
     };
     match &e.input {
-        Input::Choice(name) if idef.choices.is_empty() => {
+        Input::Choice(name) if choices.is_empty() => {
             d.error(
                 e.span,
                 format!(
-                    "input \"{}\" of \"{}\" is {}, but the value given is the bare name `{name}`",
-                    idef.name,
-                    def.name,
-                    idef.ty.name()
+                    "input \"{iname}\" of \"{owner}\" is {}, but the value given is the bare name `{name}`",
+                    ty.name()
                 ),
                 Some(format!(
-                    "give a {} value, e.g. `\"{}\": {}`",
-                    idef.ty.name(),
-                    idef.name,
-                    idef.ty.example()
+                    "give a {} value, e.g. `\"{iname}\": {}`",
+                    ty.name(),
+                    ty.example()
                 )),
             );
             None
         }
-        Input::Choice(name) => match idef.choices.iter().position(|c| c == name) {
+        Input::Choice(name) => match choices.iter().position(|c| c == name) {
             Some(i) => Some(CookedInput::Const(Value::Int(i as i32))),
             None => {
-                let help = match suggest(name, idef.choices.iter().copied()) {
+                let help = match suggest(name, choices.iter().copied()) {
                     Some(s) => format!("did you mean `{s}`? Choices: {}", names()),
                     None => format!("choices: {}", names()),
                 };
                 d.error(
                     e.span,
-                    format!(
-                        "\"{}\" of \"{}\" has no choice `{name}`",
-                        idef.name, def.name
-                    ),
+                    format!("\"{iname}\" of \"{owner}\" has no choice `{name}`"),
                     Some(help),
                 );
                 None
             }
         },
-        Input::Literal(Value::Int(i)) if (0..idef.choices.len() as i32).contains(i) => {
+        Input::Literal(Value::Int(i)) if (0..choices.len() as i32).contains(i) => {
             Some(CookedInput::Const(Value::Int(*i)))
         }
         _ => {
             d.error(
                 e.span,
-                format!(
-                    "\"{}\" of \"{}\" is a static switch: give one of its names",
-                    idef.name, def.name
-                ),
+                format!("\"{iname}\" of \"{owner}\" is a static switch: give one of its names"),
                 Some(format!(
-                    "e.g. `\"{}\": {}`; choices: {}",
-                    idef.name,
-                    idef.choices[0],
+                    "e.g. `\"{iname}\": {}`; choices: {}",
+                    choices[0],
                     names()
                 )),
             );
@@ -659,6 +673,35 @@ fn choice_input(
         }
     }
 }
+
+/// Checks a curve's keys and cooks it.
+fn cook_curve(c: &crate::types::Curve, span: Span, d: &mut Diags) -> Option<CookedCurve> {
+    let keys = c.keys();
+    if keys.is_empty() {
+        d.error(
+            span,
+            "curve has no keys",
+            Some("add at least one `(time, value)` key".into()),
+        );
+        return None;
+    }
+    if keys.windows(2).any(|w| w[1].0 < w[0].0) {
+        d.error(
+            span,
+            "curve key times must be in ascending order",
+            Some("sort the keys by their first number (time)".into()),
+        );
+        return None;
+    }
+    Some(CookedCurve {
+        ty: c.ty(),
+        times: keys.iter().map(|k| k.0).collect(),
+        values: keys.iter().map(|k| k.1).collect(),
+    })
+}
+
+/// Most dynamic inputs one module may hold (their random salts must stay apart).
+const MAX_DYNAMICS: usize = 4096;
 
 struct Ctx<'a> {
     user: &'a [CookedParam],
@@ -676,6 +719,7 @@ impl Ctx<'_> {
                 .iter()
                 .map(|i| CookedInput::Const(i.default))
                 .collect();
+            let mut dynamics = Vec::new();
             for entry in &call.inputs.0 {
                 let Some((slot, idef)) = def.input(&entry.name) else {
                     let names = def.inputs.iter().map(|i| i.name);
@@ -695,19 +739,35 @@ impl Ctx<'_> {
                     continue;
                 };
                 if !idef.choices.is_empty() || matches!(entry.input, Input::Choice(_)) {
-                    if let Some(c) = choice_input(def, idef, entry, d) {
+                    if let Some(c) =
+                        choice_input(def.name, idef.name, idef.ty, idef.choices, entry, d)
+                    {
                         inputs[slot] = c;
                     }
                     continue;
                 }
-                if let Some(c) = self.input(stage, def, idef.name, idef.ty, entry, d) {
+                if let Some(c) =
+                    self.input(stage, def.name, idef.name, idef.ty, entry, &mut dynamics, d)
+                {
                     inputs[slot] = c;
                 }
+            }
+            if dynamics.len() > MAX_DYNAMICS {
+                d.error(
+                    call.span,
+                    format!(
+                        "module \"{}\" uses {} dynamic inputs; at most {MAX_DYNAMICS} are allowed",
+                        def.name,
+                        dynamics.len()
+                    ),
+                    Some("split the work over several modules".into()),
+                );
             }
             if call.enabled {
                 out.push(CookedModule {
                     module: def.kind as u16,
                     inputs,
+                    dynamics,
                 });
             }
         }
@@ -761,22 +821,49 @@ impl Ctx<'_> {
         Some(def)
     }
 
+    /// Cooks input `e` (named `iname`, of module or dynamic input `owner`),
+    /// which must give a `want`. Dynamic inputs go into `dyns`.
+    #[allow(clippy::too_many_arguments)]
     fn input(
         &self,
         stage: Stage,
-        def: &ModuleDef,
+        owner: &str,
         iname: &str,
         want: ValueType,
         e: &InputEntry,
+        dyns: &mut Vec<CookedDynamic>,
         d: &mut Diags,
     ) -> Option<CookedInput> {
+        match &e.input {
+            Input::Dynamic(call) => return self.dynamic(stage, owner, iname, want, call, e.span, dyns, d),
+            Input::List(_) => {
+                d.error(
+                    e.span,
+                    format!("input \"{iname}\" of \"{owner}\" takes one {}, not a list", want.name()),
+                    Some("lists go only in the \"Values\" input of `Select ... by Int` and `Random ... from List` dynamic inputs".into()),
+                );
+                return None;
+            }
+            Input::Curve(c) => {
+                d.error(
+                    e.span,
+                    format!("input \"{iname}\" of \"{owner}\" is {}, but the value given is a bare curve", want.name()),
+                    Some(format!(
+                        "wrap it: `CurveOverAge({}(...))` samples it over the particle's age, `Dynamic(\"{} from Curve\", {{ \"Curve\": ..., \"Curve Index\": ... }})` at any Float",
+                        c.ty().name(),
+                        c.ty().name()
+                    )),
+                );
+                return None;
+            }
+            _ => {}
+        }
         let got = e.input.ty();
         if got != want {
             d.error(
                 e.span,
                 format!(
-                    "input \"{iname}\" of \"{}\" is {}, but the value given is {}",
-                    def.name,
+                    "input \"{iname}\" of \"{owner}\" is {}, but the value given is {}",
                     want.name(),
                     got.name()
                 ),
@@ -789,8 +876,8 @@ impl Ctx<'_> {
             return None;
         }
         match &e.input {
-            // Handled by `choice_input` before this is called.
-            Input::Choice(_) => None,
+            // Handled by `choice_input` or above.
+            Input::Choice(_) | Input::Dynamic(_) | Input::List(_) | Input::Curve(_) => None,
             Input::Literal(v) => Some(CookedInput::Const(*v)),
             Input::Link(ty, target) => self
                 .link(stage, *ty, target, e.span, d)
@@ -830,30 +917,182 @@ impl Ctx<'_> {
                     );
                     return None;
                 }
-                let keys = c.keys();
-                if keys.is_empty() {
-                    d.error(
-                        e.span,
-                        "curve has no keys",
-                        Some("add at least one `(time, value)` key".into()),
-                    );
-                    return None;
-                }
-                if keys.windows(2).any(|w| w[1].0 < w[0].0) {
-                    d.error(
-                        e.span,
-                        "curve key times must be in ascending order",
-                        Some("sort the keys by their first number (time)".into()),
-                    );
-                    return None;
-                }
-                Some(CookedInput::Curve(CookedCurve {
-                    ty: c.ty(),
-                    times: keys.iter().map(|k| k.0).collect(),
-                    values: keys.iter().map(|k| k.1).collect(),
-                }))
+                cook_curve(c, e.span, d).map(CookedInput::Curve)
             }
         }
+    }
+
+    /// A `Dynamic("Name", { ... })` given to input `iname` of `owner`.
+    #[allow(clippy::too_many_arguments)]
+    fn dynamic(
+        &self,
+        stage: Stage,
+        owner: &str,
+        iname: &str,
+        want: ValueType,
+        call: &DynamicCall,
+        span: Span,
+        dyns: &mut Vec<CookedDynamic>,
+        d: &mut Diags,
+    ) -> Option<CookedInput> {
+        let giving = |t: ValueType| {
+            dynamic::DYNAMIC_INPUTS
+                .iter()
+                .filter(move |x| x.ty == t)
+                .map(|x| x.name.as_str())
+        };
+        let Some((id, def)) = dynamic::by_name(&call.name) else {
+            let all = dynamic::DYNAMIC_INPUTS.iter().map(|x| x.name.as_str());
+            let list = giving(want).map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+            let help = match suggest(&call.name, all) {
+                Some(s) => format!("did you mean \"{s}\"? Dynamic inputs giving a {}: {list}", want.name()),
+                None => format!("dynamic inputs giving a {}: {list}", want.name()),
+            };
+            d.error(span, format!("unknown dynamic input \"{}\"", call.name), Some(help));
+            return None;
+        };
+        if def.ty != want {
+            // "Multiply Vec3" given to a Float: suggest the same name with the type swapped.
+            let swapped = call.name.replace(def.ty.name(), want.name());
+            let help = if dynamic::by_name(&swapped).is_some_and(|(_, x)| x.ty == want) {
+                format!("use \"{swapped}\"")
+            } else {
+                format!(
+                    "dynamic inputs giving a {}: {}",
+                    want.name(),
+                    giving(want).map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
+                )
+            };
+            d.error(
+                span,
+                format!(
+                    "input \"{iname}\" of \"{owner}\" is {}, but dynamic input \"{}\" gives a {}",
+                    want.name(),
+                    def.name,
+                    def.ty.name()
+                ),
+                Some(help),
+            );
+            return None;
+        }
+        for entry in &call.inputs.0 {
+            if def.arg(&entry.name).is_none() {
+                let help = match suggest(&entry.name, def.args.iter().map(|a| a.name)) {
+                    Some(s) => format!("did you mean \"{s}\"? Inputs of \"{}\": {}", def.name, def.list_args()),
+                    None => format!("inputs of \"{}\": {}", def.name, def.list_args()),
+                };
+                d.error(
+                    entry.span,
+                    format!("dynamic input \"{}\" has no input \"{}\"", def.name, entry.name),
+                    Some(help),
+                );
+            }
+        }
+        // Reserve this node's index before its children take theirs.
+        let index = dyns.len();
+        dyns.push(CookedDynamic {
+            def: id,
+            args: Vec::new(),
+        });
+        let mut args = Vec::new();
+        let mut ok = true;
+        for a in &def.args {
+            let given = call.inputs.0.iter().find(|x| x.name == a.name);
+            let cooked: Option<Vec<CookedInput>> = match (a.kind, given) {
+                (_, None) => match a.default {
+                    ArgDefault::Required => {
+                        d.error(
+                            span,
+                            format!("dynamic input \"{}\" needs its input \"{}\" ({})", def.name, a.name, dynamic::arg_type(a)),
+                            Some(format!("add `\"{}\": ...` to its inputs: {}", a.name, a.doc)),
+                        );
+                        None
+                    }
+                    ArgDefault::Value(v) => Some(vec![CookedInput::Const(v)]),
+                    ArgDefault::Link(path) => {
+                        let t = match a.kind {
+                            ArgKind::Value(t) => t,
+                            _ => ValueType::Float,
+                        };
+                        if path.starts_with("Particles.") && !stage.is_particle() {
+                            d.error(
+                                span,
+                                format!(
+                                    "input \"{}\" of \"{}\" reads {path} by default, which `{}` does not have",
+                                    a.name,
+                                    def.name,
+                                    stage.field()
+                                ),
+                                Some(format!("give \"{}\" a value, e.g. `\"{}\": Link(Float, \"Emitter.Age\")`", a.name, a.name)),
+                            );
+                            None
+                        } else {
+                            self.link(stage, t, path, span, d)
+                                .map(|r| vec![CookedInput::Link(r)])
+                        }
+                    }
+                },
+                (ArgKind::Value(t), Some(g)) => self
+                    .input(stage, &def.name, a.name, t, g, dyns, d)
+                    .map(|c| vec![c]),
+                (ArgKind::Choice(choices), Some(g)) => {
+                    choice_input(&def.name, a.name, ValueType::Int, choices, g, d).map(|c| vec![c])
+                }
+                (ArgKind::Curve(t), Some(g)) => match &g.input {
+                    Input::Curve(c) if c.ty() == t => cook_curve(c, g.span, d).map(|c| vec![CookedInput::Curve(c)]),
+                    Input::Curve(c) => {
+                        d.error(
+                            g.span,
+                            format!("\"Curve\" of \"{}\" is a {} curve, but a {} curve is given", def.name, t.name(), c.ty().name()),
+                            Some(format!("write the keys as `{}([(time, value), ...])`, or use \"{} from Curve\"", t.name(), c.ty().name())),
+                        );
+                        None
+                    }
+                    _ => {
+                        d.error(
+                            g.span,
+                            format!("\"{}\" of \"{}\" takes a {} curve", a.name, def.name, t.name()),
+                            Some(format!("write it as `\"{}\": {}([(0.0, ...), (1.0, ...)])`", a.name, t.name())),
+                        );
+                        None
+                    }
+                },
+                (ArgKind::List(t), Some(g)) => match &g.input {
+                    Input::List(items) if items.is_empty() => {
+                        d.error(
+                            g.span,
+                            format!("\"{}\" of \"{}\" is an empty list", a.name, def.name),
+                            Some(format!("give at least one {}", t.name())),
+                        );
+                        None
+                    }
+                    Input::List(items) => {
+                        let cooked: Vec<_> = items
+                            .iter()
+                            .map(|it| self.input(stage, &def.name, &it.name, t, it, dyns, d))
+                            .collect();
+                        cooked.into_iter().collect()
+                    }
+                    _ => {
+                        d.error(
+                            g.span,
+                            format!("\"{}\" of \"{}\" takes a list of {}", a.name, def.name, t.name()),
+                            Some(format!("write it as `\"{}\": [{}, ...]`", a.name, t.example())),
+                        );
+                        None
+                    }
+                },
+            };
+            match cooked {
+                Some(c) => args.extend(c),
+                None => ok = false,
+            }
+        }
+        if !ok {
+            return None;
+        }
+        dyns[index].args = args;
+        Some(CookedInput::Dynamic(index as u16))
     }
 
     fn link(

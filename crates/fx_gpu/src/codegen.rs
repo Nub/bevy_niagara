@@ -82,6 +82,8 @@ struct Gen<'a> {
     /// Helper functions (curves), emitted before the stacks.
     helpers: String,
     curves: usize,
+    /// Dynamic input helpers emitted so far.
+    dyns: usize,
     /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
     sub_frames: u32,
 }
@@ -182,48 +184,229 @@ impl Gen<'_> {
         name
     }
 
-    /// WGSL expression for input `slot` of a module, using random key `k`.
-    fn input(&mut self, input: &CookedInput, slot: usize) -> String {
+    /// WGSL expression for `input` of module `m`, random draws from `salt`.
+    fn input(&mut self, m: &CookedModule, input: &CookedInput, salt: u32) -> String {
         match input {
             CookedInput::Const(v) => literal(v),
             CookedInput::Link(r) => self.param(*r),
-            CookedInput::Random(a, b) => {
-                let base = slot as u32 * 8;
-                match (a, b) {
-                    (Value::Int(lo), Value::Int(hi)) => {
-                        let (lo, hi) = (*lo.min(hi), *lo.max(hi));
-                        let span = (hi as i64 - lo as i64 + 1) as f32;
-                        format!(
-                            "min(i32({lo}) + i32(floor(rand_unit(k, {base}u) * {})), i32({hi}))",
-                            f(span)
-                        )
-                    }
-                    _ => {
-                        let (lo, hi) = (a.to_array(), b.to_array());
-                        let n = a.ty().components();
-                        let comps: Vec<String> = (0..n)
-                            .map(|c| {
-                                format!(
-                                    "({} + {} * rand_unit(k, {}u))",
-                                    f(lo[c]),
-                                    f(hi[c] - lo[c]),
-                                    base + c as u32
-                                )
-                            })
-                            .collect();
-                        if n == 1 {
-                            comps[0].clone()
-                        } else {
-                            format!("{}({})", wgsl_type(a.ty()), comps.join(", "))
-                        }
+            CookedInput::Random(a, b) => match (a, b) {
+                (Value::Int(lo), Value::Int(hi)) => {
+                    let (lo, hi) = (*lo.min(hi), *lo.max(hi));
+                    let span = (hi as i64 - lo as i64 + 1) as f32;
+                    format!(
+                        "min(i32({lo}) + i32(floor(rand_unit(k, {salt}u) * {})), i32({hi}))",
+                        f(span)
+                    )
+                }
+                _ => {
+                    let (lo, hi) = (a.to_array(), b.to_array());
+                    let n = a.ty().components();
+                    let comps: Vec<String> = (0..n)
+                        .map(|c| {
+                            format!(
+                                "({} + {} * rand_unit(k, {}u))",
+                                f(lo[c]),
+                                f(hi[c] - lo[c]),
+                                salt + c as u32
+                            )
+                        })
+                        .collect();
+                    if n == 1 {
+                        comps[0].clone()
+                    } else {
+                        format!("{}({})", wgsl_type(a.ty()), comps.join(", "))
                     }
                 }
-            }
+            },
             CookedInput::Curve(c) => {
                 let name = self.curve(c);
                 format!("{name}((*p).normalized_age)")
             }
+            CookedInput::Dynamic(i) => self.dynamic(m, *i as usize),
         }
+    }
+
+    /// Emits a helper function for dynamic input `index` of `m` and returns its call.
+    fn dynamic(&mut self, m: &CookedModule, index: usize) -> String {
+        use fx_core::dynamic::{self, Op};
+        let node = &m.dynamics[index];
+        let def = dynamic::from_id(node.def).expect("cooked dynamic input id");
+        let ty = def.ty;
+        let wt = wgsl_type(ty);
+        let salt = dynamic::node_salt(index);
+        let args: Vec<String> = node
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match (def.op, a) {
+                // The curve itself is not a value: sampled below.
+                (Op::FromCurve, CookedInput::Curve(_)) if i == 0 => String::new(),
+                _ => self.input(m, a, dynamic::arg_salt(index, i)),
+            })
+            .collect();
+        let name = format!("dyn_{}", self.dyns);
+        self.dyns += 1;
+        let mut b = String::new();
+        let n = ty.components();
+        let sw = ["x", "y", "z", "w"];
+        match def.op {
+            Op::UniformRanged => {
+                writeln!(b, "    let lo = {};\n    let hi = {};", args[0], args[1]).unwrap();
+                if ty == ValueType::Int {
+                    writeln!(
+                        b,
+                        "    let a = min(lo, hi);\n    let z = max(lo, hi);\n    let span = f32(z - a) + 1.0;"
+                    )
+                    .unwrap();
+                                        writeln!(
+                        b,
+                        "    return min(a + i32(floor(rand_unit(k, {salt}u) * span)), z);"
+                    )
+                    .unwrap();
+                } else {
+                    let comps: Vec<String> = (0..n)
+                        .map(|c| {
+                            let s = if n == 1 { String::new() } else { format!(".{}", sw[c]) };
+                            format!("lo{s} + (hi{s} - lo{s}) * rand_unit(k, {}u)", salt + c as u32)
+                        })
+                        .collect();
+                    if n == 1 {
+                        writeln!(b, "    return {};", comps[0]).unwrap();
+                    } else {
+                        writeln!(b, "    return {wt}({});", comps.join(", ")).unwrap();
+                    }
+                }
+            }
+            Op::RandomByUniform => {
+                writeln!(
+                    b,
+                    "    let a = {};\n    let u = rand_unit(k, {salt}u);\n    return a + ({} - a) * u;",
+                    args[0], args[1]
+                )
+                .unwrap();
+            }
+            Op::FromCurve => {
+                let CookedInput::Curve(c) = &node.args[0] else {
+                    unreachable!("cooked \"from Curve\" without a curve")
+                };
+                let cn = self.curve(c);
+                writeln!(b, "    return {cn}({});", args[1]).unwrap();
+            }
+            Op::Add => writeln!(b, "    return {} + {};", args[0], args[1]).unwrap(),
+            Op::Subtract => writeln!(b, "    return {} - {};", args[0], args[1]).unwrap(),
+            Op::Multiply | Op::MultiplyByFloat => {
+                writeln!(b, "    return {} * {};", args[0], args[1]).unwrap()
+            }
+            Op::Divide => writeln!(
+                b,
+                "    let a = {};\n    let d = {};\n    if (d == 0.0) {{ return 0.0; }}\n    return a / d;",
+                args[0], args[1]
+            )
+            .unwrap(),
+            Op::Lerp => writeln!(
+                b,
+                "    let a = {};\n    return a + ({} - a) * {};",
+                args[0], args[1], args[2]
+            )
+            .unwrap(),
+            Op::Clamp => writeln!(
+                b,
+                "    return min(max({}, {}), {});",
+                args[0], args[1], args[2]
+            )
+            .unwrap(),
+            Op::MakeFromFloats => {
+                writeln!(b, "    return {wt}({});", args[..n].join(", ")).unwrap()
+            }
+            Op::MakeColorFromVec3 => {
+                writeln!(b, "    return vec4<f32>({}, {});", args[0], args[1]).unwrap()
+            }
+            Op::Break => {
+                let c = match &node.args[1] {
+                    CookedInput::Const(Value::Int(i)) => (*i).clamp(0, 3) as usize,
+                    _ => 0,
+                };
+                writeln!(b, "    return ({}).{};", args[0], sw[c]).unwrap();
+            }
+            Op::Normalize => writeln!(
+                b,
+                "    let v = {};\n    let rl = 1.0 / length(v);\n    if (rl > 0.0 && rl <= 3.4028235e38) {{ return v * rl; }}\n    return vec3<f32>(0.0);",
+                args[0]
+            )
+            .unwrap(),
+            Op::Length => writeln!(b, "    return length({});", args[0]).unwrap(),
+            Op::Distance => writeln!(b, "    return length({} - {});", args[0], args[1]).unwrap(),
+            Op::Sine | Op::Cosine => {
+                let func = if def.op == Op::Sine { "sin" } else { "cos" };
+                writeln!(
+                    b,
+                    "    let x = {} * ({} * {} + {});\n    return {} + {} * {func}(x);",
+                    f(std::f32::consts::TAU),
+                    args[1],
+                    args[4],
+                    args[2],
+                    args[3],
+                    args[0]
+                )
+                .unwrap();
+            }
+            Op::SelectByBool => writeln!(
+                b,
+                "    if ({}) {{ return {}; }}\n    return {};",
+                args[0], args[1], args[2]
+            )
+            .unwrap(),
+            Op::SelectByInt => {
+                let count = args.len() - 1;
+                writeln!(b, "    let i = clamp({}, 0, {});", args[0], count as i32 - 1).unwrap();
+                for (j, a) in args[1..].iter().enumerate().take(count - 1) {
+                    writeln!(b, "    if (i == {j}) {{ return {a}; }}").unwrap();
+                }
+                writeln!(b, "    return {};", args[count]).unwrap();
+            }
+            Op::RandomFromList => {
+                let count = args.len();
+                writeln!(
+                    b,
+                    "    let i = min(u32(rand_unit(k, {salt}u) * {}), {}u);",
+                    f(count as f32),
+                    count - 1
+                )
+                .unwrap();
+                for (j, a) in args.iter().enumerate().take(count - 1) {
+                    writeln!(b, "    if (i == {j}u) {{ return {a}; }}").unwrap();
+                }
+                writeln!(b, "    return {};", args[count - 1]).unwrap();
+            }
+            Op::RandomUnitVector => writeln!(
+                b,
+                "    let z = 1.0 - 2.0 * rand_unit(k, {salt}u);\n    let r = sqrt(max(1.0 - z * z, 0.0));\n    let phi = {} * rand_unit(k, {}u);\n    return vec3<f32>(r * cos(phi), r * sin(phi), z);",
+                f(std::f32::consts::TAU),
+                salt + 1
+            )
+            .unwrap(),
+            Op::NormalizedAge => writeln!(
+                b,
+                "    let age = {};\n    let d = {};\n    if (d > 0.0) {{ return clamp(age / d, 0.0, 1.0); }}\n    return 1.0;",
+                args[0], args[1]
+            )
+            .unwrap(),
+            Op::Compare => {
+                let op = match &node.args[2] {
+                    CookedInput::Const(Value::Int(i)) => *i,
+                    _ => 0,
+                };
+                let o = ["<", "<=", ">", ">=", "==", "!="][op.clamp(0, 5) as usize];
+                writeln!(b, "    return {} {o} {};", args[0], args[1]).unwrap();
+            }
+        }
+        writeln!(
+            self.helpers,
+            "// {}\nfn {name}(p: ptr<function, Particle>, k: Key) -> {wt} {{\n{b}}}",
+            def.name
+        )
+        .unwrap();
+        format!("{name}(p, k)")
     }
 
     fn module(&mut self, m: &CookedModule, stage: u32, index: usize, frame_expr: &str) {
@@ -240,7 +423,7 @@ impl Gen<'_> {
             stage * 256 + index as u32
         )
         .unwrap();
-        let inp = |slot: usize, g: &mut Self| g.input(&m.inputs[slot], slot);
+        let inp = |slot: usize, g: &mut Self| g.input(m, &m.inputs[slot], slot as u32 * 8);
         match kind {
             ModuleKind::InitializeParticle => {
                 let fields = [
@@ -594,6 +777,7 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
         out: String::new(),
         helpers: String::new(),
         curves: 0,
+        dyns: 0,
         sub_frames: emitter.sub_image_frames(),
     };
     g.out
@@ -611,7 +795,7 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
     EmitterShader {
         extended,
         source: format!(
-            "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..48 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n// ---- curves ----\n{}\n// ---- module stacks ----\n{}",
+            "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..48 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n// ---- curves and dynamic inputs ----\n{}\n// ---- module stacks ----\n{}",
             emitter.name, sys.name, g.helpers, g.out
         ),
     }

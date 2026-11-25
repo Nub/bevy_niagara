@@ -345,33 +345,179 @@ impl Simulation {
     }
 }
 
-fn eval(input: &CookedInput, slot: usize, env: &Env, p: Option<&Particle>, key: &RandKey) -> Value {
+/// What inputs read: parameters, and the age curves are sampled at.
+pub trait InputEnv {
+    fn param(&self, r: ParamRef) -> Value;
+    /// `Particles.NormalizedAge` where there is a particle, else 0.
+    fn normalized_age(&self) -> f32;
+}
+
+struct ParticleEnv<'a, 'b> {
+    env: &'a Env<'b>,
+    p: Option<&'a Particle>,
+}
+
+impl InputEnv for ParticleEnv<'_, '_> {
+    fn param(&self, r: ParamRef) -> Value {
+        read_param(r, self.env, self.p)
+    }
+    fn normalized_age(&self) -> f32 {
+        self.p.map_or(0.0, |p| p.normalized_age)
+    }
+}
+
+/// Evaluates input `slot` of module `m`.
+pub fn eval_input(m: &CookedModule, slot: usize, env: &dyn InputEnv, key: &RandKey) -> Value {
+    eval_at(m, &m.inputs[slot], slot as u32 * 8, env, key)
+}
+
+/// Uniform per component of `ty` between `lo` and `hi` (Int: whole numbers,
+/// inclusive), with draws `salt + component`.
+fn random_range(lo: Value, hi: Value, salt: u32, key: &RandKey) -> Value {
+    match (lo, hi) {
+        (Value::Int(lo), Value::Int(hi)) => {
+            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            let span = (hi as i64 - lo as i64 + 1) as f32;
+            let k = (key.unit(salt) * span).floor() as i64;
+            Value::Int((lo as i64 + k).min(hi as i64) as i32)
+        }
+        _ => {
+            let (a, b) = (lo.to_array(), hi.to_array());
+            let mut out = [0.0f32; 4];
+            for c in 0..lo.ty().components() {
+                out[c] = a[c] + (b[c] - a[c]) * key.unit(salt + c as u32);
+            }
+            Value::from_array(lo.ty(), out)
+        }
+    }
+}
+
+/// Evaluates `input` (of module `m`); its random draws use `salt` (+ component).
+pub fn eval_at(m: &CookedModule, input: &CookedInput, salt: u32, env: &dyn InputEnv, key: &RandKey) -> Value {
     match input {
         CookedInput::Const(v) => *v,
-        CookedInput::Link(r) => read_param(*r, env, p),
-        CookedInput::Random(a, b) => {
-            let base = slot as u32 * 8;
-            match (a, b) {
-                (Value::Int(lo), Value::Int(hi)) => {
-                    let (lo, hi) = (*lo.min(hi), *lo.max(hi));
-                    let span = (hi as i64 - lo as i64 + 1) as f32;
-                    let k = (key.unit(base) * span).floor() as i64;
-                    Value::Int((lo as i64 + k).min(hi as i64) as i32)
-                }
-                _ => {
-                    let (lo, hi) = (a.to_array(), b.to_array());
-                    let n = a.ty().components();
-                    let mut out = [0.0f32; 4];
-                    for c in 0..n {
-                        out[c] = lo[c] + (hi[c] - lo[c]) * key.unit(base + c as u32);
-                    }
-                    Value::from_array(a.ty(), out)
-                }
+        CookedInput::Link(r) => env.param(*r),
+        CookedInput::Random(a, b) => random_range(*a, *b, salt, key),
+        CookedInput::Curve(c) => Value::from_array(c.ty, c.sample(env.normalized_age())),
+        CookedInput::Dynamic(i) => eval_dynamic(m, *i as usize, env, key),
+    }
+}
+
+fn eval_dynamic(m: &CookedModule, index: usize, env: &dyn InputEnv, key: &RandKey) -> Value {
+    use crate::dynamic::{self, Op};
+    let node = &m.dynamics[index];
+    let Some(def) = dynamic::from_id(node.def) else {
+        return Value::Float(0.0);
+    };
+    let salt = dynamic::node_salt(index);
+    let arg = |i: usize| eval_at(m, &node.args[i], dynamic::arg_salt(index, i), env, key);
+    let ty = def.ty;
+    let n = ty.components();
+    let zip = |a: Value, b: Value, f: &dyn Fn(f32, f32) -> f32| {
+        let (a, b) = (a.to_array(), b.to_array());
+        Value::from_array(ty, std::array::from_fn(|c| if c < n { f(a[c], b[c]) } else { 0.0 }))
+    };
+    match def.op {
+        Op::UniformRanged => random_range(arg(0), arg(1), salt, key),
+        Op::RandomByUniform => {
+            let u = key.unit(salt);
+            zip(arg(0), arg(1), &|a, b| a + (b - a) * u)
+        }
+        Op::FromCurve => {
+            let t = arg(1).as_f32();
+            match &node.args[0] {
+                CookedInput::Curve(c) => Value::from_array(c.ty, c.sample(t)),
+                _ => Value::from_array(ty, [0.0; 4]),
             }
         }
-        CookedInput::Curve(c) => {
-            let t = p.map_or(0.0, |p| p.normalized_age);
-            Value::from_array(c.ty, c.sample(t))
+        Op::Add => zip(arg(0), arg(1), &|a, b| a + b),
+        Op::Subtract => zip(arg(0), arg(1), &|a, b| a - b),
+        Op::Multiply => zip(arg(0), arg(1), &|a, b| a * b),
+        Op::MultiplyByFloat => {
+            let s = arg(1).as_f32();
+            zip(arg(0), arg(0), &|a, _| a * s)
+        }
+        Op::Divide => {
+            let (a, b) = (arg(0).as_f32(), arg(1).as_f32());
+            Value::Float(if b == 0.0 { 0.0 } else { a / b })
+        }
+        Op::Lerp => {
+            let t = arg(2).as_f32();
+            zip(arg(0), arg(1), &|a, b| a + (b - a) * t)
+        }
+        Op::Clamp => Value::Float(arg(0).as_f32().max(arg(1).as_f32()).min(arg(2).as_f32())),
+        Op::MakeFromFloats => {
+            let mut a = [0.0f32; 4];
+            for (c, x) in a.iter_mut().enumerate().take(n) {
+                *x = arg(c).as_f32();
+            }
+            Value::from_array(ty, a)
+        }
+        Op::MakeColorFromVec3 => {
+            let v = arg(0).as_vec3();
+            Value::Color([v.x, v.y, v.z, arg(1).as_f32()])
+        }
+        Op::Break => {
+            let c = arg(1).as_i32().clamp(0, 3) as usize;
+            Value::Float(arg(0).to_array()[c])
+        }
+        Op::Normalize => {
+            let v = arg(0).as_vec3();
+            let rl = 1.0 / v.length();
+            let out = if rl > 0.0 && rl <= f32::MAX { v * rl } else { Vec3::ZERO };
+            Value::Vec3(out.to_array())
+        }
+        Op::Length => Value::Float(arg(0).as_vec3().length()),
+        Op::Distance => Value::Float((arg(0).as_vec3() - arg(1).as_vec3()).length()),
+        Op::Sine | Op::Cosine => {
+            let (amp, freq, phase, offset, t) = (
+                arg(0).as_f32(),
+                arg(1).as_f32(),
+                arg(2).as_f32(),
+                arg(3).as_f32(),
+                arg(4).as_f32(),
+            );
+            let x = std::f32::consts::TAU * (freq * t + phase);
+            Value::Float(offset + amp * if def.op == Op::Sine { x.sin() } else { x.cos() })
+        }
+        Op::SelectByBool => {
+            if arg(0).as_bool() {
+                arg(1)
+            } else {
+                arg(2)
+            }
+        }
+        Op::SelectByInt => {
+            let count = node.args.len() - 1;
+            let i = arg(0).as_i32().clamp(0, count as i32 - 1) as usize;
+            arg(1 + i)
+        }
+        Op::RandomFromList => {
+            let count = node.args.len();
+            let i = ((key.unit(salt) * count as f32) as usize).min(count - 1);
+            arg(i)
+        }
+        Op::RandomUnitVector => {
+            let (u1, u2) = (key.unit(salt), key.unit(salt + 1));
+            let z = 1.0 - 2.0 * u1;
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let phi = std::f32::consts::TAU * u2;
+            Value::Vec3([r * phi.cos(), r * phi.sin(), z])
+        }
+        Op::NormalizedAge => {
+            let (age, dur) = (arg(0).as_f32(), arg(1).as_f32());
+            Value::Float(if dur > 0.0 { (age / dur).clamp(0.0, 1.0) } else { 1.0 })
+        }
+        Op::Compare => {
+            let (a, b) = (arg(0).as_f32(), arg(1).as_f32());
+            Value::Bool(match arg(2).as_i32() {
+                0 => a < b,
+                1 => a <= b,
+                2 => a > b,
+                3 => a >= b,
+                4 => a == b,
+                _ => a != b,
+            })
         }
     }
 }
@@ -404,7 +550,8 @@ fn run_emitter_stack(
 ) {
     for (mi, m) in stack.iter().enumerate() {
         let k = key(mi);
-        let input = |slot: usize| eval(&m.inputs[slot], slot, env, None, &k);
+        let pe = ParticleEnv { env, p: None };
+        let input = |slot: usize| eval_input(m, slot, &pe, &k);
         match modules::from_id(m.module) {
             Some(ModuleKind::SpawnRate) => {
                 let rate = input(0).as_f32().max(0.0);
@@ -612,7 +759,7 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
     let Some(kind) = modules::from_id(m.module) else {
         return;
     };
-    let input = |slot: usize, p: &Particle| eval(&m.inputs[slot], slot, env, Some(p), &key);
+    let input = |slot: usize, p: &Particle| eval_input(m, slot, &ParticleEnv { env, p: Some(p) }, &key);
     match kind {
         ModuleKind::InitializeParticle => {
             p.lifetime = input(0, p).as_f32();
