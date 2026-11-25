@@ -2246,7 +2246,14 @@ fn simulate(
         }
     }
     span.end(encoder);
-    let span = diagnostics.time_span(encoder, "fx_volumes");
+    // Volumes and components: spans only when some effect has them.
+    let (any_volume, any_component) = state.effects.values().fold((false, false), |(v, c), i| {
+        (
+            v || i.draws.iter().any(|d| d.volume.is_some()),
+            c || i.draws.iter().any(|d| d.component.is_some()),
+        )
+    });
+    let span = any_volume.then(|| diagnostics.time_span(encoder, "fx_volumes"));
     for inst in state.effects.values_mut() {
         if inst.paused {
             continue;
@@ -2259,8 +2266,10 @@ fn simulate(
             }
         }
     }
-    span.end(encoder);
-    let span = diagnostics.time_span(encoder, "fx_components");
+    if let Some(span) = span {
+        span.end(encoder);
+    }
+    let span = any_component.then(|| diagnostics.time_span(encoder, "fx_components"));
     for inst in state.effects.values_mut() {
         if inst.paused {
             continue;
@@ -2274,7 +2283,9 @@ fn simulate(
             }
         }
     }
-    span.end(encoder);
+    if let Some(span) = span {
+        span.end(encoder);
+    }
     let span = diagnostics.time_span(encoder, "fx_lights");
     for inst in state.effects.values_mut() {
         if inst.paused {
