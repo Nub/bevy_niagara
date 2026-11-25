@@ -8,7 +8,7 @@
 //! ```text
 //! fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.25,0.5,1,2] [--duration S]
 //!           [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey]
-//!           [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene]
+//!           [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--no-mp4] [--test-scene]
 //!           [--orbit RADIUS,SECONDS]
 //! ```
 //!
@@ -56,6 +56,11 @@ struct Options {
     test_scene: bool,
     /// Moves the effect on a horizontal circle: (radius m, seconds per turn).
     orbit: Option<(f32, f32)>,
+    /// Vertical field of view in degrees (Bevy's default 45; Unreal's editor
+    /// viewport is 90 horizontal).
+    fov: f32,
+    /// Height of the ground plane (metres).
+    ground: f32,
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -86,6 +91,8 @@ fn parse_args() -> Result<Options, String> {
         mp4: true,
         test_scene: false,
         orbit: None,
+        fov: 45.0,
+        ground: 0.0,
     };
     let mut effect = None;
     while let Some(a) = args.next() {
@@ -109,6 +116,8 @@ fn parse_args() -> Result<Options, String> {
             "--seed" => o.seed = val()?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--backdrop" => o.backdrop = val()?,
             "--camera" => o.camera = parse_vec3(&val()?)?,
+            "--ground" => o.ground = val()?.parse::<f32>().map_err(|e| format!("--ground: {e}"))?,
+            "--fov" => o.fov = val()?.parse::<f32>().map_err(|e| format!("--fov: {e}"))?,
             "--target" => o.target = parse_vec3(&val()?)?,
             "--no-mp4" => o.mp4 = false,
             "--test-scene" => o.test_scene = true,
@@ -139,7 +148,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS]";
+const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS]";
 
 fn main() -> ExitCode {
     let o = match parse_args() {
@@ -272,6 +281,7 @@ fn setup(
         Hdr,
         DepthPrepass,
         Msaa::Off,
+        Projection::Perspective(PerspectiveProjection { fov: o.fov.to_radians(), ..default() }),
         Transform::from_translation(o.camera).looking_at(o.target, Vec3::Y),
     ));
     commands.spawn((
@@ -281,6 +291,7 @@ fn setup(
             perceptual_roughness: 0.9,
             ..default()
         })),
+        Transform::from_xyz(0.0, o.ground, 0.0),
     ));
     commands.spawn((
         DirectionalLight {

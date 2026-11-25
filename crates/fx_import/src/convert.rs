@@ -257,7 +257,7 @@ impl MatOut {
         }
         s.push(')');
         for m in &self.missing_textures {
-            let _ = write!(s, "; **missing texture** {m}: a noise texture stands in");
+            let _ = write!(s, "; **missing texture** {m}: black stands in (the terms it feeds read 0)");
         }
         for n in &self.notes {
             let _ = write!(s, "; {n}");
@@ -1162,9 +1162,13 @@ impl<'a> Cx<'a> {
         let res = (|| {
             let l = a.store.load(path).ok_or_else(|| "its package is not in the package folders".to_string())?;
             let data = crate::mesh::read_static_mesh(&l.pkg, &l.bytes)?;
+            // Our mesh renderer draws one primitive: material slots merge.
+            let mut one = data.clone();
+            one.triangle_slots.iter_mut().for_each(|s| *s = 0);
+            one.slot_names.truncate(1);
             let name = crate::material::split_object_path(path).1;
             let glb = format!("{}/{name}.glb", a.dir);
-            a.files.insert(glb.clone(), crate::mesh::write_glb(&data));
+            a.files.insert(glb.clone(), crate::mesh::write_glb(&one));
             // The mesh's own first material.
             let i = l.export(&name);
             let material = i.and_then(|i| match crate::property::find(l.props(i), "StaticMaterials") {
@@ -1230,7 +1234,7 @@ impl<'a> Cx<'a> {
                     Ok(i) => imgs.push(i),
                     Err(why) => {
                         missing.push(format!("{} ({why})", mt::split_object_path(t).1));
-                        imgs.push(mt::stand_in_noise());
+                        imgs.push(mt::stand_in_missing());
                     }
                 }
             }

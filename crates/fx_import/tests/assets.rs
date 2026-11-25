@@ -69,9 +69,9 @@ fn png_round_trips_and_atlases_pack_side_by_side() {
     }
     assert!(at.rects[0][0] + at.rects[0][2] < at.rects[1][0], "tiles do not overlap");
 
-    let n = material::stand_in_noise();
+    let n = material::stand_in_missing();
     assert_eq!(n.rgba.len(), (n.width * n.height * 4) as usize);
-    assert!(n.rgba.chunks(4).map(|p| p[0]).collect::<std::collections::HashSet<_>>().len() > 50);
+    assert!(n.rgba.chunks(4).all(|p| p == [0, 0, 0, 255]));
 }
 
 #[test]
