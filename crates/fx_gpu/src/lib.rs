@@ -262,7 +262,7 @@ struct BatchEmitter {
     grids: wgpu::Buffer,
     /// Per step of the ring: one `Frame` per staged instance.
     frames: wgpu::Buffer,
-    /// Indirect dispatch arguments (cleared before every step).
+    /// Indirect dispatch arguments (zeroed by the kernels after use).
     args: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     args_bind_group: wgpu::BindGroup,
@@ -1071,7 +1071,6 @@ impl GpuBatch {
             queue.write_buffer(&be.frames, offset, &be.scratch[..n as usize * FRAME_BYTES]);
         }
         for be in &self.emitters {
-            encoder.clear_buffer(&be.args, 0, None);
             let p = &be.pipelines;
             let bg = &be.bind_group;
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1134,12 +1133,6 @@ impl GpuBatch {
             }
             pass.set_pipeline(&p.spawn);
             pass.dispatch_workgroups_indirect(&be.args, 16);
-            drop(pass);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx sim finish"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, bg, &[offset as u32, 0]);
             pass.set_bind_group(1, &be.args_bind_group, &[]);
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(inst_groups, 1, 1);

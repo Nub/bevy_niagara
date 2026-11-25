@@ -10,7 +10,7 @@
 
 use std::borrow::Cow;
 
-use crate::{GpuEmitter, WORKGROUP};
+use crate::GpuEmitter;
 
 const VIEW_WGSL: &str = include_str!("wgsl/view.wgsl");
 const BLOCK: u32 = 512;
@@ -192,7 +192,7 @@ impl ViewPipelines {
             sort_local: pipe("sort_local", &plain),
             sort_merge_local: pipe("sort_merge_local", &with_pass),
             sort_merge_global: pipe("sort_merge_global", &with_pass),
-            batch_prep: pipe("batch_prep", &plain),
+            batch_prep: pipe("batch_prep", &with_args),
             cull_batch: pipe("cull_batch", &plain),
             sort_prep: pipe("sort_prep", &with_args),
             pad: pipe("pad", &plain),
@@ -393,7 +393,7 @@ impl ViewDraw {
         emitter: &GpuEmitter,
         view: &ViewParams,
     ) {
-        write_params(&mut self.scratch, view, self.capacity, self.sort_mode, self.max_pow2, &self.config, 0);
+        write_params(&mut self.scratch, view, self.capacity, self.sort_mode, self.max_pow2, &self.config, 0, 0);
         queue.write_buffer(&self.params, 0, &self.scratch);
 
         let bg = &self.bind_groups[emitter.current];
@@ -454,6 +454,7 @@ fn write_params(
     max_pow2: u32,
     c: &ViewDrawConfig,
     region_words: u32,
+    entry_count: u32,
 ) {
     let mut put = |w: usize, v: u32| s[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
     for (i, pl) in view.planes.iter().enumerate() {
@@ -489,6 +490,7 @@ fn write_params(
     put(37, word);
     put(38, scale.to_bits());
     put(39, region_words);
+    put(40, entry_count);
 }
 
 /// One emitter of every instance of a [`GpuBatch`](crate::GpuBatch) seen
@@ -548,7 +550,8 @@ impl BatchDraw {
         let indices = buf("fx batch view indices", len * 4, U::STORAGE | U::COPY_SRC);
         let draw_args = buf("fx batch view draw args", DRAW_ARGS_BYTES, U::STORAGE | U::INDIRECT | U::COPY_SRC);
         let passes = if sorted { sort_passes(max_pow2) } else { Vec::new() };
-        let args = buf("fx batch view dispatch args", 16 * (1 + passes.len() as u64), U::STORAGE | U::INDIRECT);
+        // Slot 0: pad; 1..: sort passes; last: the cull.
+        let args = buf("fx batch view dispatch args", 16 * (2 + passes.len() as u64), U::STORAGE | U::INDIRECT);
         let mut pass_data = vec![0u8; (PASS_STRIDE as usize) * passes.len().max(1)];
         for (i, p) in passes.iter().enumerate() {
             let (k, j) = match *p {
@@ -643,6 +646,7 @@ impl BatchDraw {
             self.max_pow2,
             &self.config,
             self.region_words,
+            copies.len() as u32,
         );
         queue.write_buffer(&self.params, 0, &self.scratch);
         self.entry_bytes.clear();
@@ -653,17 +657,24 @@ impl BatchDraw {
             queue.write_buffer(&self.entries, 0, &self.entry_bytes);
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("fx batch cull and sort"),
+            label: Some("fx batch cull prep"),
             timestamp_writes: None,
         });
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.args_bind_group, &[]);
         pass.set_pipeline(&pipelines.batch_prep);
         pass.dispatch_workgroups(1, 1, 1);
+        drop(pass);
         if copies.is_empty() {
             return;
         }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fx batch cull"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_pipeline(&pipelines.cull_batch);
-        pass.dispatch_workgroups(self.capacity.div_ceil(WORKGROUP), copies.len() as u32, 1);
+        pass.dispatch_workgroups_indirect(&self.args, 16 * (1 + self.passes.len() as u64));
         if self.passes.is_empty() {
             return;
         }

@@ -20,7 +20,7 @@ struct ViewParams {
     radius_word: u32,
     radius_scale: f32,
     region_words: u32,           // batched: words between particle copies
-    _pad0: u32,
+    entry_count: u32,            // batched: instances drawn
     _pad1: u32,
     _pad2: u32,
 }
@@ -265,13 +265,31 @@ fn sort_merge_global(@builtin(global_invocation_id) gid: vec3<u32>) {
 // the renderer reads it at r * region_words + w * capacity + i. Planes,
 // camera and keys are in world space.
 
-@compute @workgroup_size(1)
-fn batch_prep() {
-    atomicStore(&draw[0], vp.vertex_count);
-    atomicStore(&draw[1], 0u);
-    atomicStore(&draw[2], 0u);
-    atomicStore(&draw[3], 0u);
-    atomicStore(&draw[4], 0u);
+var<workgroup> most: atomic<u32>;
+
+// One workgroup: resets the draw and sizes the cull by the most particles an
+// instance has (args slot CULL_SLOT).
+@compute @workgroup_size(64)
+fn batch_prep(@builtin(local_invocation_index) t: u32) {
+    if (t == 0u) {
+        atomicStore(&most, 0u);
+        atomicStore(&draw[0], vp.vertex_count);
+        atomicStore(&draw[1], 0u);
+        atomicStore(&draw[2], 0u);
+        atomicStore(&draw[3], 0u);
+        atomicStore(&draw[4], 0u);
+    }
+    workgroupBarrier();
+    for (var j = t; j < vp.entry_count; j += 64u) {
+        atomicMax(&most, state[(entries[j] / 2u) * 64u]);
+    }
+    workgroupBarrier();
+    if (t == 0u) {
+        let at = arrayLength(&args) - 4u;
+        args[at] = (atomicLoad(&most) + WG - 1u) / WG;
+        args[at + 1u] = vp.entry_count;
+        args[at + 2u] = 1u;
+    }
 }
 
 @compute @workgroup_size(WG)

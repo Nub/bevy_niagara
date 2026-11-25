@@ -284,8 +284,9 @@ fn groups(n: u32) -> u32 {
 // Every instance of a batch steps in the same dispatches: the single-thread
 // kernels run one thread per instance and raise the indirect arguments to
 // the largest instance's (x) times the instances (y); the per-particle
-// kernels take their instance from workgroup_id.y. The host clears `args`
-// before `begin`.
+// kernels take their instance from workgroup_id.y. `args` starts zeroed;
+// `finish` zeroes the words its step read (0..11) and `begin` the stage
+// args (12..14), so each is zero again before the next raise.
 
 const WG_INST: u32 = 64u;
 
@@ -303,6 +304,9 @@ fn begin(@builtin(global_invocation_id) gid: vec3<u32>) {
     load_frame(gid.x);
     let n = atomicLoad(&state[S_COUNT]);
     raise_args(0u, groups(n));
+    for (var w = 12u; w < 15u; w++) {
+        atomicStore(&args[w], 0u);
+    }
     atomicStore(&state[S_NEW], 0u);
     reset_events();
 }
@@ -373,6 +377,9 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     load_frame(gid.x);
     let n = atomicLoad(&state[S_NEW]);
     atomicStore(&state[S_COUNT], n);
+    for (var w = 0u; w < 12u; w++) {
+        atomicStore(&args[w], 0u);
+    }
     // Particle simulation stages run over the living particles.
     raise_args(12u, groups(n));
 }
