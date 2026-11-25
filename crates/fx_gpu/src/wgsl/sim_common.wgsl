@@ -46,7 +46,7 @@ fn to_unit(h: u32) -> f32 {
 struct Key {
     particle: u32,
     frame: u32,
-    module: u32,
+    module_id: u32,
 }
 
 fn rand_unit(k: Key, slot: u32) -> f32 {
@@ -55,7 +55,7 @@ fn rand_unit(k: Key, slot: u32) -> f32 {
     h = pcg(h ^ fr.emitter);
     h = pcg(h ^ k.particle);
     h = pcg(h ^ k.frame);
-    h = pcg(h ^ k.module);
+    h = pcg(h ^ k.module_id);
     h = pcg(h ^ slot);
     return to_unit(h);
 }

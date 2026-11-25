@@ -19,7 +19,6 @@
 
 pub mod codegen;
 mod emitter_cpu;
-pub mod sort;
 pub mod view;
 
 use std::borrow::Cow;
@@ -53,7 +52,7 @@ const STATE_NEXT_ID: usize = 2;
 pub fn headless_device() -> Result<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo), String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::from_env_or_default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -520,7 +519,7 @@ pub fn read_buffer(
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll failed");
-    let v = slice.get_mapped_range().to_vec();
+    let v = slice.get_mapped_range().expect("mapped range").to_vec();
     staging.unmap();
     v
 }

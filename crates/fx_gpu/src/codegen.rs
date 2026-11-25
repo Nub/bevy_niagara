@@ -207,7 +207,7 @@ impl Gen<'_> {
             stage * 256 + index as u32
         )
         .unwrap();
-        let mut inp = |slot: usize, g: &mut Self| g.input(&m.inputs[slot], slot);
+        let inp = |slot: usize, g: &mut Self| g.input(&m.inputs[slot], slot);
         match kind {
             ModuleKind::InitializeParticle => {
                 let fields = [
