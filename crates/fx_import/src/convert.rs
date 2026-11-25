@@ -39,6 +39,9 @@ pub fn swap(v: [f32; 3]) -> [f32; 3] {
 }
 
 const CM: f32 = 0.01;
+/// Size in metres the placeholder mesh stands in for (Unreal meshes are
+/// not in the package; 20 cm is a typical prop or debris size).
+pub const PLACEHOLDER_MESH_SIZE: f32 = 0.2;
 
 /// How one Niagara module fared.
 #[derive(Clone, Debug, PartialEq)]
@@ -911,9 +914,10 @@ impl<'a> Cx<'a> {
                     _ => {}
                 }
                 self.report.placeholders.push(format!(
-                    "{}: mesh `{}` -> built-in \"{shape}\" (guessed from the name)",
+                    "{}: mesh `{}` -> built-in \"{shape}\" (guessed from the name), {} m per unit of mesh scale",
                     e.name,
-                    mesh_path.as_deref().unwrap_or("none")
+                    mesh_path.as_deref().unwrap_or("none"),
+                    PLACEHOLDER_MESH_SIZE
                 ));
                 format!("Mesh(({}))", fields.join(", "))
             }
@@ -1744,10 +1748,11 @@ fn init_particle<'m>(cx: &mut Cx, e: &NEmitter, m: &'m NModule, o: &mut Out, use
 
     // Mesh scale -> Initialize Mesh, when there is a mesh renderer.
     if e.renderers.iter().any(|r| r.class.contains("Mesh")) {
+        // The meshes are not in the package: the placeholder shape (1 m) is
+        // drawn at PLACEHOLDER_MESH_SIZE per unit of Niagara's mesh scale.
         let mut im = FxModule::new("Initialize Mesh");
-        if let Some(v) = size(cx, o, mode(m, "Mesh Scale Mode"), "Mesh ", Ty::Vec3, Unit::None) {
-            im.set("Mesh Scale", v);
-        }
+        let v = size(cx, o, mode(m, "Mesh Scale Mode"), "Mesh ", Ty::Vec3, Unit::None).unwrap_or(Fx::Lit(Lit::Vec3([1.0; 3])));
+        im.set("Mesh Scale", scale_fx(v, PLACEHOLDER_MESH_SIZE));
         o.mods.push(im);
     }
     // Ribbon width -> Initialize Ribbon, when there is a ribbon renderer.
@@ -1918,6 +1923,14 @@ fn scale_fx(v: Fx, s: f32) -> Fx {
                 k.iter_mut().for_each(|x| *x *= s);
             }
             Fx::CurveOverAge(c)
+        }
+        Fx::Dyn(n, args) if (n.starts_with("Random Range") || n.starts_with("Uniform Ranged")) && args.iter().all(|(_, a)| matches!(a, Fx::Lit(_))) => {
+            Fx::Dyn(n, args.into_iter().map(|(k, a)| (k, scale_fx(a, s))).collect())
+        }
+        Fx::Dyn(n, mut args) if n.starts_with("Multiply") && n.ends_with("by Float") && matches!(args.first(), Some((_, Fx::Lit(_)))) => {
+            let a = args[0].1.clone();
+            args[0].1 = scale_fx(a, s);
+            Fx::Dyn(n, args)
         }
         other => match fx_ty(&other) {
             Some(Ty::Float) => Fx::Dyn("Multiply Float".into(), vec![("A".into(), other), ("B".into(), Fx::Lit(Lit::Float(s)))]),
