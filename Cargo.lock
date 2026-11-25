@@ -2498,6 +2498,9 @@ dependencies = [
 [[package]]
 name = "fx_import"
 version = "0.1.0"
+dependencies = [
+ "fx_core",
+]
 
 [[package]]
 name = "fx_mcp"
@@ -2505,6 +2508,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "fx_core",
+ "fx_import",
  "serde_json",
 ]
 
