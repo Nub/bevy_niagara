@@ -382,7 +382,7 @@ fn setup(
         if !o.bench {
             commands.spawn((
                 ParticleEffect::new(extra.clone(), 2),
-                Transform::from_xyz(2.2, 0.0, 6.0).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                Transform::from_xyz(0.8, 0.0, 5.2).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
             ));
         }
         return;
