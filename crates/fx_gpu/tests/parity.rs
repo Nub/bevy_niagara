@@ -365,3 +365,152 @@ fn several_steps_per_submit_match_one_per_submit() {
         );
     }
 }
+
+/// Every event path: a receiver before its source (Stop collisions, capped
+/// events), bounces on a tilted plane writing collision, death and location
+/// events, an EveryParticle handler, and an emitter spawning from its own
+/// deaths (Kill collisions) until its capacity caps the spawns.
+const EVENTS: &str = r#"(
+    name: "Events",
+    emitters: [
+        (
+            name: "Before",
+            max_particles: 300,
+            event_handlers: [(source: "Drops", event: Collision, spawn_number: 3, max_events_per_frame: 7, modules: [
+                (module: "Receive Collision Event", inputs: { "Inherit Velocity Scale": Float(0.5) }),
+                (module: "Add Velocity", inputs: { "Velocity": Dynamic("Multiply Vec3 by Float", { "A": Link(Vec3, "Event.Normal"), "B": RandomRange(Float(0.5), Float(1.5)) }) }),
+            ])],
+            particle_spawn: [(module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.3), Float(0.8)) })],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: { "Collision Response": Stop, "Plane Origin": Vec3((0.0, -0.2, 0.0)) }),
+            ],
+        ),
+        (
+            name: "Drops",
+            max_particles: 500,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(150.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(1.0), Float(2.0)), "Position": RandomRange(Vec3((-0.5, 1.0, -0.5)), Vec3((0.5, 1.5, 0.5))) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-1.0, -1.0, -1.0)), Vec3((1.0, 2.0, 1.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Plane Normal": Vec3((0.3, 1.0, 0.1)),
+                    "Particle Radius": Float(0.02),
+                    "Restitution": RandomRange(Float(0.3), Float(0.8)),
+                    "Friction": Float(0.3),
+                    "Rest Speed": Float(0.3),
+                }),
+                (module: "Generate Collision Event"),
+                (module: "Generate Death Event"),
+                (module: "Generate Location Event", inputs: { "Event Probability": Float(0.1) }),
+            ],
+        ),
+        (
+            name: "Listeners",
+            max_particles: 50,
+            emitter_update: [(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(50) })],
+            particle_spawn: [(module: "Initialize Particle", inputs: { "Lifetime": Float(100.0) })],
+            particle_update: [(module: "Particle State"), (module: "Solve Forces and Velocity")],
+            event_handlers: [
+                (source: "Drops", event: Location, execution_mode: EveryParticle, max_events_per_frame: 5, modules: [
+                    (module: "Add Velocity", inputs: { "Velocity": Dynamic("Multiply Vec3 by Float", { "A": Link(Vec3, "Event.Velocity"), "B": RandomRange(Float(-0.01), Float(0.01)) }) }),
+                ]),
+                (source: "Drops", event: Death, spawn_number: 0),
+            ],
+        ),
+        (
+            name: "Self",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(20) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.2), Float(0.5)) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-1.0, -3.0, -1.0)), Vec3((1.0, 0.0, 1.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: { "Collision Response": Kill, "Plane Origin": Vec3((0.0, -0.5, 0.0)) }),
+                (module: "Generate Death Event"),
+            ],
+            event_handlers: [(source: "Self", event: Death, spawn_number: 2, modules: [
+                (module: "Receive Death Event", inputs: { "Position Offset": Vec3((0.0, 1.0, 0.0)) }),
+            ])],
+        ),
+    ],
+)"#;
+
+fn compare_events(name: &str, step: u32, cpu: &[fx_core::events::Event], gpu: &[fx_core::events::Event]) {
+    let ids = |v: &[fx_core::events::Event]| v.iter().map(|e| e.particle_id).collect::<Vec<_>>();
+    assert_eq!(ids(cpu), ids(gpu), "{name} step {step}: event ids or order differ");
+    for (a, b) in cpu.iter().zip(gpu) {
+        let fa = a.position.iter().chain(&a.velocity).chain(&a.normal).chain([&a.age]);
+        let fb = b.position.iter().chain(&b.velocity).chain(&b.normal).chain([&b.age]);
+        for (x, y) in fa.zip(fb) {
+            assert!(
+                (x - y).abs() <= 1e-3 * (1.0 + x.abs()),
+                "{name} step {step}: event of particle {}: CPU {a:?} GPU {b:?}",
+                a.particle_id
+            );
+        }
+    }
+}
+
+#[test]
+fn gpu_events_and_collisions_match_cpu() {
+    use fx_core::events::EventKind;
+    let (device, queue, _) = fx_gpu::headless_device().expect("parity test needs a GPU");
+    let c = fx_core::check_source("events.fx.ron", EVENTS);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    let events = c.cooked.unwrap_or_else(|| panic!("events: {errs:?}"));
+    let systems = [
+        ("bouncing_sparks.fx.ron", sample("bouncing_sparks.fx.ron")),
+        ("fireworks.fx.ron", sample("fireworks.fx.ron")),
+        ("events", events),
+    ];
+    for (name, sys) in systems {
+        let mut cpu = Simulation::new(sys.clone(), 9);
+        let mut gpu = GpuEffect::new(&device, &sys, 9).unwrap();
+        let mut diff = Diff::default();
+        let mut delivered = [0usize; 3];
+        for step in 1..=180u32 {
+            cpu.step(DT);
+            let mut enc = device.create_command_encoder(&Default::default());
+            gpu.step(&queue, &mut enc, DT);
+            queue.submit([enc.finish()]);
+            gpu.submitted();
+            // Events every step.
+            {
+                for ei in 0..sys.emitters.len() {
+                    for kind in EventKind::ALL {
+                        let c = cpu.events(ei, kind);
+                        compare_events(name, step, c, &gpu.read_events(&device, &queue, ei, kind));
+                        delivered[kind.index()] += c.len();
+                    }
+                }
+            }
+            if step % 15 == 0 {
+                let g = gpu.read_particles(&device, &queue);
+                for (ei, ps) in g.iter().enumerate() {
+                    compare(name, step, cpu.particles(ei), ps, &mut diff);
+                }
+                let counts = gpu.read_counts(&device, &queue);
+                for (ei, (_, next_id)) in counts.iter().enumerate() {
+                    assert_eq!(*next_id, cpu.emitters[ei].next_id, "{name}: next UniqueID of emitter {ei}");
+                }
+            }
+        }
+        eprintln!(
+            "{name}: events compared (death {}, collision {}, location {}); largest particle difference {:.2e} ({})",
+            delivered[0], delivered[1], delivered[2], diff.max_abs, diff.worst
+        );
+        assert!(delivered.iter().sum::<usize>() > 0, "{name}: no events");
+    }
+}

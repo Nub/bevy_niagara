@@ -7,12 +7,18 @@
 
 use std::fmt::Write;
 
-use fx_core::cook::{CookedCurve, CookedEmitter, CookedInput, CookedModule, CookedSystem};
+use fx_core::cook::{CookedCurve, CookedInput, CookedModule, CookedSystem};
+use fx_core::events::EventKind;
+use fx_core::sim::{COLLISION_PLANE, COLLISION_RAY_TRACED};
+
+use crate::events::EventLayout;
 use fx_core::modules::{self, ModuleKind};
 use fx_core::params::{Namespace, ParamRef, attr};
 use fx_core::types::{Value, ValueType};
 
 const COMMON: &str = include_str!("wgsl/sim_common.wgsl");
+const SCENE: &str = include_str!("wgsl/scene.wgsl");
+const SCENE_RT: &str = include_str!("wgsl/scene_rt.wgsl");
 
 /// Stage numbers used in random keys (as in `fx_core::sim`).
 const STAGE_PARTICLE_SPAWN: u32 = 4;
@@ -68,14 +74,6 @@ fn swizzle(ty: ValueType) -> &'static str {
     }
 }
 
-/// Generated shader text plus what the host needs to know about it.
-pub struct EmitterShader {
-    pub source: String,
-    /// Whether the emitter stores the extended attributes (words 28..48,
-    /// see [`CookedEmitter::uses_extended_attributes`]).
-    pub extended: bool,
-}
-
 struct Gen<'a> {
     sys: &'a CookedSystem,
     out: String,
@@ -86,6 +84,12 @@ struct Gen<'a> {
     dyns: usize,
     /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
     sub_frames: u32,
+    /// RayTraced collisions may use the ray-tracing scene (group 3).
+    ray_tracing: bool,
+    /// A module reads the scene bindings (group 2).
+    uses_scene: bool,
+    /// A module traces rays (group 3).
+    uses_tlas: bool,
 }
 
 impl Gen<'_> {
@@ -108,6 +112,14 @@ impl Gen<'_> {
             .into(),
             Namespace::System => "fr.time".into(),
             Namespace::Emitter => "fr.emitter_age".into(),
+            Namespace::Event => match r.index {
+                0 => "cur_event.position",
+                1 => "cur_event.velocity",
+                2 => "cur_event.normal",
+                3 => "cur_event.age",
+                _ => "bitcast<i32>(cur_event.id)",
+            }
+            .into(),
             Namespace::Particles => match r.index {
                 attr::POSITION => "(*p).position",
                 attr::VELOCITY => "(*p).velocity",
@@ -763,6 +775,71 @@ impl Gen<'_> {
                 }
                 writeln!(o, "    if (inside != {invert}) {{ (*p).alive = false; }}").unwrap();
             }
+            ModuleKind::Collision => {
+                let int = |slot: usize| match m.inputs[slot] {
+                    CookedInput::Const(Value::Int(i)) => i,
+                    _ => 0,
+                };
+                let (ty, response) = (int(0), int(1));
+                let (normal, origin, radius, rest, fric, rs, thick) = (
+                    inp(2, self),
+                    inp(3, self),
+                    inp(4, self),
+                    inp(5, self),
+                    inp(6, self),
+                    inp(7, self),
+                    inp(8, self),
+                );
+                writeln!(o, "    let radius = {radius};").unwrap();
+                if ty == COLLISION_PLANE {
+                    writeln!(o, "    let n = unit_or_y({normal});").unwrap();
+                    writeln!(o, "    let o = {origin};").unwrap();
+                    writeln!(o, "    let hit = true;").unwrap();
+                } else {
+                    self.uses_scene = true;
+                    if ty == COLLISION_RAY_TRACED && self.ray_tracing {
+                        self.uses_tlas = true;
+                        writeln!(
+                            o,
+                            "    let c = scene_ray_contact((*p).position - (*p).velocity * fr.dt, (*p).position, radius, {thick});"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(o, "    let c = scene_depth_contact((*p).position, radius, {thick});").unwrap();
+                    }
+                    writeln!(o, "    let hit = c.hit;\n    let n = c.n;\n    let o = c.o;").unwrap();
+                }
+                writeln!(
+                    o,
+                    "    if (hit && collide_plane(p, n, o, radius, i32({response}), {rest}, {fric}, {rs})) {{ ev_collided = true; ev_normal = n; }}"
+                )
+                .unwrap();
+            }
+            ModuleKind::GenerateDeathEvent => {
+                writeln!(o, "    ev_death = true;").unwrap();
+            }
+            ModuleKind::GenerateCollisionEvent => {
+                writeln!(
+                    o,
+                    "    if (ev_collided) {{ ev_has[1] = true; ev_pending[1] = make_event(*p, ev_normal); }}"
+                )
+                .unwrap();
+            }
+            ModuleKind::GenerateLocationEvent => {
+                let prob = inp(0, self);
+                writeln!(
+                    o,
+                    "    if (rand_unit(k, 128u) < {prob}) {{ ev_has[2] = true; ev_pending[2] = make_event(*p, vec3<f32>(0.0)); }}"
+                )
+                .unwrap();
+            }
+            ModuleKind::ReceiveDeathEvent
+            | ModuleKind::ReceiveCollisionEvent
+            | ModuleKind::ReceiveLocationEvent => {
+                let (off, s) = (inp(0, self), inp(1, self));
+                writeln!(o, "    (*p).position = cur_event.position + {off};").unwrap();
+                writeln!(o, "    (*p).velocity += cur_event.velocity * {s};").unwrap();
+            }
             ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
         }
         writeln!(o, "    }}").unwrap();
@@ -770,8 +847,37 @@ impl Gen<'_> {
     }
 }
 
-/// WGSL for one emitter: the shared library plus its two stacks.
-pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterShader {
+/// What the host offers the generated code.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShaderOptions {
+    /// RayTraced collisions trace rays in the ray-tracing scene (bind group 3,
+    /// Solari's scene layout) instead of falling back to the depth buffer.
+    pub ray_tracing: bool,
+}
+
+/// Generated shader text plus what the host needs to know about it.
+pub struct EmitterShader {
+    pub source: String,
+    /// Whether the emitter stores the extended attributes (words 28..48,
+    /// see [`fx_core::cook::CookedEmitter::uses_extended_attributes`]).
+    pub extended: bool,
+    /// Reads the scene bindings (bind group 2: depth buffer and view).
+    pub uses_scene: bool,
+    /// Traces rays (bind group 3: the ray-tracing scene).
+    pub uses_tlas: bool,
+    /// Writes events: has an `event_rank` pass.
+    pub writes_events: bool,
+}
+
+/// WGSL for emitter `ei`: the shared library, its stacks and handlers, and
+/// the event glue for `events`.
+pub fn emitter_shader(
+    sys: &CookedSystem,
+    ei: usize,
+    events: &EventLayout,
+    options: ShaderOptions,
+) -> EmitterShader {
+    let emitter = &sys.emitters[ei];
     let mut g = Gen {
         sys,
         out: String::new(),
@@ -779,6 +885,9 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
         curves: 0,
         dyns: 0,
         sub_frames: emitter.sub_image_frames(),
+        ray_tracing: options.ray_tracing,
+        uses_scene: false,
+        uses_tlas: false,
     };
     g.out
         .push_str("fn spawn_particle(p: ptr<function, Particle>) {\n");
@@ -791,12 +900,137 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
         g.module(m, STAGE_PARTICLE_UPDATE, i, "fr.frame + 1u");
     }
     g.out.push_str("}\n");
-    let extended = emitter.uses_extended_attributes();
-    EmitterShader {
-        extended,
-        source: format!(
-            "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..48 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n// ---- curves and dynamic inputs ----\n{}\n// ---- module stacks ----\n{}",
-            emitter.name, sys.name, g.helpers, g.out
-        ),
+    for (h, handler) in emitter.event_handlers.iter().enumerate() {
+        writeln!(g.out, "\nfn handler_{h}(p: ptr<function, Particle>) {{").unwrap();
+        for (i, m) in handler.modules.iter().enumerate() {
+            g.module(m, fx_core::events::handler_stage(h), i, "ev_frame");
+        }
+        g.out.push_str("}\n");
     }
+    let glue = event_glue(sys, ei, events);
+    let extended = emitter.uses_extended_attributes();
+    let mut source = String::new();
+    if g.uses_tlas {
+        source.push_str("enable wgpu_ray_query;\n\n");
+    }
+    write!(
+        source,
+        "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..48 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{COMMON}\n",
+        emitter.name, sys.name
+    )
+    .unwrap();
+    if g.uses_scene {
+        source.push_str(SCENE);
+    }
+    if g.uses_tlas {
+        source.push_str(SCENE_RT);
+    }
+    write!(
+        source,
+        "\n// ---- curves and dynamic inputs ----\n{}\n// ---- module stacks ----\n{}\n// ---- events ----\n{glue}",
+        g.helpers, g.out
+    )
+    .unwrap();
+    EmitterShader {
+        source,
+        extended,
+        uses_scene: g.uses_scene,
+        uses_tlas: g.uses_tlas,
+        writes_events: EventKind::ALL
+            .iter()
+            .any(|k| events.region(ei, *k).is_some()),
+    }
+}
+
+/// The event functions the kernels call (see `sim_common.wgsl`), for emitter `ei`.
+fn event_glue(sys: &CookedSystem, ei: usize, events: &EventLayout) -> String {
+    let emitter = &sys.emitters[ei];
+    let own: Vec<_> = EventKind::ALL
+        .iter()
+        .filter_map(|k| events.region(ei, *k))
+        .collect();
+    let mut s = String::new();
+    s.push_str("fn reset_events() {\n");
+    for r in &own {
+        writeln!(s, "    atomicStore(&event_counts[{}u], 0u);", r.index).unwrap();
+    }
+    s.push_str("}\n\nfn max_event_count() -> u32 {\n    var m = 0u;\n");
+    for r in &own {
+        writeln!(s, "    m = max(m, event_count({}u, {}u));", r.index, r.capacity).unwrap();
+    }
+    s.push_str("    return m;\n}\n\nfn rank_events(i: u32, lid: u32) {\n");
+    for r in &own {
+        writeln!(
+            s,
+            "    rank_region(i, lid, {}u, {}u, {}u, {}u);",
+            r.index, r.data, r.sorted, r.capacity
+        )
+        .unwrap();
+    }
+    s.push_str("}\n\nfn write_events(p: Particle) {\n");
+    for r in &own {
+        let args = format!("{}u, {}u, {}u", r.index, r.data, r.capacity);
+        match r.kind {
+            EventKind::Death => writeln!(
+                s,
+                "    if (ev_death && !p.alive) {{ write_event({args}, make_event(p, vec3<f32>(0.0))); }}"
+            ),
+            k => writeln!(
+                s,
+                "    if (ev_has[{0}]) {{ write_event({args}, ev_pending[{0}]); }}",
+                k.index()
+            ),
+        }
+        .unwrap();
+    }
+    // Where handler h reads: (region, data, sorted, capacity, max events).
+    let src = |h: &fx_core::cook::CookedEventHandler| {
+        let r = events
+            .region(h.source as usize, h.kind())
+            .expect("cook checks that handler sources write the event");
+        (r.index, r.data, r.sorted, r.capacity, h.max_events)
+    };
+    s.push_str("}\n\nfn every_handlers(p: ptr<function, Particle>) {\n");
+    for (h, handler) in emitter.event_handlers.iter().enumerate() {
+        if !handler.every_particle {
+            continue;
+        }
+        let (r, data, sorted, cap, max) = src(handler);
+        writeln!(
+            s,
+            "    {{\n        let n = events_taken({r}u, {cap}u, {max}u);\n        for (var e = 0u; e < n; e++) {{\n            cur_event = load_event({data}u, {sorted}u, e);\n            ev_frame = fr.frame + 1u + e * {}u;\n            handler_{h}(p);\n        }}\n    }}",
+            0x0100_0193u32
+        )
+        .unwrap();
+    }
+    s.push_str("}\n\nfn spawn_counts(room0: u32) -> u32 {\n    var room = room0;\n    let n0 = min(fr.spawn_request, room);\n    room -= n0;\n    var total = n0;\n    atomicStore(&state[S_REGULAR_N], n0);\n");
+    let mut spawning = Vec::new();
+    for (h, handler) in emitter.event_handlers.iter().enumerate() {
+        if handler.every_particle {
+            continue;
+        }
+        let (r, _, _, cap, max) = src(handler);
+        writeln!(
+            s,
+            "    {{\n        let c = handler_spawns(events_taken({r}u, {cap}u, {max}u), {}u, room);\n        room -= c;\n        total += c;\n        atomicStore(&state[S_HANDLER_END + {h}u], total);\n    }}",
+            handler.spawn_number
+        )
+        .unwrap();
+        spawning.push(h);
+    }
+    s.push_str("    return total;\n}\n\nfn spawn_event(k: u32, p: ptr<function, Particle>) {\n    ev_frame = 0u;\n");
+    let mut start = "atomicLoad(&state[S_REGULAR_N])".to_string();
+    for h in spawning {
+        let handler = &emitter.event_handlers[h];
+        let (_, data, sorted, _, _) = src(handler);
+        writeln!(
+            s,
+            "    {{\n        let start = {start};\n        let end = atomicLoad(&state[S_HANDLER_END + {h}u]);\n        if (k >= start && k < end) {{\n            cur_event = load_event({data}u, {sorted}u, (k - start) / {}u);\n            handler_{h}(p);\n            return;\n        }}\n    }}",
+            handler.spawn_number.max(1)
+        )
+        .unwrap();
+        start = format!("atomicLoad(&state[S_HANDLER_END + {h}u])");
+    }
+    s.push_str("}\n");
+    s
 }

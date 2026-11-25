@@ -19,6 +19,7 @@
 
 pub mod codegen;
 mod emitter_cpu;
+pub mod events;
 pub mod lights;
 pub mod ribbon;
 pub mod view;
@@ -26,7 +27,11 @@ pub mod view;
 use std::borrow::Cow;
 
 use fx_core::cook::CookedSystem;
+use fx_core::events::{EVENT_WORDS, Event, EventKind};
 use fx_core::sim::Particle;
+
+use crate::codegen::ShaderOptions;
+use crate::events::EventLayout;
 use fx_core::types::Value;
 use wgpu::util::DeviceExt;
 
@@ -49,6 +54,8 @@ pub const MAX_USER_PARAMS: usize = 16;
 pub const MAX_STEPS_PER_SUBMIT: u32 = 8;
 /// Workgroup size of the per-particle kernels.
 pub const WORKGROUP: u32 = 256;
+/// Event handlers an emitter may have on the GPU.
+pub const MAX_EVENT_HANDLERS: usize = 16;
 
 const FRAME_BYTES: usize = 48 + MAX_USER_PARAMS * 16;
 const FRAME_SLOT: u64 = 512;
@@ -97,9 +104,16 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
 struct Pipelines {
     begin: wgpu::ComputePipeline,
     update: wgpu::ComputePipeline,
+    /// The update tracing rays in the ray-tracing scene (RayTraced collisions,
+    /// when [`GpuOptions::ray_tracing_layout`] is given); used while a scene is bound.
+    update_rt: Option<wgpu::ComputePipeline>,
     spawn_prep: wgpu::ComputePipeline,
     spawn: wgpu::ComputePipeline,
     finish: wgpu::ComputePipeline,
+    /// Sorts the emitter's events (emitters that write events).
+    event_rank: Option<wgpu::ComputePipeline>,
+    /// The update reads the scene bindings (group 2).
+    uses_scene: bool,
 }
 
 /// One emitter's GPU state.
@@ -137,9 +151,136 @@ pub struct GpuEffect {
     /// `Engine.Owner.Velocity` (m/s), read by Inherit Velocity; set by the host.
     pub owner_velocity: [f32; 3],
     pub emitters: Vec<GpuEmitter>,
+    /// Where each emitter's events live.
+    pub event_layout: EventLayout,
+    /// One atomic counter per event region.
+    pub event_counts: wgpu::Buffer,
+    /// The events and their sorted order.
+    pub event_data: wgpu::Buffer,
+    scene: SceneBindings,
+    /// The ray-tracing scene bind group (group 3), when RayTraced collisions trace rays.
+    ray_tracing_scene: Option<wgpu::BindGroup>,
+    empty_bind_group: wgpu::BindGroup,
     slot: u32,
     scratch: [u8; FRAME_BYTES],
 }
+
+/// What the host offers the simulation beyond the effect itself.
+#[derive(Default)]
+pub struct GpuOptions<'a> {
+    /// The layout of the ray-tracing scene bind group (Solari's scene
+    /// bindings, binding 5 the TLAS). Given, emitters with RayTraced
+    /// collisions trace rays whenever [`GpuEffect::set_ray_tracing_scene`]
+    /// has provided a bind group; otherwise they use the depth buffer.
+    pub ray_tracing_layout: Option<&'a wgpu::BindGroupLayout>,
+}
+
+/// The camera whose depth buffer SceneDepth collisions read (the frame the
+/// depth was rendered in), in world space.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneView {
+    pub clip_from_world: bevy_math::Mat4,
+    pub camera_position: bevy_math::Vec3,
+    /// Depth texture size in pixels.
+    pub size: [u32; 2],
+}
+
+/// Bytes of the `Scene` uniform in `scene.wgsl`.
+const SCENE_BYTES: usize = 4 * 64 + 16 + 16;
+
+/// Group 2: the scene uniform and the depth texture (an `R32Float` copy of
+/// the view's depth, reverse-Z).
+struct SceneBindings {
+    layout: wgpu::BindGroupLayout,
+    uniform: wgpu::Buffer,
+    dummy_depth: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    world_from_local: bevy_math::Mat4,
+}
+
+impl SceneBindings {
+    fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx_gpu scene"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(SCENE_BYTES as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fx scene"),
+            contents: &[0u8; SCENE_BYTES],
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let dummy_depth = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("fx no depth"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SCENE_DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let bind_group = Self::bind(device, &layout, &uniform, &dummy_depth);
+        SceneBindings {
+            layout,
+            uniform,
+            dummy_depth,
+            bind_group,
+            world_from_local: bevy_math::Mat4::IDENTITY,
+        }
+    }
+
+    fn bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform: &wgpu::Buffer,
+        depth: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx scene"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+            ],
+        })
+    }
+}
+
+/// Format of the depth texture SceneDepth collisions read.
+pub const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -157,10 +298,31 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
 impl GpuEffect {
     /// Compiles every emitter and allocates its pooled buffers.
     pub fn new(device: &wgpu::Device, system: &CookedSystem, seed: u32) -> Result<Self, String> {
+        Self::with_options(device, system, seed, GpuOptions::default())
+    }
+
+    /// [`GpuEffect::new`] with what the host offers (a ray-tracing scene).
+    pub fn with_options(
+        device: &wgpu::Device,
+        system: &CookedSystem,
+        seed: u32,
+        options: GpuOptions,
+    ) -> Result<Self, String> {
         if system.user_params.len() > MAX_USER_PARAMS {
             return Err(format!(
                 "{} user parameters; the GPU path supports {MAX_USER_PARAMS}",
                 system.user_params.len()
+            ));
+        }
+        if let Some(e) = system
+            .emitters
+            .iter()
+            .find(|e| e.event_handlers.len() > MAX_EVENT_HANDLERS)
+        {
+            return Err(format!(
+                "emitter \"{}\" has {} event handlers; the GPU path supports {MAX_EVENT_HANDLERS}",
+                e.name,
+                e.event_handlers.len()
             ));
         }
         let limit = device.limits().max_storage_buffer_binding_size;
@@ -180,12 +342,24 @@ impl GpuEffect {
                 storage_entry(1, true),
                 storage_entry(2, false),
                 storage_entry(3, false),
+                storage_entry(4, false),
+                storage_entry(5, false),
             ],
         });
         let args_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx_gpu sim args"),
             entries: &[storage_entry(0, false)],
         });
+        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx_gpu empty"),
+            entries: &[],
+        });
+        let empty_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx_gpu empty"),
+            layout: &empty_layout,
+            entries: &[],
+        });
+        let scene = SceneBindings::new(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fx_gpu sim"),
             bind_group_layouts: &[Some(&layout)],
@@ -195,6 +369,46 @@ impl GpuEffect {
             label: Some("fx_gpu sim args"),
             bind_group_layouts: &[Some(&layout), Some(&args_layout)],
             immediate_size: 0,
+        });
+        let scene_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fx_gpu sim scene"),
+            bind_group_layouts: &[Some(&layout), Some(&empty_layout), Some(&scene.layout)],
+            immediate_size: 0,
+        });
+        let rt_pipeline_layout = options.ray_tracing_layout.map(|rt| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fx_gpu sim ray tracing"),
+                bind_group_layouts: &[
+                    Some(&layout),
+                    Some(&empty_layout),
+                    Some(&scene.layout),
+                    Some(rt),
+                ],
+                immediate_size: 0,
+            })
+        });
+
+        let event_layout = EventLayout::new(system);
+        let event_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fx event counts"),
+            contents: &vec![0u8; event_layout.regions.len().max(1) * 4],
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        let event_bytes = event_layout.data_words.max(1) * 4;
+        if event_bytes > limit {
+            return Err(format!(
+                "the effect's events need {event_bytes} bytes, over this GPU's storage binding limit of {limit}"
+            ));
+        }
+        let event_data = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx event data"),
+            size: event_bytes,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let mut emitters = Vec::new();
@@ -212,32 +426,67 @@ impl GpuEffect {
                     e.name, e.max_particles
                 ));
             }
-            let shader = codegen::emitter_shader(system, e);
+            let shader = codegen::emitter_shader(system, ei, &event_layout, ShaderOptions::default());
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&e.name),
                 source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&shader.source)),
             });
-            let pipe = |entry: &str| {
-                let writes_args = entry == "begin" || entry == "spawn_prep";
+            let make = |module: &wgpu::ShaderModule, entry: &str, layout: &wgpu::PipelineLayout| {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
-                    layout: Some(if writes_args {
-                        &args_pipeline_layout
-                    } else {
-                        &pipeline_layout
-                    }),
-                    module: &module,
+                    layout: Some(layout),
+                    module,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     cache: None,
                 })
             };
+            let pipe = |entry: &str| {
+                let writes_args = entry == "begin" || entry == "spawn_prep";
+                make(
+                    &module,
+                    entry,
+                    if writes_args {
+                        &args_pipeline_layout
+                    } else {
+                        &pipeline_layout
+                    },
+                )
+            };
+            // The ray-tracing variant of the update, when it differs.
+            let update_rt = rt_pipeline_layout.as_ref().and_then(|rt_layout| {
+                let rt = codegen::emitter_shader(
+                    system,
+                    ei,
+                    &event_layout,
+                    ShaderOptions { ray_tracing: true },
+                );
+                if !rt.uses_tlas {
+                    return None;
+                }
+                let m = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(&e.name),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&rt.source)),
+                });
+                Some(make(&m, "update", rt_layout))
+            });
             let pipelines = Pipelines {
                 begin: pipe("begin"),
-                update: pipe("update"),
+                update: make(
+                    &module,
+                    "update",
+                    if shader.uses_scene {
+                        &scene_pipeline_layout
+                    } else {
+                        &pipeline_layout
+                    },
+                ),
+                update_rt,
                 spawn_prep: pipe("spawn_prep"),
                 spawn: pipe("spawn"),
                 finish: pipe("finish"),
+                event_rank: shader.writes_events.then(|| pipe("event_rank")),
+                uses_scene: shader.uses_scene,
             };
             let particle_buffer = |i: usize| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -264,7 +513,7 @@ impl GpuEffect {
             });
             let args = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("fx sim dispatch args"),
-                size: 32,
+                size: 48,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
                 mapped_at_creation: false,
             });
@@ -307,11 +556,18 @@ impl GpuEffect {
                             binding: 3,
                             resource: state.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: event_counts.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: event_data.as_entire_binding(),
+                        },
                     ],
                 })
             };
             let bind_groups = [bind_group(0), bind_group(1)];
-            let _ = ei;
             emitters.push(GpuEmitter {
                 name: e.name.clone(),
                 capacity,
@@ -337,6 +593,12 @@ impl GpuEffect {
             user: system.user_params.iter().map(|p| p.value).collect(),
             owner_velocity: [0.0; 3],
             emitters,
+            event_layout,
+            event_counts,
+            event_data,
+            scene,
+            ray_tracing_scene: None,
+            empty_bind_group,
             slot: 0,
             scratch: [0; FRAME_BYTES],
         })
@@ -362,6 +624,116 @@ impl GpuEffect {
     /// Steps left before [`GpuEffect::submitted`] must be called.
     pub fn steps_left_in_submit(&self) -> u32 {
         MAX_STEPS_PER_SUBMIT - self.slot
+    }
+
+    /// Whether an emitter's update reads the scene (SceneDepth or RayTraced collisions).
+    pub fn uses_scene(&self) -> bool {
+        self.emitters.iter().any(|e| e.pipelines.uses_scene)
+    }
+
+    /// Whether an emitter traces rays when a ray-tracing scene is bound.
+    pub fn uses_ray_tracing(&self) -> bool {
+        self.emitters.iter().any(|e| e.pipelines.update_rt.is_some())
+    }
+
+    /// The layout of the scene bind group (group 2), for hosts that build it.
+    pub fn scene_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.scene.layout
+    }
+
+    /// Binds the depth texture SceneDepth collisions read
+    /// ([`SCENE_DEPTH_FORMAT`], reverse-Z), or none. Call when the texture
+    /// changes; [`GpuEffect::set_scene_view`] says which view it shows.
+    pub fn set_scene_depth(&mut self, device: &wgpu::Device, depth: Option<&wgpu::TextureView>) {
+        let s = &mut self.scene;
+        s.bind_group = SceneBindings::bind(
+            device,
+            &s.layout,
+            &s.uniform,
+            depth.unwrap_or(&s.dummy_depth),
+        );
+    }
+
+    /// Sets where the effect is (`world_from_local`) and the camera of the
+    /// bound depth texture (`None`: no depth, SceneDepth collisions find
+    /// nothing). Writes the scene uniform; call before recording steps.
+    pub fn set_scene_view(
+        &mut self,
+        queue: &wgpu::Queue,
+        world_from_local: bevy_math::Mat4,
+        view: Option<&SceneView>,
+    ) {
+        use bevy_math::{Mat4, Vec4};
+        self.scene.world_from_local = world_from_local;
+        let local_from_world = world_from_local.inverse();
+        let (clip_from_local, camera, size, flags) = match view {
+            Some(v) => (
+                v.clip_from_world * world_from_local,
+                local_from_world.transform_point3(v.camera_position),
+                [v.size[0] as f32, v.size[1] as f32],
+                1u32,
+            ),
+            None => (Mat4::IDENTITY, bevy_math::Vec3::ZERO, [1.0, 1.0], 0),
+        };
+        let mut b = [0u8; SCENE_BYTES];
+        let mut w = 0usize;
+        let mut put = |x: f32| {
+            b[w * 4..w * 4 + 4].copy_from_slice(&x.to_le_bytes());
+            w += 1;
+        };
+        for m in [
+            clip_from_local,
+            clip_from_local.inverse(),
+            world_from_local,
+            local_from_world,
+        ] {
+            m.to_cols_array().into_iter().for_each(&mut put);
+        }
+        Vec4::from((camera, 1.0)).to_array().into_iter().for_each(&mut put);
+        put(size[0]);
+        put(size[1]);
+        put(f32::from_bits(flags));
+        put(0.0);
+        queue.write_buffer(&self.scene.uniform, 0, &b);
+    }
+
+    /// Binds the ray-tracing scene (a bind group of the layout given in
+    /// [`GpuOptions::ray_tracing_layout`]), or none: RayTraced collisions
+    /// then use the depth buffer.
+    pub fn set_ray_tracing_scene(&mut self, bind_group: Option<wgpu::BindGroup>) {
+        self.ray_tracing_scene = bind_group;
+    }
+
+    /// Events of `kind` that emitter `emitter` wrote in its last update, in
+    /// sorted order (tests and tools only: waits for the GPU).
+    pub fn read_events(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        emitter: usize,
+        kind: EventKind,
+    ) -> Vec<Event> {
+        let Some(r) = self.event_layout.region(emitter, kind) else {
+            return Vec::new();
+        };
+        let counts = read_buffer(device, queue, &self.event_counts, 0, self.event_counts.size());
+        let counts: &[u32] = bytemuck::cast_slice(&counts);
+        let n = counts[r.index as usize].min(r.capacity) as usize;
+        let data = read_buffer(device, queue, &self.event_data, 0, self.event_data.size());
+        let d: &[u32] = bytemuck::cast_slice(&data);
+        let f = |i: usize| f32::from_bits(d[i]);
+        (0..n)
+            .map(|rank| {
+                let b = r.data as usize + d[r.sorted as usize + rank] as usize * EVENT_WORDS as usize;
+                Event {
+                    position: [f(b), f(b + 1), f(b + 2)],
+                    velocity: [f(b + 3), f(b + 4), f(b + 5)],
+                    normal: [f(b + 6), f(b + 7), f(b + 8)],
+                    age: f(b + 9),
+                    particle_id: d[b + 10],
+                }
+            })
+            .collect()
     }
 
     /// Records one simulation step of every emitter. Writes the step's
@@ -448,7 +820,21 @@ impl GpuEffect {
                 timestamp_writes: None,
             });
             pass.set_bind_group(0, bg, &[offset as u32]);
-            pass.set_pipeline(&p.update);
+            match (&p.update_rt, &self.ray_tracing_scene) {
+                (Some(update_rt), Some(rt)) => {
+                    pass.set_bind_group(1, &self.empty_bind_group, &[]);
+                    pass.set_bind_group(2, &self.scene.bind_group, &[]);
+                    pass.set_bind_group(3, rt, &[]);
+                    pass.set_pipeline(update_rt);
+                }
+                _ => {
+                    if p.uses_scene {
+                        pass.set_bind_group(1, &self.empty_bind_group, &[]);
+                        pass.set_bind_group(2, &self.scene.bind_group, &[]);
+                    }
+                    pass.set_pipeline(&p.update);
+                }
+            }
             pass.dispatch_workgroups_indirect(&em.args, 0);
             drop(pass);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -460,6 +846,15 @@ impl GpuEffect {
             pass.set_pipeline(&p.spawn_prep);
             pass.dispatch_workgroups(1, 1, 1);
             drop(pass);
+            if let Some(rank) = &p.event_rank {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("fx sim event rank"),
+                    timestamp_writes: None,
+                });
+                pass.set_bind_group(0, bg, &[offset as u32]);
+                pass.set_pipeline(rank);
+                pass.dispatch_workgroups_indirect(&em.args, 32);
+            }
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("fx sim spawn"),
                 timestamp_writes: None,
@@ -551,7 +946,9 @@ impl GpuEffect {
         self.emitters
             .iter()
             .map(|e| e.particles[0].size() * 2 + e.state.size() + e.frame_ubo.size())
-            .sum()
+            .sum::<u64>()
+            + self.event_counts.size()
+            + self.event_data.size()
     }
 }
 

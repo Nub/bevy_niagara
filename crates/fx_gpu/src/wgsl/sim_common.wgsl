@@ -10,6 +10,8 @@ const S_NEW: u32 = 1u;        // append counter while writing the next buffer
 const S_NEXT_ID: u32 = 2u;    // next UniqueID
 const S_SPAWN_N: u32 = 3u;    // particles to spawn this step
 const S_BASE_ID: u32 = 4u;    // UniqueID of the first one
+const S_REGULAR_N: u32 = 5u;  // of S_SPAWN_N, the emitter stack's request; the rest come from events
+const S_HANDLER_END: u32 = 8u; // + h: spawn index where handler h's particles end
 
 struct Frame {
     dt: f32,
@@ -31,6 +33,10 @@ struct Frame {
 // Indirect dispatch args: update at words 0..3, spawn at 4..7. Bound only to the
 // kernels that write them, never to the indirect dispatches that read them.
 @group(1) @binding(0) var<storage, read_write> args: array<u32>;
+// Events of the whole effect: one counter per (emitter, kind) region, and each
+// region's events (EVENT_WORDS each) and sorted order (see fx_gpu::events).
+@group(0) @binding(4) var<storage, read_write> event_counts: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> event_data: array<u32>;
 
 // ---- random numbers (fx_core::sim::rng) ----
 
@@ -437,6 +443,7 @@ fn begin() {
     args[1] = 1u;
     args[2] = 1u;
     atomicStore(&state[S_NEW], 0u);
+    reset_events();
 }
 
 @compute @workgroup_size(WG)
@@ -446,7 +453,10 @@ fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var p = load_particle(i);
+    ev_reset();
     update_particle(&p);
+    every_handlers(&p);
+    write_events(p);
     if (p.alive) {
         store_particle(atomicAdd(&state[S_NEW], 1u), p);
     }
@@ -456,7 +466,7 @@ fn update(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn spawn_prep() {
     let alive = atomicLoad(&state[S_NEW]);
     let room = fr.capacity - min(alive, fr.capacity);
-    let n = min(fr.spawn_request, room);
+    let n = spawn_counts(room);
     let base = atomicLoad(&state[S_NEXT_ID]);
     atomicStore(&state[S_BASE_ID], base);
     atomicStore(&state[S_NEXT_ID], base + n);
@@ -464,6 +474,9 @@ fn spawn_prep() {
     args[4] = groups(n);
     args[5] = 1u;
     args[6] = 1u;
+    args[8] = groups(max_event_count());
+    args[9] = 1u;
+    args[10] = 1u;
 }
 
 @compute @workgroup_size(WG)
@@ -474,12 +487,172 @@ fn spawn(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     var p = new_particle(atomicLoad(&state[S_BASE_ID]) + k);
     spawn_particle(&p);
+    spawn_event(k, &p);
     if (p.alive) {
         store_particle(atomicAdd(&state[S_NEW], 1u), p);
     }
 }
 
+// Sorts this emitter's events by source UniqueID (after update, before spawn).
+@compute @workgroup_size(WG)
+fn event_rank(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    rank_events(gid.x, lid);
+}
+
 @compute @workgroup_size(1)
 fn finish() {
     atomicStore(&state[S_COUNT], atomicLoad(&state[S_NEW]));
+}
+
+// ---- collisions (fx_core::sim::collide_plane) ----
+
+const RESPONSE_STOP: i32 = 1;
+const RESPONSE_KILL: i32 = 2;
+
+fn collide_plane(p: ptr<function, Particle>, n: vec3<f32>, o: vec3<f32>, radius: f32,
+                 response: i32, restitution: f32, friction: f32, rest_speed: f32) -> bool {
+    let d = dot((*p).position - o, n) - radius;
+    if (!(d < 0.0)) {
+        return false;
+    }
+    (*p).position -= n * d;
+    let vn = dot((*p).velocity, n);
+    if (vn >= 0.0) {
+        return false;
+    }
+    let speed_in = -vn;
+    let impact = speed_in >= rest_speed;
+    if (response == RESPONSE_KILL) {
+        (*p).alive = false;
+        return true;
+    }
+    if (response == RESPONSE_STOP) {
+        (*p).velocity = vec3<f32>(0.0);
+        return impact;
+    }
+    var vt = (*p).velocity - n * vn;
+    let t = length(vt);
+    if (t > 0.0) {
+        vt *= max(1.0 - friction * speed_in / t, 0.0);
+    }
+    let out = select(0.0, speed_in * restitution, impact);
+    (*p).velocity = vt + n * out;
+    return impact;
+}
+
+// ---- events (fx_core::events) ----
+
+const EVENT_WORDS: u32 = 12u;
+
+struct FxEvent {
+    position: vec3<f32>,
+    velocity: vec3<f32>,
+    normal: vec3<f32>,
+    age: f32,
+    id: u32,
+}
+
+// The event a handler runs for, and the random-key frame of its modules.
+var<private> cur_event: FxEvent;
+var<private> ev_frame: u32;
+// What this particle's update found and will report.
+var<private> ev_collided: bool;
+var<private> ev_normal: vec3<f32>;
+var<private> ev_death: bool;
+var<private> ev_has: array<bool, 3>;
+var<private> ev_pending: array<FxEvent, 3>;
+
+fn ev_reset() {
+    ev_collided = false;
+    ev_death = false;
+    ev_has = array<bool, 3>(false, false, false);
+}
+
+fn make_event(p: Particle, normal: vec3<f32>) -> FxEvent {
+    return FxEvent(p.position, p.velocity, normal, p.age, p.id);
+}
+
+fn load_event(data: u32, sorted: u32, rank: u32) -> FxEvent {
+    let b = data + event_data[sorted + rank] * EVENT_WORDS;
+    let w = array<f32, 10>(
+        bitcast<f32>(event_data[b]), bitcast<f32>(event_data[b + 1u]), bitcast<f32>(event_data[b + 2u]),
+        bitcast<f32>(event_data[b + 3u]), bitcast<f32>(event_data[b + 4u]), bitcast<f32>(event_data[b + 5u]),
+        bitcast<f32>(event_data[b + 6u]), bitcast<f32>(event_data[b + 7u]), bitcast<f32>(event_data[b + 8u]),
+        bitcast<f32>(event_data[b + 9u]),
+    );
+    return FxEvent(vec3<f32>(w[0], w[1], w[2]), vec3<f32>(w[3], w[4], w[5]), vec3<f32>(w[6], w[7], w[8]), w[9], event_data[b + 10u]);
+}
+
+fn write_event(region: u32, data: u32, cap: u32, e: FxEvent) {
+    let slot = atomicAdd(&event_counts[region], 1u);
+    if (slot >= cap) {
+        return;
+    }
+    let b = data + slot * EVENT_WORDS;
+    event_data[b] = bitcast<u32>(e.position.x);
+    event_data[b + 1u] = bitcast<u32>(e.position.y);
+    event_data[b + 2u] = bitcast<u32>(e.position.z);
+    event_data[b + 3u] = bitcast<u32>(e.velocity.x);
+    event_data[b + 4u] = bitcast<u32>(e.velocity.y);
+    event_data[b + 5u] = bitcast<u32>(e.velocity.z);
+    event_data[b + 6u] = bitcast<u32>(e.normal.x);
+    event_data[b + 7u] = bitcast<u32>(e.normal.y);
+    event_data[b + 8u] = bitcast<u32>(e.normal.z);
+    event_data[b + 9u] = bitcast<u32>(e.age);
+    event_data[b + 10u] = e.id;
+    event_data[b + 11u] = 0u;
+}
+
+// Events a region holds (at most its capacity).
+fn event_count(region: u32, cap: u32) -> u32 {
+    return min(atomicLoad(&event_counts[region]), cap);
+}
+
+// Events a handler takes: all, or the first `max_events` (0 = all).
+fn events_taken(region: u32, cap: u32, max_events: u32) -> u32 {
+    let n = event_count(region, cap);
+    return select(n, min(n, max_events), max_events > 0u);
+}
+
+// Sorting a region by source UniqueID: each event counts the events with a
+// smaller id (ids are unique within a region), 256 at a time from shared memory.
+var<workgroup> rank_tile: array<u32, 256>;
+var<workgroup> rank_n: u32;
+
+fn rank_region(i: u32, lid: u32, region: u32, data: u32, sorted: u32, cap: u32) {
+    workgroupBarrier();
+    if (lid == 0u) {
+        rank_n = event_count(region, cap);
+    }
+    let n = workgroupUniformLoad(&rank_n);
+    let valid = i < n;
+    var key = 0u;
+    if (valid) {
+        key = event_data[data + i * EVENT_WORDS + 10u];
+    }
+    var rank = 0u;
+    for (var base = 0u; base < n; base += WG) {
+        let j = base + lid;
+        if (j < n) {
+            rank_tile[lid] = event_data[data + j * EVENT_WORDS + 10u];
+        }
+        workgroupBarrier();
+        let m = min(WG, n - base);
+        for (var t = 0u; t < m; t++) {
+            rank += select(0u, 1u, rank_tile[t] < key);
+        }
+        workgroupBarrier();
+    }
+    if (valid) {
+        event_data[sorted + rank] = i;
+    }
+}
+
+// Spawn-stage handler counts: `n` of `room` particles for a handler taking
+// `taken` events of `per` particles each (fx_core::sim's u64 product, clamped).
+fn handler_spawns(taken: u32, per: u32, room: u32) -> u32 {
+    if (per == 0u) {
+        return 0u;
+    }
+    return select(taken * per, room, taken > room / per);
 }

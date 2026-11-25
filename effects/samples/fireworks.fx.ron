@@ -1,0 +1,96 @@
+// Fireworks: shells launch one after another, trailing sparks (Location
+// events), and burst when they die (Death events) into 150 stars in the
+// shell's colour (chosen by the shell's UniqueID), which droop and fade.
+(
+    name: "Fireworks",
+    emitters: [
+        (
+            name: "Shells",
+            sim_target: Gpu,
+            max_particles: 16,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.45) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.9) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.05), Float(1.25)),
+                    "Color": Color((3.0, 2.2, 1.2, 1.0)),
+                    "Sprite Size": Vec2((0.06, 0.06)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-2.0, 11.0, -0.8)), Vec3((2.0, 12.5, 0.8))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Generate Location Event", inputs: { "Event Probability": Float(0.8) }),
+                (module: "Generate Death Event"),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Trails",
+            sim_target: Gpu,
+            max_particles: 600,
+            event_handlers: [
+                (source: "Shells", event: Location, spawn_number: 2, modules: [
+                    (module: "Receive Location Event", inputs: { "Inherit Velocity Scale": Float(0.15) }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.3), Float(0.6)),
+                    "Color": Color((2.5, 1.2, 0.4, 1.0)),
+                    "Sprite Size": Vec2((0.03, 0.03)),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(180.0), "Velocity Strength": RandomRange(Float(0.1), Float(0.4)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force", inputs: { "Gravity": Vec3((0.0, -2.0, 0.0)) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Stars",
+            sim_target: Gpu,
+            max_particles: 1500,
+            event_handlers: [
+                (source: "Shells", event: Death, spawn_number: 150, modules: [
+                    // One colour per shell.
+                    (module: "Initialize Particle", inputs: {
+                        "Lifetime": RandomRange(Float(1.2), Float(1.8)),
+                        "Sprite Size": Vec2((0.05, 0.05)),
+                        "Color": Dynamic("Select Color by Int", {
+                            "Index": Link(Int, "Event.ParticleID"),
+                            "Values": [
+                                Color((6.0, 1.0, 0.6, 1.0)),
+                                Color((1.0, 4.0, 1.4, 1.0)),
+                                Color((1.2, 1.8, 7.0, 1.0)),
+                            ],
+                        }),
+                    }),
+                    (module: "Receive Death Event", inputs: { "Inherit Velocity Scale": Float(0.3) }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(180.0), "Velocity Strength": RandomRange(Float(3.0), Float(4.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force", inputs: { "Gravity": Vec3((0.0, -3.0, 0.0)) }),
+                (module: "Drag", inputs: { "Drag": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.5, 1.5, 1.5)), (0.3, (1.0, 1.0, 1.0)), (1.0, (0.6, 0.4, 0.3))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.7, 0.8), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+    ],
+)

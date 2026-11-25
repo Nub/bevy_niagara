@@ -33,7 +33,7 @@ fn read_param(r: ParamRef, env: &Env) -> Value {
         },
         Namespace::System => Value::Float(env.time),
         Namespace::Emitter => Value::Float(env.emitter_age),
-        Namespace::Particles => Value::Float(0.0),
+        Namespace::Particles | Namespace::Event => Value::Float(0.0),
     }
 }
 

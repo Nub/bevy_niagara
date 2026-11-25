@@ -1,0 +1,85 @@
+// Bouncing sparks: a fountain of hot sparks falls onto the floor (the plane
+// y = 0), bounces with restitution and friction and slides to rest. Each
+// impact writes a Collision event; the "Impact Flashes" emitter spawns two
+// short bright flashes where it happened (at most 20 impacts a step).
+(
+    name: "Bouncing Sparks",
+    emitters: [
+        (
+            name: "Sparks",
+            sim_target: Gpu,
+            max_particles: 2000,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(220.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.8), Float(2.6)),
+                    "Position": Vec3((0.0, 1.2, 0.0)),
+                    "Color": Color((5.0, 2.6, 0.9, 1.0)),
+                    "Sprite Size": Vec2((0.025, 0.025)),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(55.0),
+                    "Velocity Strength": RandomRange(Float(2.0), Float(4.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(0.3) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": Plane,
+                    "Particle Radius": Float(0.01),
+                    "Restitution": RandomRange(Float(0.35), Float(0.55)),
+                    "Friction": Float(0.15),
+                    "Rest Speed": Float(0.4),
+                }),
+                (module: "Generate Collision Event"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (0.6, (0.9, 0.45, 0.15)), (1.0, (0.4, 0.05, 0.0))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.85, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+        (
+            name: "Impact Flashes",
+            sim_target: Gpu,
+            max_particles: 400,
+            event_handlers: [
+                (
+                    source: "Sparks",
+                    event: Collision,
+                    spawn_number: 2,
+                    max_events_per_frame: 20,
+                    modules: [
+                        (module: "Receive Collision Event", inputs: { "Position Offset": Vec3((0.0, 0.01, 0.0)) }),
+                        // Kicked off the surface along its normal.
+                        (module: "Add Velocity", inputs: { "Velocity": Dynamic("Multiply Vec3 by Float", {
+                            "A": Link(Vec3, "Event.Normal"),
+                            "B": RandomRange(Float(0.2), Float(0.6)),
+                        }) }),
+                    ],
+                ),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.08), Float(0.18)),
+                    "Color": Color((8.0, 5.0, 2.0, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.04, 0.04)), Vec2((0.07, 0.07))),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(70.0), "Velocity Strength": Float(0.5) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (1.0, 1.0)), (1.0, (0.3, 0.3))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)
