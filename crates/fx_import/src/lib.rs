@@ -14,6 +14,7 @@
 //! print!("{}", fx_import::dump(&pkg, &Default::default()));
 //! ```
 
+pub mod bulk;
 pub mod convert;
 pub mod dump;
 pub mod fx;

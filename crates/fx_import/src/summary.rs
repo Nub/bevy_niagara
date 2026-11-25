@@ -120,6 +120,8 @@ pub struct Summary {
     pub compatible_with: EngineVersion,
     pub asset_registry_data_offset: i32,
     pub bulk_data_start_offset: i64,
+    /// Start of the package trailer (editor bulk data payloads), or -1.
+    pub payload_toc_offset: i64,
 }
 
 impl Summary {
@@ -255,8 +257,9 @@ impl Summary {
         if v5 >= ue5::NAMES_REFERENCED_FROM_EXPORT_DATA {
             r.i32()?;
         }
+        s.payload_toc_offset = -1;
         if v5 >= ue5::PAYLOAD_TOC {
-            r.i64()?;
+            s.payload_toc_offset = r.i64()?;
         }
         if v5 >= ue5::DATA_RESOURCES {
             r.i32()?;

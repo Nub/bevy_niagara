@@ -76,6 +76,29 @@ fn main() -> ExitCode {
             }
         };
     }
+    if cmd == "payloads" {
+        // fximport payloads <file.uasset> --out DIR: each export's bulk data payloads, raw.
+        let (Some(file), Some("--out"), Some(out)) = (args.get(1), args.get(2).map(|s| s.as_str()), args.get(3)) else { return usage() };
+        let bytes = match std::fs::read(file) { Ok(b) => b, Err(e) => { eprintln!("{file}: {e}"); return ExitCode::from(1) } };
+        let pkg = match Package::read(&bytes) { Ok(p) => p, Err(e) => { eprintln!("{file}: {e}"); return ExitCode::from(1) } };
+        let _ = std::fs::create_dir_all(out);
+        for (i, e) in pkg.exports.iter().enumerate() {
+            let obj = &e.object;
+            let _ = i;
+            let Ok(ps) = fx_import::bulk::payloads_of(&pkg, &bytes, obj) else { continue };
+            for (k, p) in ps.iter().enumerate() {
+                match fx_import::bulk::read_payload(&bytes, p) {
+                    Ok(data) => {
+                        let path = format!("{out}/{}_{k}.bin", e.object_name);
+                        let _ = std::fs::write(&path, &data);
+                        println!("{path}: {} bytes ({} stored)", data.len(), p.compressed_size);
+                    }
+                    Err(err) => eprintln!("{}: payload {k}: {err}", e.object_name),
+                }
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
     if cmd != "dump" {
         return usage();
     }
