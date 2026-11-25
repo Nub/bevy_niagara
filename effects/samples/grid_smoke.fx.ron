@@ -34,7 +34,7 @@
         ),
         (
             name: "Advect",
-            inputs: { "Dissipation": Float(0.25) },
+            inputs: { "Dissipation": Float(0.6) },
             wgsl: r#"
     // Semi-Lagrangian: fetch what flowed here from upstream.
     let back = CellPosition - Velocity * DeltaTime;
@@ -60,6 +60,8 @@
     let sum = Smoke_Pressure(Cell - vec2<i32>(1, 0)) + Smoke_Pressure(Cell + vec2<i32>(1, 0))
         + Smoke_Pressure(Cell - vec2<i32>(0, 1)) + Smoke_Pressure(Cell + vec2<i32>(0, 1));
     Pressure = (sum - Divergence * h * h) * 0.25;
+    // Open top: zero pressure there lets the flow out.
+    if (Cell.y == Smoke_NumCells.y - 1) { Pressure = 0.0; }
 "#,
         ),
         (
@@ -69,9 +71,10 @@
     let gx = Smoke_Pressure(Cell + vec2<i32>(1, 0)) - Smoke_Pressure(Cell - vec2<i32>(1, 0));
     let gy = Smoke_Pressure(Cell + vec2<i32>(0, 1)) - Smoke_Pressure(Cell - vec2<i32>(0, 1));
     Velocity -= 0.5 * vec2<f32>(gx, gy) / h;
-    // Closed box: no flow through the walls.
+    // Walls left, right and below; smoke leaves through the open top.
     if (Cell.x == 0 || Cell.x == Smoke_NumCells.x - 1) { Velocity.x = 0.0; }
-    if (Cell.y == 0 || Cell.y == Smoke_NumCells.y - 1) { Velocity.y = 0.0; }
+    if (Cell.y == 0) { Velocity.y = 0.0; }
+    if (Cell.y == Smoke_NumCells.y - 1) { Density = 0.0; }
 "#,
         ),
         (

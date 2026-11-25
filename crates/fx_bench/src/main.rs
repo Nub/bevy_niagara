@@ -129,6 +129,22 @@ pub const SCENES: &[SceneDef] = &[
         target: [0.0, 0.5, 0.0],
         budget_gpu_ms: None,
     },
+    // Custom WGSL modules and simulation stages.
+    SceneDef {
+        name: "wgsl_swirl",
+        file: "effects/samples/wgsl_swirl.fx.ron",
+        camera: [0.0, 2.5, 4.0],
+        target: [0.0, 0.6, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "grid_smoke",
+        file: "effects/samples/grid_smoke.fx.ron",
+        camera: [0.0, 1.5, 4.5],
+        target: [0.0, 1.5, 0.0],
+        // Sim with 28 grid passes is ~0.08 ms; the rest sorts and draws 12k alpha sprites.
+        budget_gpu_ms: Some(0.4),
+    },
 ];
 
 /// Relative slowdown that counts as a regression.

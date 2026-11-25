@@ -909,7 +909,7 @@ const HALF_RADIANS_PER_DEGREE: f32 = std::f32::consts::PI / 360.0;
 
 /// Quaternion `(x, y, z, w)` rotating by Euler angles `deg` (degrees about
 /// X, Y and Z, X applied first): `qz * qy * qx`, written out. The GPU's
-/// `euler_quat` in `sim_common.wgsl` is the same formula.
+/// `euler_quat` in `wgsl/lib.wgsl` is the same formula.
 pub fn euler_quat(deg: Vec3) -> Quat {
     let h = deg * HALF_RADIANS_PER_DEGREE;
     let (sx, cx) = (h.x.sin(), h.x.cos());
@@ -1004,7 +1004,7 @@ pub struct ShapeInputs {
 /// A point of shape `primitive` (Shape Location's "Shape Primitive" index)
 /// from five uniform draws `u`, uniform over the volume (or surface). Radial
 /// draws use `1 - u`, which is never 0, so roots and powers stay defined on
-/// the GPU. `shape_point` in `fx_gpu`'s `sim_common.wgsl` is the same code.
+/// the GPU. `shape_point` in `wgsl/lib.wgsl` (the `shape_*` functions) is the same code.
 pub fn shape_point(primitive: i32, s: &ShapeInputs, u: [f32; 5]) -> Vec3 {
     const TAU: f32 = std::f32::consts::TAU;
     let around = |r: f32, phi: f32, y: f32| Vec3::new(r * phi.cos(), y, r * phi.sin());
