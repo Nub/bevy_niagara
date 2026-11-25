@@ -1,0 +1,12 @@
+[package]
+name = "fx_import"
+description = "Reader for Unreal Engine 5 editor packages (.uasset): summary, names, imports, exports and tagged properties"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "fximport"
+path = "src/bin/fximport.rs"
