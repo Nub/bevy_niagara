@@ -1206,3 +1206,32 @@ fn rotate_uv(uv: vec2<f32>, c: vec2<f32>, a: f32) -> vec2<f32> {
     return c + vec2<f32>(d.x * k - d.y * s, d.x * s + d.y * k);
 }
 "#;
+
+/// A tileable grey value-noise texture standing in for a texture whose
+/// package is missing (linear data, 256 x 256).
+pub fn stand_in_noise() -> Image {
+    const N: u32 = 256;
+    const CELLS: u32 = 8;
+    let hash = |x: u32, y: u32| -> f32 {
+        let mut h = (x % CELLS).wrapping_mul(0x9E37_79B1) ^ (y % CELLS).wrapping_mul(0x85EB_CA77) ^ 0x1234_5678;
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        (h & 0xFFFF) as f32 / 65535.0
+    };
+    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
+    for y in 0..N {
+        for x in 0..N {
+            let fx = x as f32 / N as f32 * CELLS as f32;
+            let fy = y as f32 / N as f32 * CELLS as f32;
+            let (ix, iy) = (fx.floor() as u32, fy.floor() as u32);
+            let (tx, ty) = (fx.fract(), fy.fract());
+            let (sx, sy) = (tx * tx * (3.0 - 2.0 * tx), ty * ty * (3.0 - 2.0 * ty));
+            let a = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * sx;
+            let b = hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * sx;
+            let g = ((a + (b - a) * sy) * 255.0) as u8;
+            rgba.extend_from_slice(&[g, g, g, 255]);
+        }
+    }
+    Image { width: N, height: N, rgba, srgb: false }
+}

@@ -78,6 +78,8 @@ pub struct Report {
     pub unmapped_dynamic: Vec<(String, String)>,
     pub renderers: Vec<String>,
     pub placeholders: Vec<String>,
+    /// Materials, textures and meshes read from their packages.
+    pub materials: Vec<String>,
     pub notes: Vec<String>,
     /// Custom HLSL translations: (module, outcome).
     pub hlsl: Vec<(String, String)>,
@@ -169,6 +171,13 @@ impl Report {
             }
             o.push('\n');
         }
+        if !self.materials.is_empty() {
+            let _ = writeln!(o, "## Materials and meshes\n");
+            for m in &self.materials {
+                let _ = writeln!(o, "- {m}");
+            }
+            o.push('\n');
+        }
         let _ = writeln!(o, "## Renderers and placeholders\n");
         for r in self.renderers.iter().chain(&self.placeholders) {
             let _ = writeln!(o, "- {r}");
@@ -196,16 +205,87 @@ impl Report {
     }
 }
 
+/// Where `convert_with_assets` finds referenced packages and what it writes
+/// beside the effect (paths relative to the effect's folder).
+pub struct AssetOut {
+    pub store: crate::material::Store,
+    /// Folder for the written files, relative to the effect file.
+    pub dir: String,
+    pub files: BTreeMap<String, Vec<u8>>,
+    mats: HashMap<(String, bool, [bool; 4]), Result<MatOut, String>>,
+    meshes: HashMap<String, Result<MeshOut, String>>,
+}
+
+impl AssetOut {
+    pub fn new(store: crate::material::Store, dir: impl Into<String>) -> Self {
+        AssetOut {
+            store,
+            dir: dir.into(),
+            files: BTreeMap::new(),
+            mats: HashMap::new(),
+            meshes: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MeshOut {
+    name: String,
+    glb: String,
+    material: Option<String>,
+    summary: String,
+}
+
+#[derive(Clone)]
+struct MatOut {
+    name: String,
+    wesl: String,
+    texture: Option<String>,
+    blend: crate::material::Blend,
+    unlit: bool,
+    refraction: bool,
+    textures: Vec<String>,
+    missing_textures: Vec<String>,
+    notes: Vec<String>,
+}
+
+impl MatOut {
+    fn describe(&self) -> String {
+        let mut s = format!(" ({:?}, {}", self.blend, if self.unlit { "unlit" } else { "lit" });
+        if !self.textures.is_empty() {
+            let _ = write!(s, "; textures {}", self.textures.join(", "));
+        }
+        s.push(')');
+        for m in &self.missing_textures {
+            let _ = write!(s, "; **missing texture** {m}: a noise texture stands in");
+        }
+        for n in &self.notes {
+            let _ = write!(s, "; {n}");
+        }
+        s
+    }
+}
+
 /// The converted effect.
 pub struct Conversion {
     pub ron: String,
     pub report: Report,
+    /// Files to write beside the effect (relative path, bytes): textures,
+    /// materials, meshes.
+    pub files: BTreeMap<String, Vec<u8>>,
 }
 
 /// Converts a system. `source` names the file it came from (for the
 /// header and report).
 pub fn convert(sys: &NSystem, source: &str) -> Conversion {
+    convert_with_assets(sys, source, None)
+}
+
+/// [`convert`], with the referenced materials, textures and meshes read
+/// from `assets`' package folders and written beside the effect.
+pub fn convert_with_assets(sys: &NSystem, source: &str, assets: Option<AssetOut>) -> Conversion {
     let mut cx = Cx {
+        assets,
         sys,
         user_units: HashMap::new(),
         report: Report {
@@ -246,11 +326,12 @@ pub fn convert(sys: &NSystem, source: &str) -> Conversion {
         }
     }
     let ron = cx.write(&emitters);
+    let files = cx.assets.take().map(|a| a.files).unwrap_or_default();
     let mut report = cx.report;
     // Validate.
     let checked = fx_core::check_source(&format!("{}.fx.ron", sys.name), &ron);
     report.validation = checked.errors().map(|d| d.to_string()).collect();
-    Conversion { ron, report }
+    Conversion { ron, report, files }
 }
 
 /// The system's loop settings (System State), used by emitters whose
@@ -325,6 +406,7 @@ struct Cx<'a> {
     report: Report,
     /// Custom WGSL modules (source text) for the system's `custom_modules`.
     custom: Vec<(String, String)>,
+    assets: Option<AssetOut>,
 }
 
 /// One module's conversion in progress: the outputs and what was dropped.
@@ -491,8 +573,21 @@ impl<'a> Cx<'a> {
                 }
             }
         }
+        // Dynamic Material Parameter indices the emitter writes.
+        let mut written = [false; 4];
+        for (_, mods) in out.stacks.iter().chain(out.events.iter()) {
+            for m in mods {
+                match m.name.as_str() {
+                    "Dynamic Material Parameters" => written[0] = true,
+                    "Dynamic Material Parameters 2" => written[1] = true,
+                    "Dynamic Material Parameters 3" => written[2] = true,
+                    "Dynamic Material Parameters 4" => written[3] = true,
+                    _ => {}
+                }
+            }
+        }
         for r in &e.renderers {
-            if let Some(s) = self.renderer(e, r) {
+            if let Some(s) = self.renderer(e, r, written) {
                 out.renderers.push(s);
             }
         }
@@ -509,7 +604,17 @@ impl<'a> Cx<'a> {
             ModuleKind::Function => {}
         }
         if !m.script.starts_with("/Niagara/") {
-            return Err(format!("a module from another package ({}), not available here", m.script));
+            // A module script in another package of the project: read its
+            // custom HLSL like a scratch pad's when the package is present.
+            let loaded = self.assets.as_mut().and_then(|a| a.store.load(&m.script));
+            let Some(l) = loaded else {
+                return Err(format!("a module from another package ({}), not in the package folders", m.script));
+            };
+            let hlsl = crate::niagara::module_script_hlsl(&l.pkg).map_err(|w| format!("module package {}: {w}", m.script))?;
+            if hlsl.is_empty() {
+                return Err(format!("module from another package ({}) built from graph nodes (no custom HLSL to translate)", m.script));
+            }
+            return self.scratch_pad(e, st, m, &hlsl, o);
         }
         map_module(self, e, st, m, loops, o)
     }
@@ -847,19 +952,55 @@ impl<'a> Cx<'a> {
 
     // ---- renderers ----
 
-    fn renderer(&mut self, e: &NEmitter, r: &crate::niagara::NRenderer) -> Option<String> {
+    fn renderer(&mut self, e: &NEmitter, r: &crate::niagara::NRenderer, written: [bool; 4]) -> Option<String> {
         use crate::property::find;
         let enum_tail = |n: &str| find(&r.properties, n).and_then(|v| v.as_str()).map(|s| s.rsplit("::").next().unwrap_or(s).to_string());
-        let material = r.refs.get("Material").cloned().or_else(|| {
-            r.refs.iter().find(|(k, _)| k.starts_with("OverrideMaterials") || k.contains("Material")).map(|(_, v)| v.clone())
+        let is_asset = |v: &String| v.starts_with('/') && !v.starts_with("/Script/");
+        let material = r.refs.get("Material").filter(|v| is_asset(v)).cloned().or_else(|| {
+            let mut m: Vec<_> = r
+                .refs
+                .iter()
+                .filter(|(k, v)| (k.starts_with("OverrideMaterials") || k.ends_with("Material")) && is_asset(v))
+                .collect();
+            m.sort();
+            m.first().map(|(_, v)| (*v).clone())
         });
-        let blend = guess_blend(material.as_deref().unwrap_or(""), &e.name);
-        let mut fields = Vec::new();
         if !r.enabled {
             self.report.renderers.push(format!("{}: {} disabled: left out", e.name, r.class));
             return None;
         }
-        if material.as_deref().is_some_and(|m| { let l = m.to_lowercase(); l.contains("distort") || l.contains("refract") }) {
+        let is_mesh = r.class == "NiagaraMeshRendererProperties";
+        // Meshes: the first of the renderer's meshes, and its own material
+        // when the renderer does not override it.
+        let mut mesh_paths: Vec<(String, String)> = r
+            .refs
+            .iter()
+            .filter(|(k, v)| k.starts_with("Meshes[") && k.ends_with("].Mesh") && is_asset(v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        mesh_paths.sort();
+        let mesh_path = mesh_paths.first().map(|(_, v)| v.clone());
+        let mesh_out = if is_mesh { mesh_path.as_deref().map(|p| self.mesh_asset(p)) } else { None };
+        let material = material.or_else(|| match &mesh_out {
+            Some(Ok(m)) => m.material.clone(),
+            _ => None,
+        });
+        // Niagara's default materials are what our built-ins draw (particle
+        // colour; sprites a soft round falloff).
+        let engine_default = material.as_deref().is_some_and(|m| m.starts_with("/Niagara/DefaultAssets/"));
+        let mat = if engine_default { None } else { material.as_deref().map(|m| self.material_asset(m, is_mesh, written)) };
+        if let Some(Ok(m)) = &mat {
+            if m.refraction {
+                self.report.renderers.push(format!(
+                    "{}: {} with a distortion (refraction) material `{}`: no refraction renderer here, left out (the heat haze is missing)",
+                    e.name, r.class, m.name
+                ));
+                return None;
+            }
+        } else if material.as_deref().is_some_and(|m| {
+            let l = m.to_lowercase();
+            l.contains("distort") || l.contains("refract")
+        }) {
             self.report.renderers.push(format!(
                 "{}: {} with a distortion material (`{}`): no equivalent, left out",
                 e.name,
@@ -868,6 +1009,33 @@ impl<'a> Cx<'a> {
             ));
             return None;
         }
+        let blend = match &mat {
+            Some(Ok(m)) => m.blend.ours(is_mesh).to_string(),
+            _ if engine_default => "Alpha".to_string(),
+            _ => guess_blend(material.as_deref().unwrap_or(""), &e.name).to_string(),
+        };
+        let mut fields = Vec::new();
+        // The material's files, or the reason there are none.
+        let material_fields = |fields: &mut Vec<String>, report: &mut Report, what: &str| match &mat {
+            Some(Ok(m)) => {
+                if let Some(t) = &m.texture {
+                    fields.push(format!("texture: {}", quote(t)));
+                }
+                fields.push(format!("material: {}", quote(&m.wesl)));
+                report.materials.push(format!("{}: {what} material `{}` -> `{}`{}", e.name, m.name, m.wesl, m.describe()));
+            }
+            Some(Err(why)) => report.placeholders.push(format!(
+                "{}: {what} material `{}` -> built-in, blend {blend} guessed from the name ({why})",
+                e.name,
+                material.as_deref().unwrap_or("")
+            )),
+            None if engine_default => report.materials.push(format!(
+                "{}: {what} material `{}` (Niagara's default) -> our built-in {what} material, blend {blend}",
+                e.name,
+                crate::material::split_object_path(material.as_deref().unwrap_or("")).1
+            )),
+            None => report.placeholders.push(format!("{}: {what} has no material -> built-in, blend {blend}", e.name)),
+        };
         let what = match r.class.as_str() {
             "NiagaraSpriteRendererProperties" => {
                 fields.push(format!("blend_mode: {blend}"));
@@ -891,29 +1059,54 @@ impl<'a> Cx<'a> {
                     let x = v.field("X").and_then(|x| x.as_f64()).unwrap_or(1.0);
                     let y = v.field("Y").and_then(|x| x.as_f64()).unwrap_or(1.0);
                     if x > 1.0 || y > 1.0 {
-                        self.report.placeholders.push(format!(
-                            "{}: sprite flipbook {x}x{y} of the material's texture: not kept (the placeholder sprite has one frame)",
-                            e.name
-                        ));
+                        if matches!(mat, Some(Ok(_))) {
+                            fields.push(format!("sub_image_size: ({}, {})", x.max(1.0) as u32, y.max(1.0) as u32));
+                            if matches!(find(&r.properties, "bSubImageBlend"), Some(crate::property::Value::Bool(true))) {
+                                fields.push("sub_uv_blending: true".into());
+                            }
+                        } else {
+                            self.report.placeholders.push(format!(
+                                "{}: sprite flipbook {x}x{y} of the material's texture: not kept (the placeholder sprite has one frame)",
+                                e.name
+                            ));
+                        }
                     }
                 }
-                self.report.placeholders.push(format!(
-                    "{}: sprite material `{}` -> built-in soft sprite, blend {blend} (guessed from the name)",
-                    e.name,
-                    material.as_deref().unwrap_or("none")
-                ));
+                material_fields(&mut fields, &mut self.report, "sprite");
                 format!("Sprite(({}))", fields.join(", "))
             }
             "NiagaraMeshRendererProperties" => {
-                let mesh_path = r
-                    .refs
-                    .iter()
-                    .filter(|(k, _)| k.starts_with("Meshes[") && k.ends_with("].Mesh"))
-                    .map(|(_, v)| v.clone())
-                    .min();
-                let shape = mesh_path.as_deref().map(guess_mesh).unwrap_or("cube");
-                fields.push(format!("mesh: {}", quote(shape)));
-                if blend != "Alpha" || material.as_deref().is_some_and(|m| m.to_lowercase().contains("translucent")) {
+                let shape = match &mesh_out {
+                    Some(Ok(m)) => {
+                        let extra = if mesh_paths.len() > 1 {
+                            format!(
+                                "; Niagara picks one of {} meshes per particle, only the first is drawn ({} left out)",
+                                mesh_paths.len(),
+                                mesh_paths[1..].iter().map(|(_, p)| crate::material::split_object_path(p).1).collect::<Vec<_>>().join(", ")
+                            )
+                        } else {
+                            String::new()
+                        };
+                        self.report.materials.push(format!("{}: mesh `{}` -> `{}` ({}){extra}", e.name, m.name, m.glb, m.summary));
+                        m.glb.clone()
+                    }
+                    other => {
+                        let shape = mesh_path.as_deref().map(guess_mesh).unwrap_or("cube");
+                        let why = match other {
+                            Some(Err(w)) => w.clone(),
+                            _ => "no mesh".into(),
+                        };
+                        self.report.placeholders.push(format!(
+                            "{}: mesh `{}` -> built-in \"{shape}\" (guessed from the name: {why}), {} m per unit of mesh scale",
+                            e.name,
+                            mesh_path.as_deref().unwrap_or("none"),
+                            PLACEHOLDER_MESH_SIZE
+                        ));
+                        shape.to_string()
+                    }
+                };
+                fields.push(format!("mesh: {}", quote(&shape)));
+                if blend != "Opaque" && (matches!(mat, Some(Ok(_))) || blend != "Alpha" || material.as_deref().is_some_and(|m| m.to_lowercase().contains("translucent"))) {
                     fields.push(format!("blend_mode: {blend}"));
                 }
                 match enum_tail("FacingMode").as_deref() {
@@ -922,21 +1115,12 @@ impl<'a> Cx<'a> {
                     Some("CameraPlane") => fields.push("facing_mode: CameraPlane".into()),
                     _ => {}
                 }
-                self.report.placeholders.push(format!(
-                    "{}: mesh `{}` -> built-in \"{shape}\" (guessed from the name), {} m per unit of mesh scale",
-                    e.name,
-                    mesh_path.as_deref().unwrap_or("none"),
-                    PLACEHOLDER_MESH_SIZE
-                ));
+                material_fields(&mut fields, &mut self.report, "mesh");
                 format!("Mesh(({}))", fields.join(", "))
             }
             "NiagaraRibbonRendererProperties" => {
                 fields.push(format!("blend_mode: {blend}"));
-                self.report.placeholders.push(format!(
-                    "{}: ribbon material `{}` -> built-in, blend {blend}",
-                    e.name,
-                    material.as_deref().unwrap_or("none")
-                ));
+                material_fields(&mut fields, &mut self.report, "ribbon");
                 format!("Ribbon(({}))", fields.join(", "))
             }
             "NiagaraLightRendererProperties" => {
@@ -950,6 +1134,136 @@ impl<'a> Cx<'a> {
         };
         self.report.renderers.push(format!("{}: {} -> `{}`", e.name, r.class, what));
         Some(what)
+    }
+
+    /// Size in metres of one unit of Niagara mesh scale for the emitter's
+    /// mesh renderer: 1 for real meshes (already in metres), the
+    /// placeholder size otherwise.
+    fn mesh_unit(&mut self, e: &NEmitter) -> f32 {
+        let Some(r) = e.renderers.iter().find(|r| r.class == "NiagaraMeshRendererProperties" && r.enabled) else {
+            return PLACEHOLDER_MESH_SIZE;
+        };
+        let mut meshes: Vec<_> = r.refs.iter().filter(|(k, v)| k.starts_with("Meshes[") && k.ends_with("].Mesh") && v.starts_with('/')).collect();
+        meshes.sort();
+        match meshes.first().map(|(_, v)| (*v).clone()) {
+            Some(p) if self.mesh_asset(&p).is_ok() => 1.0,
+            _ => PLACEHOLDER_MESH_SIZE,
+        }
+    }
+
+    /// A static mesh written as glTF beside the effect (once per mesh).
+    fn mesh_asset(&mut self, path: &str) -> Result<MeshOut, String> {
+        let Some(a) = self.assets.as_mut() else {
+            return Err("asset packages not searched".into());
+        };
+        if let Some(m) = a.meshes.get(path) {
+            return m.clone();
+        }
+        let res = (|| {
+            let l = a.store.load(path).ok_or_else(|| "its package is not in the package folders".to_string())?;
+            let data = crate::mesh::read_static_mesh(&l.pkg, &l.bytes)?;
+            let name = crate::material::split_object_path(path).1;
+            let glb = format!("{}/{name}.glb", a.dir);
+            a.files.insert(glb.clone(), crate::mesh::write_glb(&data));
+            // The mesh's own first material.
+            let i = l.export(&name);
+            let material = i.and_then(|i| match crate::property::find(l.props(i), "StaticMaterials") {
+                Some(crate::property::Value::Array(s)) => s.iter().find_map(|m| match m.field("MaterialInterface") {
+                    Some(crate::property::Value::Object(o)) if !o.is_null() => Some(l.path(*o)),
+                    _ => None,
+                }),
+                _ => None,
+            });
+            let (lo, hi) = data.bounds();
+            Ok(MeshOut {
+                name,
+                glb,
+                material,
+                summary: format!(
+                    "{} triangles, {:.2} x {:.2} x {:.2} m",
+                    data.triangle_count(),
+                    hi[0] - lo[0],
+                    hi[1] - lo[1],
+                    hi[2] - lo[2]
+                ),
+            })
+        })();
+        a.meshes.insert(path.to_string(), res.clone());
+        res
+    }
+
+    /// A material translated to WESL plus its texture atlas, written beside
+    /// the effect (once per material and use).
+    fn material_asset(&mut self, path: &str, mesh: bool, written: [bool; 4]) -> Result<MatOut, String> {
+        let Some(a) = self.assets.as_mut() else {
+            return Err("asset packages not searched".into());
+        };
+        let key = (path.to_string(), mesh, written);
+        if let Some(m) = a.mats.get(&key) {
+            return m.clone();
+        }
+        let res = (|| {
+            use crate::material as mt;
+            let m = mt::Material::load(&mut a.store, path)?;
+            if let Some(miss) = &m.missing {
+                return Err(format!("parent material `{miss}` is not in the package folders"));
+            }
+            let available = [0, 1, 2, 3].map(|k| match k {
+                0 => true,
+                k => fx_core::modules::MODULES.iter().any(|d| d.name == format!("Dynamic Material Parameters {}", k + 1)),
+            });
+            let needs = mt::Needs {
+                dynamic_written: written,
+                dynamic_available: available,
+                mesh,
+            };
+            let c = mt::compile(&m, &needs)?;
+            let refraction = m.base.as_ref().is_some_and(|(l, ed)| {
+                crate::property::find(l.props(*ed), "Refraction")
+                    .and_then(|i| i.field("Expression"))
+                    .is_some_and(|x| matches!(x, crate::property::Value::Object(o) if !o.is_null()))
+            }) && matches!(m.blend, mt::Blend::Translucent);
+            let mut imgs = Vec::new();
+            let mut missing = Vec::new();
+            for t in &c.textures {
+                match mt::read_texture(&mut a.store, t) {
+                    Ok(i) => imgs.push(i),
+                    Err(why) => {
+                        missing.push(format!("{} ({why})", mt::split_object_path(t).1));
+                        imgs.push(mt::stand_in_noise());
+                    }
+                }
+            }
+            let mut base = m.name();
+            let mut n = 2;
+            while a.files.contains_key(&format!("{}/{base}.wesl", a.dir)) {
+                base = format!("{}_{n}", m.name());
+                n += 1;
+            }
+            let wesl_path = format!("{}/{base}.wesl", a.dir);
+            let (texture, wesl) = if imgs.is_empty() {
+                (None, mt::with_rects(&c.wesl, &[]))
+            } else {
+                let at = mt::atlas(&imgs);
+                let png = format!("{}/{base}.png", a.dir);
+                a.files.insert(png.clone(), mt::encode_png(&at.image));
+                (Some(png), mt::with_rects(&c.wesl, &at.rects))
+            };
+            a.files.insert(wesl_path.clone(), wesl.into_bytes());
+            Ok(MatOut {
+                name: m.name(),
+                wesl: wesl_path,
+                texture,
+                blend: m.blend,
+                unlit: m.unlit,
+                refraction,
+                textures: c.textures.iter().map(|t| mt::split_object_path(t).1).collect(),
+                missing_textures: missing,
+                notes: c.notes.clone(),
+            })
+        })();
+        a.mats.insert(key, res.clone());
+        res
     }
 
     /// A capacity from the spawn rates, bursts and lifetimes written.
@@ -1008,7 +1322,11 @@ impl<'a> Cx<'a> {
             r.percent()
         );
         let _ = writeln!(o, "// Units: centimetres -> metres; Unreal (X, Y, Z) -> (X, Z, Y), Z up -> Y up (mirrored).");
-        let _ = writeln!(o, "// Placeholders: materials -> built-in sprite (blend guessed), meshes -> built-in shapes.");
+        if r.placeholders.is_empty() {
+            let _ = writeln!(o, "// Materials, textures and meshes: read from their Unreal packages (see the report).");
+        } else {
+            let _ = writeln!(o, "// Placeholders where a material or mesh package was missing: built-in sprite (blend guessed) or shape.");
+        }
         let _ = writeln!(o, "(");
         let _ = writeln!(o, "    name: {},", quote(&self.sys.name));
         if self.sys.warmup_time > 0.0 {
@@ -1757,11 +2075,12 @@ fn init_particle<'m>(cx: &mut Cx, e: &NEmitter, m: &'m NModule, o: &mut Out, use
 
     // Mesh scale -> Initialize Mesh, when there is a mesh renderer.
     if e.renderers.iter().any(|r| r.class.contains("Mesh")) {
-        // The meshes are not in the package: the placeholder shape (1 m) is
+        // Real meshes are in metres already; a placeholder shape (1 m) is
         // drawn at PLACEHOLDER_MESH_SIZE per unit of Niagara's mesh scale.
         let mut im = FxModule::new("Initialize Mesh");
         let v = size(cx, o, mode(m, "Mesh Scale Mode"), "Mesh ", Ty::Vec3, Unit::None).unwrap_or(Fx::Lit(Lit::Vec3([1.0; 3])));
-        im.set("Mesh Scale", scale_fx(v, PLACEHOLDER_MESH_SIZE));
+        let unit = cx.mesh_unit(e);
+        im.set("Mesh Scale", if unit == 1.0 { v } else { scale_fx(v, unit) });
         o.mods.push(im);
     }
     // Ribbon width -> Initialize Ribbon, when there is a ribbon renderer.

@@ -1108,3 +1108,22 @@ fn short_value(v: &NValue) -> String {
         other => format!("{other:?}"),
     }
 }
+
+/// The custom HLSL nodes of a module script saved in its own package (a
+/// NiagaraScript asset such as `NM_Boids`), read like a scratch pad's.
+pub fn module_script_hlsl(pkg: &Package) -> Result<Vec<HlslNode>, String> {
+    let si = (0..pkg.exports.len())
+        .find(|&i| pkg.export_class(i) == "NiagaraScript" && pkg.exports[i].is_asset)
+        .ok_or("no NiagaraScript asset in the package")?;
+    let r = Interp { pkg };
+    let mut hlsl = Vec::new();
+    let g = r.script_source(si).and_then(|s| r.graph(s)).ok_or("the script has no graph")?;
+    for n in r.nodes(g) {
+        if r.class(n) == "NiagaraNodeCustomHlsl" {
+            if let Some(h) = find(r.props(n), "CustomHlsl").and_then(Value::as_str) {
+                hlsl.push(r.hlsl_node(n, h));
+            }
+        }
+    }
+    Ok(hlsl)
+}

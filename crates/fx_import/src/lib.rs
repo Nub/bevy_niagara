@@ -68,13 +68,21 @@ pub fn convert_file(file: &std::path::Path, out: &std::path::Path) -> Result<Con
     let pkg = Package::read(&bytes).map_err(|e| e.to_string())?;
     let sys = niagara::read_system(&pkg)?;
     let source = file.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let conv = convert::convert(&sys, &source);
     let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| sys.name.clone());
+    let assets = convert::AssetOut::new(material::Store::for_system(file), format!("{stem}_assets"));
+    let conv = convert::convert_with_assets(&sys, &source, Some(assets));
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let ron_path = out.join(format!("{stem}.fx.ron"));
     let report_path = out.join(format!("{stem}.report.md"));
     std::fs::write(&ron_path, &conv.ron).map_err(|e| e.to_string())?;
     std::fs::write(&report_path, conv.report.markdown()).map_err(|e| e.to_string())?;
+    for (rel, bytes) in &conv.files {
+        let p = out.join(rel);
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&p, bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
     Ok(Converted {
         ron_path,
         report_path,
