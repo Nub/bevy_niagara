@@ -30,10 +30,12 @@
 //! uniform writes from fixed-size scratch arrays.
 
 mod mesh_data;
+mod scene;
 pub mod stats;
 mod textures;
 
 pub use stats::{EffectStats, EmitterStats, FxStats, FxStatsData, FxStatsPlugin};
+pub use scene::{FxRayTracingScene, FxSceneDepth};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -239,6 +241,7 @@ impl Plugin for FxPlugin {
             .insert_resource(builtins)
             .init_resource::<LightPools>()
             .add_systems(PostUpdate, advance_clock)
+            .add_systems(PostUpdate, scene::request_depth_binding)
             .add_systems(
                 PostUpdate,
                 apply_particle_lights.before(TransformSystems::Propagate),
@@ -251,6 +254,8 @@ impl Plugin for FxPlugin {
             .insert_resource(inbox)
             .insert_resource(FxDeterministic(self.deterministic))
             .init_resource::<ExtractedEffects>()
+            .init_resource::<FxSceneDepth>()
+            .init_resource::<FxRayTracingScene>()
             .init_resource::<RendererAssetsCache>()
             .init_resource::<PendingMeshes>()
             .add_render_command::<Transparent3d, DrawParticlesCommands>()
@@ -268,7 +273,8 @@ impl Plugin for FxPlugin {
             .add_systems(
                 RenderGraph,
                 simulate.in_set(FxRenderGraphSystems::Simulate).before(camera_driver),
-            );
+            )
+            .add_systems(RenderGraph, scene::capture_scene_depth.after(camera_driver));
     }
 }
 
@@ -726,6 +732,10 @@ struct EffectInstance {
     system: Arc<CookedSystem>,
     seed: u32,
     gpu: GpuEffect,
+    /// Built with the ray-tracing scene layout.
+    ray_tracing: bool,
+    /// [`FxSceneDepth::generation`] the scene bind group was made for.
+    depth_generation: u64,
     draws: Vec<RendererDraw>,
     world_from_local: Mat4,
     seen: u64,
@@ -881,6 +891,7 @@ fn prepare_effects(
     images: Res<RenderAssets<GpuImage>>,
     views: Query<&ExtractedView>,
     deterministic: Res<FxDeterministic>,
+    rt: Res<FxRayTracingScene>,
 ) {
     let state = &mut *state;
     state.frame += 1;
@@ -913,11 +924,18 @@ fn prepare_effects(
 
     for ex in &extracted.effects {
         let rebuild = match state.effects.get(&ex.main) {
-            Some(inst) => !Arc::ptr_eq(&inst.system, &ex.system) || inst.seed != ex.seed,
+            Some(inst) => {
+                !Arc::ptr_eq(&inst.system, &ex.system)
+                    || inst.seed != ex.seed
+                    || inst.ray_tracing != rt.layout.is_some()
+            }
             None => true,
         };
         if rebuild {
-            let gpu = match GpuEffect::new(wd, &ex.system, ex.seed) {
+            let options = fx_gpu::GpuOptions {
+                ray_tracing_layout: rt.layout.as_ref(),
+            };
+            let gpu = match GpuEffect::with_options(wd, &ex.system, ex.seed, options) {
                 Ok(g) => g,
                 Err(e) => {
                     error!("effect \"{}\" cannot run on the GPU: {e}", ex.system.name);
@@ -954,6 +972,8 @@ fn prepare_effects(
                     system: ex.system.clone(),
                     seed: ex.seed,
                     gpu,
+                    ray_tracing: rt.layout.is_some(),
+                    depth_generation: u64::MAX,
                     draws,
                     world_from_local: ex.world_from_local,
                     seen: frame,
@@ -1363,11 +1383,30 @@ pub const NO_VIEW: ViewParams = ViewParams {
 fn simulate(
     mut ctx: RenderContext,
     queue: Res<RenderQueue>,
+    device: Res<RenderDevice>,
     mut state: ResMut<FxState>,
     extracted: Res<ExtractedEffects>,
     views: Query<&ExtractedView>,
+    depth: Res<FxSceneDepth>,
+    rt: Res<FxRayTracingScene>,
 ) {
     let state = &mut *state;
+    // What scene collisions read this frame.
+    for inst in state.effects.values_mut() {
+        if !inst.gpu.uses_scene() {
+            continue;
+        }
+        if inst.depth_generation != depth.generation {
+            inst.gpu
+                .set_scene_depth(device.wgpu_device(), depth.texture_view());
+            inst.depth_generation = depth.generation;
+        }
+        inst.gpu
+            .set_scene_view(&queue, inst.world_from_local, depth.view.as_ref());
+        if inst.gpu.uses_ray_tracing() {
+            inst.gpu.set_ray_tracing_scene(rt.bind_group.clone());
+        }
+    }
     let recorder = ctx.diagnostic_recorder();
     let diagnostics = recorder.as_deref();
     let encoder = ctx.command_encoder();

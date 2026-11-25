@@ -8,7 +8,7 @@ cargo run -p fx_core --bin fxc -- cook  effects/samples/fountain.fx.ron   # writ
 cargo run -p fx_core --bin fxc -- modules                                  # modules, stages, inputs
 ```
 
-Shape: `( name, user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, emitter_spawn, emitter_update, particle_spawn, particle_update, renderers: [ ... ] ) ] )`.
+Shape: `( name, user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
 Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: { "Input Name": <input> })`.
 
 **Renderers** (Niagara's emitter renderers) say how particles are drawn. `renderers` is a list of `Sprite(( ... ))`, `Ribbon(( ... ))`, `Mesh(( ... ))` and `Light(( ... ))`; an emitter without it draws nothing. Every field is optional and defaults to Niagara's value. `Sprite`:
@@ -79,6 +79,14 @@ Every input states its type:
 | dynamic input (nestable) | `Dynamic("Multiply Vec3 by Float", { "A": Dynamic("Random Unit Vec3"), "B": Dynamic("Uniform Ranged Float", { "Minimum": Float(1.0), "Maximum": Float(3.0) }) })` |
 
 Dynamic inputs are Niagara's (Uniform Ranged, Random Range by Uniform, `<Type> from Curve` at any normalised index, Add/Subtract/Multiply/Lerp, Make/Break, Normalize, Length, Distance, Sine/Cosine over Time, Select by Bool/Int, Random from List, Random Unit Vec3, Normalized Emitter/System Age, Compare Floats). Their inputs take any form above, nested; left-out inputs take defaults; lists are `[Float(1.0), Float(2.0)]`; a curve input is a bare curve `Float([(0.0, 1.0), (1.0, 0.0)])`. `fxc modules` lists them with their types; `samples/dynamic_inputs.fx.ron` uses most of them.
+
+**Collisions and events** (Niagara's Collision module, event generators and event handlers):
+
+- `Collision` (in `particle_update`, after `Solve Forces and Velocity`) moves particles that crossed a surface back onto it and bounces (`Restitution`, `Friction`; slower than `Rest Speed` rests), stops or kills them. `"Collision Type": Plane` is an analytic plane (`Plane Normal`, `Plane Origin`; same on CPU and GPU); `SceneDepth` reads the first 3D camera's depth buffer (GPU, on-screen only, one frame late); `RayTraced` traces rays in Solari's scene (with `FxSolariPlugin`; opaque geometry, previous frame's TLAS), else falls back to `SceneDepth`. On the CPU, `SceneDepth` and `RayTraced` hit `Simulation::colliders` set by the host.
+- `Generate Death Event`, `Generate Collision Event` (after `Collision`) and `Generate Location Event` (with `Event Probability`) in `particle_update` write events: position, velocity, normal (collisions), age and the particle's UniqueID.
+- A receiving emitter lists `event_handlers: [(source: "Shells", event: Death, execution_mode: SpawnedParticles, spawn_number: 150, max_events_per_frame: 0, modules: [ ... ])]`. `SpawnedParticles` spawns `spawn_number` particles per event, which run `particle_spawn` then `modules`; `EveryParticle` runs `modules` on every living particle once per event (not on its own events). `modules` read `Event.Position`, `Event.Velocity`, `Event.Normal`, `Event.Age`, `Event.ParticleID`; `Receive Death/Collision/Location Event` puts the particle at the event (`Position Offset`, `Inherit Velocity Scale`). Events are ordered by source UniqueID; `max_events_per_frame` (0 = all) keeps the first ones. A receiver gets an earlier emitter's (or its own) events the same step, a later emitter's the next step.
+
+`samples/bouncing_sparks.fx.ron` (floor collisions, impact flashes from collision events) and `samples/fireworks.fx.ron` (trails from location events, bursts from death events) show both.
 
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.

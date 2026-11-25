@@ -169,7 +169,7 @@ pub struct GpuEffect {
 #[derive(Default)]
 pub struct GpuOptions<'a> {
     /// The layout of the ray-tracing scene bind group (Solari's scene
-    /// bindings, binding 5 the TLAS). Given, emitters with RayTraced
+    /// bindings; binding 6, the previous frame's TLAS, is read). Given, emitters with RayTraced
     /// collisions trace rays whenever [`GpuEffect::set_ray_tracing_scene`]
     /// has provided a bind group; otherwise they use the depth buffer.
     pub ray_tracing_layout: Option<&'a wgpu::BindGroupLayout>,

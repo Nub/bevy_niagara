@@ -128,6 +128,14 @@ fn list_modules() {
             println!("  - {}: {} = {}  ({})", f.name, f.form, f.default, f.doc);
         }
     }
+    println!("\nEvent handlers (emitter field `event_handlers: [( ... )]`):");
+    for (name, form, default, doc) in fx_core::events::HANDLER_FIELDS {
+        println!("  - {name}: {form} = {default}  ({doc})");
+    }
+    println!(
+        "  handler modules read: {}",
+        fx_core::params::list_builtins(fx_core::params::Namespace::Event)
+    );
     println!("\nDynamic inputs (`Dynamic(\"Name\", {{ inputs }})`, nestable; any input of the type they give):");
     for d in fx_core::dynamic::DYNAMIC_INPUTS.iter() {
         println!("Dynamic \"{}\" -> {}\n  {}", d.name, d.ty.name(), d.doc);

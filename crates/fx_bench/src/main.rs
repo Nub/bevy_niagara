@@ -107,6 +107,28 @@ pub const SCENES: &[SceneDef] = &[
         target: [0.0, 1.0, 0.0],
         budget_gpu_ms: Some(0.2),
     },
+    // Events and collisions.
+    SceneDef {
+        name: "fireworks",
+        file: "bench/scenes/fireworks.fx.ron",
+        camera: [0.0, 5.0, 15.0],
+        target: [0.0, 5.5, 0.0],
+        budget_gpu_ms: Some(0.2),
+    },
+    SceneDef {
+        name: "collision_100k",
+        file: "bench/scenes/collision_100k.fx.ron",
+        camera: [0.0, 2.0, 6.0],
+        target: [0.0, 0.5, 0.0],
+        budget_gpu_ms: None,
+    },
+    SceneDef {
+        name: "collision_depth_100k",
+        file: "bench/scenes/collision_depth_100k.fx.ron",
+        camera: [0.0, 2.0, 6.0],
+        target: [0.0, 0.5, 0.0],
+        budget_gpu_ms: None,
+    },
 ];
 
 /// Relative slowdown that counts as a regression.

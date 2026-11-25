@@ -110,7 +110,17 @@ pub fn run(def: &SceneDef, frames: u32, warm_frames: u32, (w, h): (u32, u32)) ->
     let (camera, target) = (def.camera, def.target);
     app.add_systems(
         Startup,
-        move |mut commands: Commands, mut images: ResMut<Assets<Image>>| {
+        move |mut commands: Commands,
+              mut images: ResMut<Assets<Image>>,
+              mut meshes: ResMut<Assets<Mesh>>,
+              mut materials: ResMut<Assets<StandardMaterial>>| {
+            // Scenes whose particles collide with the scene get a floor to hit.
+            if system.emitters.iter().any(|e| e.uses_scene_collision()) {
+                commands.spawn((
+                    Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
+                    MeshMaterial3d(materials.add(StandardMaterial::default())),
+                ));
+            }
             let mut img = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
             img.texture_descriptor.usage |= TextureUsages::COPY_SRC;
             commands.spawn((

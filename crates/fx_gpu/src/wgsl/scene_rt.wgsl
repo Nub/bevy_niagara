@@ -1,9 +1,11 @@
 
 // ---- scene collisions: ray tracing (bind group 3, Solari's scene layout) ----
-// Only the TLAS is read. Opaque geometry only, so ray-traced particle proxies
-// (alpha-tested, non-opaque) are not hit.
+// Only the previous frame's TLAS is read: the simulation runs before Solari
+// builds this frame's (which then holds the particles' own proxies). Opaque
+// geometry only, so ray-traced particle proxies (alpha-masked, non-opaque)
+// and alpha-masked scene geometry are not hit.
 
-@group(3) @binding(5) var tlas: acceleration_structure;
+@group(3) @binding(6) var tlas: acceleration_structure;
 
 const RT_CULL_NO_OPAQUE: u32 = 0x80u;
 

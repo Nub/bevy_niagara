@@ -260,6 +260,22 @@ pub fn reference() -> String {
         s.push_str(&renderer_doc(kind, fields));
         s.push('\n');
     }
+    s.push_str(&event_handler_doc());
+    s
+}
+
+/// The `event_handlers` fields and the `Event.` parameters handler modules read.
+pub fn event_handler_doc() -> String {
+    let mut s = String::from(
+        "# Event handlers\n\nEmitter field `event_handlers: [(source: \"Emitter\", event: Death, ...)]` (Niagara's event handlers). Events are written by Generate Death/Collision/Location Event in the source's `particle_update`.\n\n| Field | Values | Default | Meaning |\n|---|---|---|---|\n",
+    );
+    for (name, form, default, doc) in crate::events::HANDLER_FIELDS {
+        let _ = writeln!(s, "| {name} | {form} | {default} | {doc} |");
+    }
+    s.push_str("\nHandler modules read:\n\n");
+    for b in crate::params::EVENT {
+        let _ = writeln!(s, "- `Event.{}` ({}): {}", b.name, b.ty.name(), b.doc);
+    }
     s
 }
 

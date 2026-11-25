@@ -97,6 +97,10 @@ impl Plugin for FxSolariPlugin {
                 write_proxies
                     .after(FxRenderGraphSystems::Simulate)
                     .before(RenderGraphSystems::Begin),
+            )
+            .add_systems(
+                RenderGraph,
+                share_ray_tracing_scene.before(FxRenderGraphSystems::Simulate),
             );
     }
 }
@@ -679,4 +683,19 @@ mod tests {
         // Solari indexes an emissive mesh's triangles with 16 bits.
         assert!(4 * MAX_SLOTS <= u16::MAX as u32);
     }
+}
+
+/// Gives fx_render Solari's scene bindings, so Collision modules of type
+/// RayTraced trace rays against the scene (its previous frame's TLAS).
+fn share_ray_tracing_scene(
+    bindings: Option<Res<bevy::solari::scene::RaytracingSceneBindings>>,
+    cache: Res<bevy::render::render_resource::PipelineCache>,
+    mut rt: ResMut<fx_render::FxRayTracingScene>,
+) {
+    let Some(b) = bindings else { return };
+    if rt.layout.is_none() {
+        let layout = cache.get_bind_group_layout(&b.bind_group_layout);
+        rt.layout = Some((*layout).clone());
+    }
+    rt.bind_group = b.bind_group.as_ref().map(|g| (**g).clone());
 }

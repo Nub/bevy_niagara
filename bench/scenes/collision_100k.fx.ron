@@ -1,0 +1,45 @@
+// Bench scene: ~100k sparks bouncing on the floor plane (Collision, Plane),
+// writing a Collision event per impact; a second emitter spawns a flash for
+// the first 200 impacts each step (event sort + handler spawn).
+(
+    name: "Collision 100k",
+    emitters: [
+        (
+            name: "Sparks",
+            sim_target: Gpu,
+            max_particles: 110000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(40000.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.0), Float(3.0)),
+                    "Position": RandomRange(Vec3((-1.5, 1.5, -1.5)), Vec3((1.5, 2.5, 1.5))),
+                    "Color": Color((3.0, 1.6, 0.6, 1.0)),
+                    "Sprite Size": Vec2((0.01, 0.01)),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(70.0), "Velocity Strength": RandomRange(Float(1.0), Float(3.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": Plane,
+                    "Restitution": Float(0.5),
+                    "Friction": Float(0.2),
+                    "Rest Speed": Float(0.4),
+                }),
+                (module: "Generate Collision Event"),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Flashes",
+            sim_target: Gpu,
+            max_particles: 4000,
+            event_handlers: [(source: "Sparks", event: Collision, spawn_number: 1, max_events_per_frame: 200, modules: [(module: "Receive Collision Event")])],
+            particle_spawn: [(module: "Initialize Particle", inputs: { "Lifetime": Float(0.15), "Color": Color((6.0, 4.0, 2.0, 1.0)), "Sprite Size": Vec2((0.04, 0.04)) })],
+            particle_update: [(module: "Particle State")],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

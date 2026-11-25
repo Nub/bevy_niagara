@@ -108,6 +108,14 @@ impl CookedEmitter {
             .chain(self.event_handlers.iter().flat_map(|h| h.modules.iter()))
     }
 
+    /// Whether a Collision module reads the scene (SceneDepth or RayTraced).
+    pub fn uses_scene_collision(&self) -> bool {
+        self.particle_update.iter().any(|m| {
+            modules::from_id(m.module) == Some(ModuleKind::Collision)
+                && !matches!(m.inputs.first(), Some(CookedInput::Const(Value::Int(0))))
+        })
+    }
+
     /// Whether the particle update writes events of `kind`.
     pub fn generates(&self, kind: EventKind) -> bool {
         let generator = match kind {
