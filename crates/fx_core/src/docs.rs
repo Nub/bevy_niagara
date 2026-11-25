@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use crate::diag::suggest;
 use crate::modules::{MODULES, ModuleDef};
-use crate::render::{RendererField, SPRITE_FIELDS};
+use crate::render::{RENDERER_FIELDS, RendererField};
 use crate::types::Value;
 
 /// A value in `.fx.ron` source form, e.g. `Vec3((0.0, -9.81, 0.0))`.
@@ -47,7 +47,9 @@ pub fn module_list() -> String {
     for m in MODULES {
         let _ = writeln!(s, "- \"{}\" [{}]: {}", m.name, stages(m), m.doc);
     }
-    s.push_str("- Renderer \"Sprite\" (emitter field `renderers: [Sprite(( ... ))]`)\n");
+    for (kind, _) in RENDERER_FIELDS {
+        let _ = writeln!(s, "- Renderer \"{kind}\" (emitter field `renderers: [{kind}(( ... ))]`)");
+    }
     s
 }
 
@@ -60,20 +62,27 @@ pub fn find_module(name: &str) -> Option<&'static ModuleDef> {
 /// Markdown reference for one module, or for the `Sprite` renderer.
 /// The error names the closest match.
 pub fn module_doc(name: &str) -> Result<String, String> {
-    if name.trim().eq_ignore_ascii_case("sprite") {
-        return Ok(renderer_doc("Sprite", SPRITE_FIELDS));
+    if let Some((kind, fields)) = RENDERER_FIELDS
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name.trim()))
+    {
+        return Ok(renderer_doc(kind, fields));
     }
     let Some(m) = find_module(name) else {
-        let names = MODULES.iter().map(|m| m.name).chain(["Sprite"]);
+        let names = MODULES
+            .iter()
+            .map(|m| m.name)
+            .chain(RENDERER_FIELDS.iter().map(|(k, _)| *k));
         return Err(match suggest(name.trim(), names) {
             Some(s) => format!("unknown module \"{name}\"; did you mean \"{s}\"?"),
             None => format!(
-                "unknown module \"{name}\"; known: {}, Sprite",
+                "unknown module \"{name}\"; known: {} and the renderers {}",
                 MODULES
                     .iter()
                     .map(|m| format!("\"{}\"", m.name))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                RENDERER_FIELDS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ")
             ),
         });
     };
@@ -135,7 +144,10 @@ pub fn reference() -> String {
         s.push_str(&module_doc(m.name).expect("known module"));
         s.push('\n');
     }
-    s.push_str(&renderer_doc("Sprite", SPRITE_FIELDS));
+    for (kind, fields) in RENDERER_FIELDS {
+        s.push_str(&renderer_doc(kind, fields));
+        s.push('\n');
+    }
     s
 }
 
@@ -154,6 +166,9 @@ mod tests {
         }
         assert!(module_doc("gravity force").is_ok());
         assert!(module_doc("Sprite").unwrap().contains("blend_mode"));
+        for (kind, _) in RENDERER_FIELDS {
+            assert!(module_doc(kind).is_ok(), "{kind}");
+        }
         let e = module_doc("Gravity Forse").unwrap_err();
         assert!(e.contains("did you mean \"Gravity Force\""), "{e}");
     }

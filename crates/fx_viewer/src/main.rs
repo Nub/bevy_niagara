@@ -215,7 +215,7 @@ fn main() -> std::process::ExitCode {
     };
     let path = o.path.as_ref().map(|p| std::path::absolute(p).unwrap_or(p.clone()));
     let viewer = Viewer {
-        path,
+        path: path.clone(),
         mtime: None,
         check_timer: Timer::from_seconds(0.2, TimerMode::Repeating),
         system: None,
@@ -240,7 +240,13 @@ fn main() -> std::process::ExitCode {
     };
     App::new()
         .add_plugins((
-            DefaultPlugins.set(WindowPlugin {
+            DefaultPlugins
+                .set(AssetPlugin {
+                    // Textures and materials resolve next to the first effect opened.
+                    file_path: asset_root(path.as_deref()),
+                    ..default()
+                })
+                .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "fxviewer".into(),
                     resolution: WindowResolution::new(o.width, o.height),
@@ -270,6 +276,18 @@ fn main() -> std::process::ExitCode {
         )
         .run();
     std::process::ExitCode::SUCCESS
+}
+
+/// The folder holding the effect file: its `texture` and `material` paths are relative to it.
+fn asset_root(effect: Option<&std::path::Path>) -> String {
+    let dir = effect
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::canonicalize(&dir)
+        .unwrap_or(dir)
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ------------------------------------------------------------------- setup
@@ -460,6 +478,7 @@ fn apply_effect(
                 ParticleEffect {
                     system: sys,
                     seed: v.seed,
+                    meshes: Vec::new(),
                 },
                 Transform::IDENTITY,
             ))

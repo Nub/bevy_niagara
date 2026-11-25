@@ -19,6 +19,10 @@ impl Server {
     fn start() -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_fx_mcp"))
             .current_dir(root())
+            // Headless, as in CI: fxpreview must not need a display.
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
