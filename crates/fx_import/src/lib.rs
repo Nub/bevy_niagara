@@ -20,6 +20,7 @@ pub mod dump;
 pub mod fx;
 pub mod hlsl;
 pub mod material;
+pub mod mesh;
 pub mod niagara;
 pub mod package;
 pub mod pins;
