@@ -4,9 +4,12 @@
 //!                 [--max-elems N] [--max-bytes N]
 //!   fximport niagara <file.uasset>
 //!   fximport convert <file.uasset> --out DIR
+//!   fximport mesh <file.uasset> --out FILE.glb
 //!
 //! `convert` writes DIR/<name>.fx.ron and DIR/<name>.report.md and exits
-//! with 3 when the written effect does not validate.
+//! with 3 when the written effect does not validate. `mesh` reads a static
+//! mesh's editor mesh description and writes it as glTF binary (metres,
+//! Y up), printing the vertex/triangle counts and bounds.
 //!
 //! Prints the package header, imports and the export tree with each
 //! export's properties. Exits with status 1 when the file cannot be read
@@ -18,7 +21,7 @@ use fx_import::{dump, DumpOptions, Package};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)"
+        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)\n       fximport mesh <file.uasset> --out FILE.glb  (a static mesh as glTF binary, metres, Y up)"
     );
     ExitCode::from(64)
 }
@@ -97,6 +100,38 @@ fn main() -> ExitCode {
                 }
             }
         }
+        return ExitCode::SUCCESS;
+    }
+    if cmd == "mesh" {
+        let (Some(file), Some("--out"), Some(out)) = (args.get(1), args.get(2).map(|s| s.as_str()), args.get(3)) else { return usage() };
+        let bytes = match std::fs::read(file) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let mesh = match Package::read(&bytes).map_err(|e| e.to_string()).and_then(|p| fx_import::mesh::read_static_mesh(&p, &bytes)) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(e) = std::fs::write(out, fx_import::mesh::write_glb(&mesh)) {
+            eprintln!("{out}: {e}");
+            return ExitCode::from(1);
+        }
+        let (lo, hi) = mesh.bounds();
+        println!(
+            "{out}: {} vertices, {} triangles, {} material slots ({}){}; bounds (m) min [{:.4}, {:.4}, {:.4}] max [{:.4}, {:.4}, {:.4}]",
+            mesh.positions.len(),
+            mesh.triangle_count(),
+            mesh.slot_names.len(),
+            mesh.slot_names.join(", "),
+            if mesh.colors.is_some() { ", vertex colours" } else { "" },
+            lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]
+        );
         return ExitCode::SUCCESS;
     }
     if cmd != "dump" {
