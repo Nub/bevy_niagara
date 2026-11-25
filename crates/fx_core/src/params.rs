@@ -80,6 +80,17 @@ pub mod attr {
     pub const INITIAL_SPRITE_SIZE: u16 = 11;
     pub const PHYSICS_FORCE: u16 = 12;
     pub const PHYSICS_DRAG: u16 = 13;
+    pub const SCALE: u16 = 14;
+    pub const MESH_ORIENTATION: u16 = 15;
+    pub const RIBBON_ID: u16 = 16;
+    pub const RIBBON_WIDTH: u16 = 17;
+    pub const RIBBON_TWIST: u16 = 18;
+    pub const RIBBON_LINK_ORDER: u16 = 19;
+    pub const LIGHT_RADIUS: u16 = 20;
+    pub const DYNAMIC_MATERIAL_PARAMETER: u16 = 21;
+    /// Attributes from here on are stored only by emitters that use them
+    /// (see [`crate::cook::CookedEmitter::uses_extended_attributes`]).
+    pub const FIRST_EXTENDED: u16 = SCALE;
 }
 
 /// Particle attributes (`Particles.` namespace), Niagara's names.
@@ -121,6 +132,34 @@ pub const PARTICLES: &[Builtin] = &[
         "Physics.Drag",
         ValueType::Float,
         "drag accumulated this step (cleared by Solve Forces and Velocity)",
+    ),
+    b("Scale", ValueType::Vec3, "mesh scale per axis"),
+    b(
+        "MeshOrientation",
+        ValueType::Quat,
+        "mesh rotation as a quaternion (x, y, z, w)",
+    ),
+    b(
+        "RibbonID",
+        ValueType::Int,
+        "which ribbon the particle joins",
+    ),
+    b("RibbonWidth", ValueType::Float, "ribbon width in metres"),
+    b(
+        "RibbonTwist",
+        ValueType::Float,
+        "degrees around the ribbon direction",
+    ),
+    b(
+        "RibbonLinkOrder",
+        ValueType::Float,
+        "order along the ribbon when the renderer's link_order is Custom",
+    ),
+    b("LightRadius", ValueType::Float, "light radius in metres"),
+    b(
+        "DynamicMaterialParameter",
+        ValueType::Vec4,
+        "free values passed to custom materials",
     ),
 ];
 

@@ -3,10 +3,10 @@
 
 mod common;
 
-use bevy_math::Vec3;
+use bevy_math::{EulerRot, Quat, Vec3, Vec4};
 use common::*;
-use fx_core::sim::Simulation;
 use fx_core::sim::noise::{curl_noise, gradient_noise, lattice_gradient};
+use fx_core::sim::{Simulation, euler_quat, quat_mul, quat_normalize};
 use fx_core::types::Value;
 
 const STATE: &str = r#"(module: "Particle State")"#;
@@ -404,4 +404,218 @@ fn disabled_modules_are_skipped() {
     );
     sim.step(0.25);
     assert_eq!(sim.particles(0)[0].velocity, Vec3::ZERO);
+}
+
+fn assert_quat_close(a: Quat, b: Quat) {
+    assert_vec_close(&a.to_array(), &b.to_array());
+}
+
+#[test]
+fn initialize_ribbon_sets_ribbon_attributes() {
+    let mut sim = single_particle(
+        "",
+        r#"(module: "Initialize Ribbon", inputs: {
+            "Ribbon Width": Float(0.25), "Ribbon Twist": Float(45.0), "Ribbon ID": Int(7), "Ribbon Link Order": Float(3.5) })"#,
+        "",
+    );
+    sim.step(0.25);
+    let p = sim.particles(0)[0];
+    assert_eq!(p.ribbon_width, 0.25);
+    assert_eq!(p.ribbon_twist, 45.0);
+    assert_eq!(p.ribbon_id, 7);
+    assert_eq!(p.ribbon_link_order, 3.5);
+    // Defaults without the module.
+    let mut sim = single_particle("", "", "");
+    sim.step(0.25);
+    let p = sim.particles(0)[0];
+    assert_eq!(
+        (
+            p.ribbon_width,
+            p.ribbon_twist,
+            p.ribbon_id,
+            p.ribbon_link_order
+        ),
+        (0.1, 0.0, 0, 0.0)
+    );
+    assert_eq!(p.light_radius, 1.0);
+    assert_eq!(p.scale, Vec3::ONE);
+    assert_eq!(p.mesh_orientation, Quat::IDENTITY);
+    assert_eq!(p.dynamic_material_parameter, Vec4::ZERO);
+}
+
+#[test]
+fn random_ribbon_ids_cover_the_range() {
+    let src = one_emitter(
+        "",
+        r#"(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(200) })"#,
+        r#"(module: "Initialize Ribbon", inputs: { "Ribbon ID": RandomRange(Int(0), Int(3)) })"#,
+        "",
+    );
+    let mut sim = Simulation::new(compile(&src), 5);
+    sim.step(0.25);
+    let ids: std::collections::BTreeSet<i32> =
+        sim.particles(0).iter().map(|p| p.ribbon_id).collect();
+    assert_eq!(ids.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3]);
+}
+
+#[test]
+fn euler_quat_applies_x_then_y_then_z() {
+    for deg in [
+        Vec3::new(90.0, 0.0, 0.0),
+        Vec3::new(0.0, 90.0, 0.0),
+        Vec3::new(0.0, 0.0, 90.0),
+        Vec3::new(30.0, -45.0, 120.0),
+    ] {
+        let r = deg * (std::f32::consts::PI / 180.0);
+        let want = Quat::from_euler(EulerRot::ZYX, r.z, r.y, r.x);
+        assert_quat_close(euler_quat(deg), want);
+    }
+    // X first: (90, 0, 90) takes +Y to +Z (X turn), which the Z turn keeps; +X goes to +Y.
+    let q = euler_quat(Vec3::new(90.0, 0.0, 90.0));
+    assert_vec_close(&(q * Vec3::Y).to_array(), &[0.0, 0.0, 1.0]);
+    assert_vec_close(&(q * Vec3::X).to_array(), &[0.0, 1.0, 0.0]);
+    // quat_mul is the Hamilton product.
+    let (a, b) = (
+        euler_quat(Vec3::new(10.0, 20.0, 30.0)),
+        euler_quat(Vec3::new(-50.0, 5.0, 70.0)),
+    );
+    assert_quat_close(quat_mul(a, b), a * b);
+    assert_eq!(
+        quat_normalize(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)),
+        Quat::IDENTITY
+    );
+    assert_quat_close(
+        quat_normalize(Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)),
+        Quat::IDENTITY,
+    );
+}
+
+#[test]
+fn initialize_mesh_sets_scale_and_orientation() {
+    let mut sim = single_particle(
+        "",
+        r#"(module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((1.0, 2.0, 3.0)), "Mesh Rotation": Vec3((0.0, 90.0, 0.0)) })"#,
+        "",
+    );
+    sim.step(0.25);
+    let p = sim.particles(0)[0];
+    assert_eq!(p.scale, Vec3::new(1.0, 2.0, 3.0));
+    let h = std::f32::consts::FRAC_PI_4;
+    assert_quat_close(
+        p.mesh_orientation,
+        Quat::from_xyzw(0.0, h.sin(), 0.0, h.cos()),
+    );
+}
+
+#[test]
+fn update_mesh_orientation_integrates_the_rate() {
+    // 90°/s around Y for 4 steps of 0.25 s = 90° around Y; then the orientation stays unit length.
+    let mut sim = single_particle(
+        "",
+        "",
+        r#"(module: "Update Mesh Orientation", inputs: { "Rotation Rate": Vec3((0.0, 90.0, 0.0)) })"#,
+    );
+    sim.step(0.25); // spawn
+    for _ in 0..4 {
+        sim.step(0.25);
+    }
+    let q = sim.particles(0)[0].mesh_orientation;
+    assert_quat_close(q, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+    assert_close(q.length(), 1.0);
+    // Composed on the right: starting from 90° about X, a Y rate turns about the mesh's own Y.
+    let mut sim = single_particle(
+        "",
+        r#"(module: "Initialize Mesh", inputs: { "Mesh Rotation": Vec3((90.0, 0.0, 0.0)) })"#,
+        r#"(module: "Update Mesh Orientation", inputs: { "Rotation Rate": Vec3((0.0, 180.0, 0.0)) })"#,
+    );
+    sim.step(0.5);
+    sim.step(0.5);
+    let want = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)
+        * Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    assert_quat_close(sim.particles(0)[0].mesh_orientation, want);
+}
+
+#[test]
+fn initialize_light_and_dynamic_material_parameters() {
+    let mut sim = single_particle(
+        "",
+        r#"(module: "Initialize Light", inputs: { "Light Radius": Float(2.5) }),
+           (module: "Initialize Particle", inputs: { "Lifetime": Float(1.0) })"#,
+        &format!(
+            r#"{STATE}, (module: "Dynamic Material Parameters", inputs: {{ "Dynamic Material Parameter": CurveOverAge(Vec4([(0.0, (0.0, 0.0, 0.0, 0.0)), (1.0, (4.0, 8.0, 12.0, 16.0))])) }}),
+               (module: "Initialize Light", inputs: {{ "Light Radius": Link(Float, "Particles.NormalizedAge") }})"#
+        ),
+    );
+    sim.step(0.25);
+    let p = sim.particles(0)[0];
+    assert_eq!(p.light_radius, 2.5);
+    assert_eq!(p.dynamic_material_parameter, Vec4::ZERO);
+    sim.step(0.25);
+    let p = sim.particles(0)[0];
+    assert_eq!(p.dynamic_material_parameter, Vec4::new(1.0, 2.0, 3.0, 4.0));
+    assert_eq!(p.light_radius, 0.25);
+}
+
+#[test]
+fn extended_attributes_are_linkable() {
+    // Add Velocity linked to Particles.Scale.
+    let mut sim = single_particle(
+        "",
+        r#"(module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((1.0, 2.0, 3.0)) }),
+           (module: "Add Velocity", inputs: { "Velocity": Link(Vec3, "Particles.Scale") })"#,
+        "",
+    );
+    sim.step(0.25);
+    assert_eq!(sim.particles(0)[0].velocity, Vec3::new(1.0, 2.0, 3.0));
+    let src = one_emitter(
+        "",
+        r#"(module: "Spawn Rate")"#,
+        r#"(module: "Add Velocity", inputs: { "Velocity": Link(Vec3, "Particles.Scale") })"#,
+        "",
+    );
+    assert!(compile(&src).emitters[0].uses_extended_attributes());
+    let src = one_emitter(
+        "",
+        r#"(module: "Spawn Rate")"#,
+        r#"(module: "Add Velocity", inputs: { "Velocity": Link(Vec3, "Particles.Position") })"#,
+        "",
+    );
+    assert!(!compile(&src).emitters[0].uses_extended_attributes());
+    let src = one_emitter(
+        "",
+        r#"(module: "Spawn Rate")"#,
+        "",
+        r#"(module: "Initialize Light")"#,
+    );
+    assert!(compile(&src).emitters[0].uses_extended_attributes());
+}
+
+#[test]
+fn curl_noise_pan_moves_the_field_with_time() {
+    // Pan (1, 0, 0) per second: the force at step n samples the field at x = Engine.Time.
+    // At t = 1.0 (start of the 5th step, dt 0.25) the sample point is the lattice point (1, 0, 0).
+    let mut sim = single_particle(
+        "",
+        "",
+        r#"(module: "Curl Noise Force", inputs: { "Pan Noise Field": Vec3((1.0, 0.0, 0.0)) })"#,
+    );
+    for _ in 0..4 {
+        sim.step(0.25);
+    }
+    assert_eq!(sim.time, 1.0);
+    sim.step(0.25);
+    assert_eq!(sim.particles(0)[0].force.to_array(), {
+        let mut want = Vec3::ZERO;
+        for t in [0.25f32, 0.5, 0.75, 1.0] {
+            want += curl_noise(Vec3::new(t, 0.0, 0.0));
+        }
+        want.to_array()
+    });
+    let at_one = curl_noise(Vec3::X);
+    let (g0, g1, g2) = (
+        lattice_gradient(1, 0, 0, 0),
+        lattice_gradient(1, 0, 0, 1),
+        lattice_gradient(1, 0, 0, 2),
+    );
+    assert_eq!(at_one, Vec3::new(g2.y - g1.z, g0.z - g2.x, g1.x - g0.y));
 }

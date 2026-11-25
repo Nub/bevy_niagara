@@ -18,7 +18,7 @@
 pub mod noise;
 pub mod rng;
 
-use bevy_math::{Vec2, Vec3, Vec4};
+use bevy_math::{Quat, Vec2, Vec3, Vec4};
 
 use crate::cook::{CookedInput, CookedModule, CookedSystem};
 use crate::modules::{self, ModuleKind};
@@ -42,6 +42,22 @@ pub struct Particle {
     pub initial_sprite_size: Vec2,
     pub force: Vec3,
     pub drag: f32,
+    /// `Particles.Scale`: mesh scale per axis.
+    pub scale: Vec3,
+    /// `Particles.MeshOrientation`.
+    pub mesh_orientation: Quat,
+    /// `Particles.RibbonID`.
+    pub ribbon_id: i32,
+    /// `Particles.RibbonWidth`, metres.
+    pub ribbon_width: f32,
+    /// `Particles.RibbonTwist`, degrees.
+    pub ribbon_twist: f32,
+    /// `Particles.RibbonLinkOrder`.
+    pub ribbon_link_order: f32,
+    /// `Particles.LightRadius`, metres.
+    pub light_radius: f32,
+    /// `Particles.DynamicMaterialParameter`.
+    pub dynamic_material_parameter: Vec4,
     pub alive: bool,
 }
 
@@ -63,6 +79,14 @@ impl Particle {
             initial_sprite_size: Vec2::splat(0.1),
             force: Vec3::ZERO,
             drag: 0.0,
+            scale: Vec3::ONE,
+            mesh_orientation: Quat::IDENTITY,
+            ribbon_id: 0,
+            ribbon_width: 0.1,
+            ribbon_twist: 0.0,
+            ribbon_link_order: 0.0,
+            light_radius: 1.0,
+            dynamic_material_parameter: Vec4::ZERO,
             alive: true,
         }
     }
@@ -84,13 +108,23 @@ impl Particle {
             attr::INITIAL_SPRITE_SIZE => Value::Vec2(self.initial_sprite_size.to_array()),
             attr::PHYSICS_FORCE => Value::Vec3(self.force.to_array()),
             attr::PHYSICS_DRAG => Value::Float(self.drag),
+            attr::SCALE => Value::Vec3(self.scale.to_array()),
+            attr::MESH_ORIENTATION => Value::Quat(self.mesh_orientation.to_array()),
+            attr::RIBBON_ID => Value::Int(self.ribbon_id),
+            attr::RIBBON_WIDTH => Value::Float(self.ribbon_width),
+            attr::RIBBON_TWIST => Value::Float(self.ribbon_twist),
+            attr::RIBBON_LINK_ORDER => Value::Float(self.ribbon_link_order),
+            attr::LIGHT_RADIUS => Value::Float(self.light_radius),
+            attr::DYNAMIC_MATERIAL_PARAMETER => {
+                Value::Vec4(self.dynamic_material_parameter.to_array())
+            }
             _ => Value::Float(0.0),
         }
     }
 
     /// Bit pattern of every field, for exact comparisons and hashing.
     pub fn bits(&self) -> Vec<u32> {
-        let mut v = Vec::with_capacity(28);
+        let mut v = Vec::with_capacity(46);
         let mut f = |xs: &[f32]| v.extend(xs.iter().map(|x| x.to_bits()));
         f(&self.position.to_array());
         f(&self.velocity.to_array());
@@ -107,6 +141,16 @@ impl Particle {
         f(&self.initial_sprite_size.to_array());
         f(&self.force.to_array());
         f(&[self.drag]);
+        f(&self.scale.to_array());
+        f(&self.mesh_orientation.to_array());
+        f(&[
+            f32::from_bits(self.ribbon_id as u32),
+            self.ribbon_width,
+            self.ribbon_twist,
+            self.ribbon_link_order,
+            self.light_radius,
+        ]);
+        f(&self.dynamic_material_parameter.to_array());
         v.push(self.unique_id);
         v.push(self.alive as u32);
         v
@@ -364,6 +408,46 @@ pub fn basis(n: Vec3) -> (Vec3, Vec3) {
     )
 }
 
+/// Half of a degree in radians: Euler angles in degrees become half-angles.
+const HALF_RADIANS_PER_DEGREE: f32 = std::f32::consts::PI / 360.0;
+
+/// Quaternion `(x, y, z, w)` rotating by Euler angles `deg` (degrees about
+/// X, Y and Z, X applied first): `qz * qy * qx`, written out. The GPU's
+/// `euler_quat` in `sim_common.wgsl` is the same formula.
+pub fn euler_quat(deg: Vec3) -> Quat {
+    let h = deg * HALF_RADIANS_PER_DEGREE;
+    let (sx, cx) = (h.x.sin(), h.x.cos());
+    let (sy, cy) = (h.y.sin(), h.y.cos());
+    let (sz, cz) = (h.z.sin(), h.z.cos());
+    Quat::from_xyzw(
+        cz * cy * sx - sz * sy * cx,
+        cz * sy * cx + sz * cy * sx,
+        sz * cy * cx - cz * sy * sx,
+        cz * cy * cx + sz * sy * sx,
+    )
+}
+
+/// Hamilton product `a * b` (rotation `b` first, then `a`), written out so
+/// the GPU's `quat_mul` matches it operation for operation.
+pub fn quat_mul(a: Quat, b: Quat) -> Quat {
+    Quat::from_xyzw(
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    )
+}
+
+/// `q` scaled to unit length, or the identity if its length is 0 or not finite.
+pub fn quat_normalize(q: Quat) -> Quat {
+    let rl = 1.0 / Vec4::from_array(q.to_array()).length();
+    if rl > 0.0 && rl <= f32::MAX {
+        Quat::from_xyzw(q.x * rl, q.y * rl, q.z * rl, q.w * rl)
+    } else {
+        Quat::IDENTITY
+    }
+}
+
 fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandKey) {
     let Some(kind) = modules::from_id(m.module) else {
         return;
@@ -406,7 +490,8 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             let strength = input(0, p).as_f32();
             let freq = input(1, p).as_f32();
             let offset = input(2, p).as_vec3();
-            p.force += noise::curl_noise(p.position * freq + offset) * strength;
+            let pan = input(3, p).as_vec3();
+            p.force += noise::curl_noise(p.position * freq + offset + pan * env.time) * strength;
         }
         ModuleKind::ScaleColor => {
             let rgb = input(0, p).as_vec3();
@@ -440,6 +525,27 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             if input(0, p).as_bool() {
                 p.alive = false;
             }
+        }
+        ModuleKind::InitializeRibbon => {
+            p.ribbon_width = input(0, p).as_f32();
+            p.ribbon_twist = input(1, p).as_f32();
+            p.ribbon_id = input(2, p).as_i32();
+            p.ribbon_link_order = input(3, p).as_f32();
+        }
+        ModuleKind::InitializeMesh => {
+            p.scale = input(0, p).as_vec3();
+            p.mesh_orientation = euler_quat(input(1, p).as_vec3());
+        }
+        ModuleKind::UpdateMeshOrientation => {
+            let rate = input(0, p).as_vec3();
+            let step = euler_quat(rate * env.dt);
+            p.mesh_orientation = quat_normalize(quat_mul(p.mesh_orientation, step));
+        }
+        ModuleKind::InitializeLight => {
+            p.light_radius = input(0, p).as_f32();
+        }
+        ModuleKind::DynamicMaterialParameters => {
+            p.dynamic_material_parameter = input(0, p).as_vec4();
         }
         ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
     }

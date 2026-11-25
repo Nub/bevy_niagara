@@ -1,0 +1,11 @@
+// expect: 8: module "Update Mesh Orientation" cannot be used in `particle_spawn`
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_spawn: [
+            (module: "Update Mesh Orientation"),
+        ],
+    )],
+)

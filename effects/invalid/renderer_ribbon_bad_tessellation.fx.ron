@@ -1,0 +1,9 @@
+// expect: 7: `tessellation_factor` must be a whole number from 1 to 16
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Ribbon((tessellation_factor: 32))],
+    )],
+)

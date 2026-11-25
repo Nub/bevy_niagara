@@ -1,0 +1,149 @@
+// Shared by every particle renderer (sprite, ribbon, mesh) and by custom
+// particle materials: the renderer uniform, the particle buffer, the texture,
+// the vertex → fragment interface with the particle's attributes, and helpers.
+//
+// A custom material is a WESL file whose `fragment` entry point takes
+// `FxVertexOutput` and returns the colour through `finish` (which applies the
+// renderer's blend mode):
+//
+//     import fx_render::particle_io::{FxVertexOutput, sample_particle_texture, finish};
+//
+//     @fragment
+//     fn fragment(in: FxVertexOutput) -> @location(0) vec4<f32> {
+//         let tex = sample_particle_texture(in);   // flipbook-aware
+//         let heat = in.dynamic_param.x;           // Particles.DynamicMaterialParameter
+//         return finish(in.color.rgb * tex.rgb * (1.0 + heat), in.color.a * tex.a);
+//     }
+
+import bevy_pbr::render::mesh_view_bindings::{view, lights};
+
+struct FxRenderer {
+    world_from_local: mat4x4<f32>,
+    custom_facing: vec4<f32>,
+    custom_alignment: vec4<f32>,
+    pivot: vec2<f32>,
+    sub_image: vec2<f32>,       // flipbook columns, rows
+    capacity: u32,
+    facing_mode: u32,
+    alignment: u32,
+    sub_uv_blending: u32,
+    fade_distance: f32,
+    extended: u32,              // the emitter stores Scale, MeshOrientation, Ribbon*, LightRadius, DynamicMaterialParameter
+    uv_mode: u32,               // ribbon: 0 scaled uniformly, 1 by segment length, 2 tiled over length
+    tessellation: u32,          // ribbon: subdivisions per segment
+    tiling_length: f32,         // ribbon: metres per U for uv_mode 2
+    link_from_end: u32,         // ribbon: U starts at the last sorted particle (the newest)
+    mesh_radius: f32,
+    _pad: u32,
+}
+
+@group(1) @binding(0) var<uniform> fx: FxRenderer;
+@group(1) @binding(1) var<storage, read> particles: array<f32>;
+@group(1) @binding(2) var<storage, read> indices: array<u32>;
+@group(1) @binding(3) var particle_texture: texture_2d<f32>;
+@group(1) @binding(4) var particle_sampler: sampler;
+
+// Word `w` of particle slot `i` (fx_gpu's structure-of-arrays layout).
+fn pw(w: u32, i: u32) -> f32 {
+    return particles[w * fx.capacity + i];
+}
+
+// What every particle renderer passes to its fragment shader.
+struct FxVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    // Particles.Color (linear RGBA).
+    @location(0) color: vec4<f32>,
+    // Flipbook cell UVs of the current and next frame, and the blend between them.
+    @location(1) uv0: vec2<f32>,
+    @location(2) uv1: vec2<f32>,
+    @location(3) sub_uv_blend: f32,
+    // World-space normal (towards the viewer for sprites and ribbons).
+    @location(4) normal: vec3<f32>,
+    @location(5) world_position: vec3<f32>,
+    // Particles.DynamicMaterialParameter (0 when the emitter never sets it).
+    @location(6) dynamic_param: vec4<f32>,
+    @location(7) normalized_age: f32,
+    // The quad, ribbon or mesh UV before flipbook mapping.
+    @location(8) uv: vec2<f32>,
+    // Flipbook frame (fractional when blending) over the particle's life.
+    @location(9) sub_image_index: f32,
+}
+
+// Particle attributes for vertex shaders.
+fn particle_color(i: u32) -> vec4<f32> {
+    return vec4<f32>(pw(6u, i), pw(7u, i), pw(8u, i), pw(9u, i));
+}
+
+fn particle_dynamic_param(i: u32) -> vec4<f32> {
+    if (fx.extended == 0u) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(pw(40u, i), pw(41u, i), pw(42u, i), pw(43u, i));
+}
+
+// Fills the flipbook fields of `out` for normalized age `nage` and quad UV `uv`.
+fn set_sub_uv(out: ptr<function, FxVertexOutput>, nage: f32, uv: vec2<f32>) {
+    let frames = fx.sub_image.x * fx.sub_image.y;
+    let f = clamp(nage, 0.0, 0.99999) * frames;
+    let f0 = floor(f);
+    let f1 = min(f0 + 1.0, frames - 1.0);
+    (*out).uv = uv;
+    (*out).uv0 = cell_uv(f0, uv);
+    (*out).uv1 = cell_uv(f1, uv);
+    (*out).sub_uv_blend = select(0.0, f - f0, fx.sub_uv_blending != 0u);
+    (*out).sub_image_index = f;
+    (*out).normalized_age = nage;
+}
+
+fn cell_uv(frame: f32, uv: vec2<f32>) -> vec2<f32> {
+    let cols = fx.sub_image.x;
+    let col = frame % cols;
+    let row = floor(frame / cols);
+    return (vec2<f32>(col, row) + uv) / fx.sub_image;
+}
+
+// Unit vector, or `fallback` when `v` is (nearly) zero.
+fn safe_normalize(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let l = length(v);
+    return select(fallback, v / l, l > 1e-6);
+}
+
+// The renderer's texture (or the built-in sprite), flipbook frames blended.
+fn sample_particle_texture(in: FxVertexOutput) -> vec4<f32> {
+    let t0 = textureSample(particle_texture, particle_sampler, in.uv0);
+    let t1 = textureSample(particle_texture, particle_sampler, in.uv1);
+    return mix(t0, t1, in.sub_uv_blend);
+}
+
+// Ambient plus directional light at `normal`. `wrap`: half-Lambert, for thin
+// volumes lit from both sides (sprites); otherwise Lambert (meshes).
+fn scene_light(normal: vec3<f32>, wrap: bool) -> vec3<f32> {
+    var light = lights.ambient_color.rgb;
+    for (var k = 0u; k < lights.n_directional_lights; k++) {
+        let l = lights.directional_lights[k];
+        var ndl = dot(normal, l.direction_to_light);
+        ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, wrap);
+        light += l.color.rgb * ndl * (1.0 / 3.14159265);
+    }
+    return light * view.exposure;
+}
+
+// Final colour for the renderer's blend mode (for Premultiplied, `rgb` is
+// already multiplied by `a`).
+fn finish(rgb: vec3<f32>, a: f32) -> vec4<f32> {
+    return finish_faded(rgb, a, 1.0);
+}
+
+// `finish`, faded out by `fade` (soft particles).
+fn finish_faded(rgb: vec3<f32>, a: f32, fade: f32) -> vec4<f32> {
+    @if(BLEND_ADDITIVE) {
+        return vec4<f32>(rgb * a * fade, 0.0);
+    }
+    @if(BLEND_PREMULTIPLIED) {
+        return vec4<f32>(rgb, a) * fade;
+    }
+    @if(BLEND_OPAQUE) {
+        return vec4<f32>(rgb, 1.0);
+    }
+    return vec4<f32>(rgb, a * fade);
+}

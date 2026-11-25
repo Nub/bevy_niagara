@@ -1,0 +1,9 @@
+// expect: 7: `max_lights` must be a whole number from 1 to 256
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Light((max_lights: 0))],
+    )],
+)

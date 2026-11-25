@@ -1,0 +1,96 @@
+// Ribbon trails: three emitters stream particles up through a panning
+// curl-noise field; each emitter's particles link into one ribbon (spawn
+// order), tessellated and twisted, fading out along their length.
+// The third emitter splits its particles over three ribbons by ID.
+(
+    name: "Ribbon Trails",
+    emitters: [
+        (
+            name: "Trail Cyan",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.5),
+                    "Position": Vec3((-0.8, 0.2, 0.0)),
+                    "Color": Color((0.2, 0.8, 1.6, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.18) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.3, 1.2, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(6.0),
+                    "Noise Frequency": Float(0.8),
+                    "Pan Noise Field": Vec3((0.0, -0.6, 0.3)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(1.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.8), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+        (
+            name: "Trail Orange",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.5),
+                    "Position": Vec3((0.8, 0.2, 0.0)),
+                    "Color": Color((1.6, 0.6, 0.15, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.3), "Ribbon Twist": Float(70.0) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((-0.3, 1.2, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Float(6.0),
+                    "Noise Frequency": Float(0.8),
+                    "Noise Offset": Vec3((3.0, 0.0, 1.0)),
+                    "Pan Noise Field": Vec3((0.4, -0.5, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(1.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Alpha, tessellation_factor: 4, uv_mode: ScaledUsingRibbonSegmentLength))],
+        ),
+        (
+            name: "Braid",
+            max_particles: 600,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(90.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": Vec3((0.0, 0.1, -0.5)),
+                    "Color": Color((0.9, 0.4, 1.4, 1.0)),
+                }),
+                (module: "Initialize Ribbon", inputs: {
+                    "Ribbon Width": Float(0.06),
+                    "Ribbon ID": RandomRange(Int(0), Int(2)),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(25.0),
+                    "Velocity Strength": Float(1.6),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force", inputs: { "Gravity": Vec3((0.0, -0.8, 0.0)) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 2))],
+        ),
+    ],
+)

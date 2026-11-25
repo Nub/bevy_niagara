@@ -3,12 +3,13 @@
 //!
 //! Integer work (random hashes, spawn counts, UniqueIDs, kills) must match
 //! exactly; float attributes may differ by the GPU's FMA contraction and its
-//! exp/sin/cos approximations.
+//! exp/sin/cos approximations. One inline system covers the extended
+//! attributes (Ribbon, Mesh, Light, material parameters).
 
 use std::path::PathBuf;
 
 use fx_core::sim::{Particle, Simulation};
-use fx_gpu::GpuEffect;
+use fx_gpu::{GpuEffect, WORDS_PER_PARTICLE, WORDS_PER_PARTICLE_EXTENDED};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -37,6 +38,16 @@ fn fields(p: &Particle) -> Vec<(&'static str, f32)> {
     put("initial_sprite_size", &p.initial_sprite_size.to_array());
     put("force", &p.force.to_array());
     put("drag", &[p.drag]);
+    put("scale", &p.scale.to_array());
+    put("mesh_orientation", &p.mesh_orientation.to_array());
+    put("ribbon_width", &[p.ribbon_width]);
+    put("ribbon_twist", &[p.ribbon_twist]);
+    put("ribbon_link_order", &[p.ribbon_link_order]);
+    put("light_radius", &[p.light_radius]);
+    put(
+        "dynamic_material_parameter",
+        &p.dynamic_material_parameter.to_array(),
+    );
     v
 }
 
@@ -61,6 +72,11 @@ fn compare(name: &str, step: u32, cpu: &[Particle], gpu: &[Particle], diff: &mut
         gpu.len()
     );
     for (a, b) in cpu.iter().zip(&gpu) {
+        assert_eq!(
+            a.ribbon_id, b.ribbon_id,
+            "{name} step {step} particle {}: ribbon_id",
+            a.unique_id
+        );
         for ((field, x), (_, y)) in fields(a).into_iter().zip(fields(b)) {
             let d = (x - y).abs();
             let tol = 1e-3 * (1.0 + x.abs());
@@ -77,6 +93,59 @@ fn compare(name: &str, step: u32, cpu: &[Particle], gpu: &[Particle], diff: &mut
     }
 }
 
+/// Every Ribbon/Mesh/Light/material attribute and the modules that write
+/// them, plus a panning curl field; drawn by Mesh and Light renderers, so the
+/// emitter stores the extended attributes.
+const EXTENDED: &str = r#"(
+    name: "Extended",
+    emitters: [(
+        name: "E",
+        max_particles: 2000,
+        emitter_update: [
+            (module: "Spawn Rate", inputs: { "Spawn Rate": Float(300.0) }),
+            (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(50) }),
+        ],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": RandomRange(Float(0.5), Float(1.5)),
+                "Position": RandomRange(Vec3((-1.0, -1.0, -1.0)), Vec3((1.0, 1.0, 1.0))),
+            }),
+            (module: "Initialize Ribbon", inputs: {
+                "Ribbon ID": RandomRange(Int(0), Int(7)),
+                "Ribbon Width": RandomRange(Float(0.05), Float(0.2)),
+                "Ribbon Twist": Float(30.0),
+                "Ribbon Link Order": Link(Float, "Engine.Time"),
+            }),
+            (module: "Initialize Mesh", inputs: {
+                "Mesh Scale": RandomRange(Vec3((0.5, 0.5, 0.5)), Vec3((2.0, 2.0, 2.0))),
+                "Mesh Rotation": RandomRange(Vec3((-180.0, -180.0, -180.0)), Vec3((180.0, 180.0, 180.0))),
+            }),
+            (module: "Add Velocity", inputs: { "Velocity": Link(Vec3, "Particles.Scale") }),
+            (module: "Initialize Light", inputs: { "Light Radius": RandomRange(Float(0.5), Float(3.0)) }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Update Mesh Orientation", inputs: { "Rotation Rate": Vec3((90.0, -45.0, 200.0)) }),
+            (module: "Dynamic Material Parameters", inputs: {
+                "Dynamic Material Parameter": CurveOverAge(Vec4([(0.0, (0.0, 0.0, 0.0, 1.0)), (1.0, (1.0, 2.0, 3.0, 0.0))])),
+            }),
+            (module: "Curl Noise Force", inputs: {
+                "Noise Strength": Float(2.0),
+                "Pan Noise Field": Vec3((0.5, 1.0, -0.25)),
+            }),
+            (module: "Initialize Light", inputs: { "Light Radius": Link(Float, "Particles.NormalizedAge") }),
+            (module: "Solve Forces and Velocity"),
+        ],
+        renderers: [Mesh((mesh: "sphere")), Light],
+    )],
+)"#;
+
+fn extended_system() -> fx_core::CookedSystem {
+    let c = fx_core::check_source("extended.fx.ron", EXTENDED);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    c.cooked.unwrap_or_else(|| panic!("extended: {errs:?}"))
+}
+
 #[test]
 fn gpu_matches_cpu_reference() {
     let (device, queue, info) = match fx_gpu::headless_device() {
@@ -84,11 +153,19 @@ fn gpu_matches_cpu_reference() {
         Err(e) => panic!("parity test needs a GPU: {e}"),
     };
     eprintln!("adapter: {} ({:?})", info.name, info.backend);
-    for name in ["fountain.fx.ron", "burst.fx.ron", "smoke_curl.fx.ron"] {
-        let sys = sample(name);
+    let mut systems: Vec<_> = ["fountain.fx.ron", "burst.fx.ron", "smoke_curl.fx.ron"]
+        .into_iter()
+        .map(|n| (n, sample(n), WORDS_PER_PARTICLE))
+        .collect();
+    systems.push(("extended", extended_system(), WORDS_PER_PARTICLE_EXTENDED));
+    for (name, sys, words) in systems {
         let seed = 42;
         let mut cpu = Simulation::new(sys.clone(), seed);
         let mut gpu = GpuEffect::new(&device, &sys, seed).unwrap();
+        assert!(
+            gpu.emitters.iter().all(|e| e.words == words),
+            "{name}: words per particle"
+        );
         let mut diff = Diff::default();
         let mut most_alive = 0usize;
         // 3 seconds: bursts, steady spawning, deaths and the curl field.

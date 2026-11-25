@@ -7,7 +7,10 @@
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 
-pub use crate::render::{BlendMode, FacingMode, SortMode, SpriteAlignment};
+pub use crate::render::{
+    BlendMode, FacingMode, MeshBlendMode, MeshFacingMode, RibbonFacingMode, RibbonLinkOrderMode,
+    RibbonUvMode, SortMode, SpriteAlignment,
+};
 use crate::types::{Curve, Value, ValueType};
 
 /// A 1-based line/column position in a source file.
@@ -108,12 +111,29 @@ pub struct EmitterSource {
     pub span: Span,
 }
 
-/// One entry of an emitter's `renderers: [ ... ]`. Ribbon, Mesh and Light
-/// renderers will be further variants.
+/// One entry of an emitter's `renderers: [ ... ]`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum RendererSource {
     /// `Sprite(( ... ))`: camera-facing quads (Niagara's Sprite Renderer).
     Sprite(SpriteSource),
+    /// `Ribbon(( ... ))`: strips joining particles (Niagara's Ribbon Renderer).
+    Ribbon(RibbonSource),
+    /// `Mesh(( ... ))`: one mesh per particle (Niagara's Mesh Renderer).
+    Mesh(MeshSource),
+    /// `Light(( ... ))`: one point light per particle (Niagara's Light Renderer).
+    Light(LightSource),
+}
+
+impl RendererSource {
+    /// Where the renderer is written.
+    pub fn span(&self) -> Span {
+        match self {
+            RendererSource::Sprite(s) => s.span,
+            RendererSource::Ribbon(r) => r.span,
+            RendererSource::Mesh(m) => m.span,
+            RendererSource::Light(l) => l.span,
+        }
+    }
 }
 
 /// Sprite renderer settings, with Niagara's defaults filled in for fields
@@ -136,9 +156,15 @@ pub struct SpriteSource {
     /// Asset path; `None` uses the built-in soft round sprite.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_texture"
+        serialize_with = "serialize_path"
     )]
     pub texture: Option<String>,
+    /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_path"
+    )]
+    pub material: Option<String>,
     #[serde(skip)]
     pub span: Span,
 }
@@ -158,13 +184,135 @@ impl Default for SpriteSource {
             sort_mode: SortMode::default(),
             soft_particle_fade_distance: 0.0,
             texture: None,
+            material: None,
+            span: Span::default(),
+        }
+    }
+}
+
+/// Ribbon renderer settings, with defaults filled in for fields the source
+/// leaves out. A ribbon joins the particles of each `Particles.RibbonID`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RibbonSource {
+    pub blend_mode: BlendMode,
+    pub facing_mode: RibbonFacingMode,
+    pub custom_facing_vector: [f32; 3],
+    pub uv_mode: RibbonUvMode,
+    /// Metres of ribbon per texture repeat (`TiledOverRibbonLength`); more than 0.
+    pub tiling_length: f32,
+    pub link_order: RibbonLinkOrderMode,
+    /// Subdivisions per segment, 1..=16.
+    pub tessellation_factor: u32,
+    /// Asset path; `None` draws plain colour.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_path"
+    )]
+    pub texture: Option<String>,
+    /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_path"
+    )]
+    pub material: Option<String>,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for RibbonSource {
+    fn default() -> Self {
+        RibbonSource {
+            blend_mode: BlendMode::default(),
+            facing_mode: RibbonFacingMode::default(),
+            custom_facing_vector: [0.0, 0.0, 1.0],
+            uv_mode: RibbonUvMode::default(),
+            tiling_length: 1.0,
+            link_order: RibbonLinkOrderMode::default(),
+            tessellation_factor: 1,
+            texture: None,
+            material: None,
+            span: Span::default(),
+        }
+    }
+}
+
+/// Mesh renderer settings, with defaults filled in for fields the source
+/// leaves out. Each particle draws the mesh at `Particles.Position`, scaled by
+/// `Particles.Scale` and rotated by `Particles.MeshOrientation`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MeshSource {
+    /// A name from [`MESH_BUILTINS`](crate::render::MESH_BUILTINS) or an
+    /// asset path (contains a '.' or '/').
+    pub mesh: String,
+    pub blend_mode: MeshBlendMode,
+    pub facing_mode: MeshFacingMode,
+    pub lit: bool,
+    pub sort_mode: SortMode,
+    /// Asset path; `None` draws plain colour.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_path"
+    )]
+    pub texture: Option<String>,
+    /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_path"
+    )]
+    pub material: Option<String>,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for MeshSource {
+    fn default() -> Self {
+        MeshSource {
+            mesh: "cube".into(),
+            blend_mode: MeshBlendMode::default(),
+            facing_mode: MeshFacingMode::default(),
+            lit: true,
+            sort_mode: SortMode::default(),
+            texture: None,
+            material: None,
+            span: Span::default(),
+        }
+    }
+}
+
+/// Light renderer settings, with defaults filled in for fields the source
+/// leaves out. Each particle is a point light of radius
+/// `Particles.LightRadius * radius_scale`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LightSource {
+    /// Multiplies `Particles.LightRadius`; at least 0.
+    pub radius_scale: f32,
+    /// Added to the particle colour before it becomes the light colour.
+    pub color_add: [f32; 3],
+    /// Lumens per unit of colour; at least 0.
+    pub intensity: f32,
+    /// Whether the particle alpha multiplies the brightness.
+    pub alpha_scales_brightness: bool,
+    /// Most lights drawn per emitter, 1..=256.
+    pub max_lights: u32,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for LightSource {
+    fn default() -> Self {
+        LightSource {
+            radius_scale: 1.0,
+            color_add: [0.0; 3],
+            intensity: 10000.0,
+            alpha_scales_brightness: true,
+            max_lights: 16,
             span: Span::default(),
         }
     }
 }
 
 /// Written as a plain string (the source form), not `Some("...")`.
-fn serialize_texture<S: Serializer>(t: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+fn serialize_path<S: Serializer>(t: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
     match t {
         Some(p) => s.serialize_str(p),
         None => s.serialize_none(),

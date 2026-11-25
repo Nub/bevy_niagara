@@ -19,6 +19,8 @@
 
 pub mod codegen;
 mod emitter_cpu;
+pub mod lights;
+pub mod ribbon;
 pub mod view;
 
 use std::borrow::Cow;
@@ -30,8 +32,14 @@ use wgpu::util::DeviceExt;
 
 pub use wgpu;
 
-/// 32-bit words per particle in the SoA layout (see `sim_common.wgsl`).
+/// 32-bit words per particle in the SoA layout (see `sim_common.wgsl`); every
+/// emitter stores these.
 pub const WORDS_PER_PARTICLE: u32 = 28;
+/// 32-bit words per particle of an emitter that uses the extended attributes
+/// (`fx_core::cook::CookedEmitter::uses_extended_attributes`): the base 28,
+/// then Scale, MeshOrientation, RibbonID, RibbonWidth, RibbonTwist,
+/// RibbonLinkOrder, LightRadius and DynamicMaterialParameter.
+pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 44;
 /// `User.` parameters a system may have on the GPU.
 pub const MAX_USER_PARAMS: usize = 16;
 /// Steps that can be recorded between two queue submissions.
@@ -95,6 +103,8 @@ struct Pipelines {
 pub struct GpuEmitter {
     pub name: String,
     pub capacity: u32,
+    /// Words per particle: [`WORDS_PER_PARTICLE`] or [`WORDS_PER_PARTICLE_EXTENDED`].
+    pub words: u32,
     /// Ping-pong particle buffers; `particles[current]` holds the living ones.
     pub particles: [wgpu::Buffer; 2],
     /// Counts, ids and indirect dispatch arguments ([`STATE_WORDS`] u32s).
@@ -185,7 +195,12 @@ impl GpuEffect {
         let mut emitters = Vec::new();
         for (ei, e) in system.emitters.iter().enumerate() {
             let capacity = e.max_particles.max(1);
-            let bytes = capacity as u64 * WORDS_PER_PARTICLE as u64 * 4;
+            let words = if e.uses_extended_attributes() {
+                WORDS_PER_PARTICLE_EXTENDED
+            } else {
+                WORDS_PER_PARTICLE
+            };
+            let bytes = capacity as u64 * words as u64 * 4;
             if bytes > limit {
                 return Err(format!(
                     "emitter \"{}\": {} particles need {bytes} bytes, over this GPU's storage binding limit of {limit}",
@@ -295,6 +310,7 @@ impl GpuEffect {
             emitters.push(GpuEmitter {
                 name: e.name.clone(),
                 capacity,
+                words,
                 particles,
                 state,
                 frame_ubo,
@@ -486,6 +502,17 @@ impl GpuEffect {
                 p.initial_sprite_size = [w(21, i), w(22, i)].into();
                 p.force = [w(23, i), w(24, i), w(25, i)].into();
                 p.drag = w(26, i);
+                if em.words == WORDS_PER_PARTICLE_EXTENDED {
+                    p.scale = [w(28, i), w(29, i), w(30, i)].into();
+                    p.mesh_orientation =
+                        bevy_math::Quat::from_xyzw(w(31, i), w(32, i), w(33, i), w(34, i));
+                    p.ribbon_id = w(35, i).to_bits() as i32;
+                    p.ribbon_width = w(36, i);
+                    p.ribbon_twist = w(37, i);
+                    p.ribbon_link_order = w(38, i);
+                    p.light_radius = w(39, i);
+                    p.dynamic_material_parameter = [w(40, i), w(41, i), w(42, i), w(43, i)].into();
+                }
                 ps.push(p);
             }
             out.push(ps);

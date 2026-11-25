@@ -11,7 +11,7 @@ cargo run -p fx_core --bin fxc -- modules                                  # mod
 Shape: `( name, user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, emitter_spawn, emitter_update, particle_spawn, particle_update, renderers: [ ... ] ) ] )`.
 Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: { "Input Name": <input> })`.
 
-**Renderers** (Niagara's emitter renderers) say how particles are drawn. `renderers` is a list; an emitter without it draws nothing. Only `Sprite(( ... ))` exists so far (Ribbon, Mesh and Light will follow). Every field is optional and defaults to Niagara's value:
+**Renderers** (Niagara's emitter renderers) say how particles are drawn. `renderers` is a list of `Sprite(( ... ))`, `Ribbon(( ... ))`, `Mesh(( ... ))` and `Light(( ... ))`; an emitter without it draws nothing. Every field is optional and defaults to Niagara's value. `Sprite`:
 
 | Field | Values | Default |
 |---|---|---|
@@ -27,6 +27,43 @@ Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: 
 | `sort_mode` | `None`, `ViewDepth`, `ViewDistance` | `None` |
 | `soft_particle_fade_distance` | metres >= 0 (0 = off) | `0.0` |
 | `texture` | `"asset/path.png"` | none (built-in soft round sprite) |
+| `material` | `"asset/path.wesl"` (custom WESL fragment shader) | none (built-in) |
+
+`Ribbon` joins the particles of each `Particles.RibbonID` (set by `Initialize Ribbon`; width and twist from `Particles.RibbonWidth`, `Particles.RibbonTwist`):
+
+| Field | Values | Default |
+|---|---|---|
+| `blend_mode` | `Alpha`, `Additive`, `Premultiplied` | `Alpha` |
+| `facing_mode` | `Screen`, `CustomFacingVector` | `Screen` |
+| `custom_facing_vector` | `(x, y, z)` | `(0.0, 0.0, 1.0)` |
+| `uv_mode` | `ScaledUniformly`, `ScaledUsingRibbonSegmentLength`, `TiledOverRibbonLength` | `ScaledUniformly` |
+| `tiling_length` | metres > 0 per texture repeat | `1.0` |
+| `link_order` | `SpawnOrder`, `Custom` (by `Particles.RibbonLinkOrder`, ascending) | `SpawnOrder` |
+| `tessellation_factor` | subdivisions per segment, 1..=16 | `1` |
+| `texture`, `material` | asset paths | none |
+
+`Mesh` draws a mesh per particle, scaled by `Particles.Scale` and rotated by `Particles.MeshOrientation` (`Initialize Mesh`, `Update Mesh Orientation`):
+
+| Field | Values | Default |
+|---|---|---|
+| `mesh` | `"cube"`, `"sphere"`, `"torus"`, `"cylinder"`, `"cone"`, `"capsule"`, or an asset path (contains `.` or `/`) | `"cube"` |
+| `blend_mode` | `Opaque`, `Alpha`, `Additive`, `Premultiplied` | `Opaque` |
+| `facing_mode` | `Default`, `Velocity`, `CameraPosition`, `CameraPlane` | `Default` |
+| `lit` | `true`, `false` | `true` |
+| `sort_mode` | `None`, `ViewDepth`, `ViewDistance` | `None` |
+| `texture`, `material` | asset paths | none |
+
+`Light` makes each particle a point light of radius `Particles.LightRadius * radius_scale` (`Initialize Light`) and the particle's colour:
+
+| Field | Values | Default |
+|---|---|---|
+| `radius_scale` | >= 0 | `1.0` |
+| `color_add` | `(r, g, b)` added to the particle colour | `(0.0, 0.0, 0.0)` |
+| `intensity` | lumens per unit colour, >= 0 | `10000.0` |
+| `alpha_scales_brightness` | `true`, `false` | `true` |
+| `max_lights` | 1..=256 per emitter | `16` |
+
+Custom materials can read `Particles.DynamicMaterialParameter` (set by `Dynamic Material Parameters`).
 
 E.g. `renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))]`. `fxc modules` lists these too.
 

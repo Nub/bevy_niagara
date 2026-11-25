@@ -15,6 +15,10 @@ struct ViewParams {
     capacity: u32,
     sort_mode: u32,               // 0 none, 1 view depth, 2 view distance, 3 UniqueID
     max_pow2: u32,                // sort buffer length
+    cull_mode: u32,               // 0 sprite size, 1 word * scale, 2 max |Scale| * scale, 3 off
+    vertex_count: u32,            // draw argument 0: vertices or indices per instance
+    radius_word: u32,
+    radius_scale: f32,
     _pad: u32,
 }
 
@@ -52,10 +56,11 @@ fn set_args(slot: u32, x: u32) {
 
 @compute @workgroup_size(1)
 fn cull_prep() {
-    atomicStore(&draw[0], 6u);
+    atomicStore(&draw[0], vp.vertex_count);
     atomicStore(&draw[1], 0u);
     atomicStore(&draw[2], 0u);
     atomicStore(&draw[3], 0u);
+    atomicStore(&draw[4], 0u);
     if (vp.sort_mode == 0u) {
         set_args(0u, (count() + WG - 1u) / WG);
         return;
@@ -79,9 +84,21 @@ fn cull_prep() {
 // ---- cull: visibility and sort keys ----
 
 fn visible(i: u32) -> bool {
+    if (vp.cull_mode == 3u) {
+        return true;
+    }
     let pos = vec3<f32>(pw(0u, i), pw(1u, i), pw(2u, i));
-    let size = vec2<f32>(pw(10u, i), pw(11u, i));
-    let radius = max(abs(size.x), abs(size.y));   // covers rotation and pivot offsets up to 0.5
+    var radius = 0.0;
+    switch vp.cull_mode {
+        case 1u: { radius = abs(pw(vp.radius_word, i)) * vp.radius_scale; }
+        case 2u: {
+            radius = max(abs(pw(28u, i)), max(abs(pw(29u, i)), abs(pw(30u, i)))) * vp.radius_scale;
+        }
+        default: {
+            // Covers rotation and pivot offsets up to 0.5.
+            radius = max(abs(pw(10u, i)), abs(pw(11u, i)));
+        }
+    }
     for (var k = 0u; k < 6u; k++) {
         let pl = vp.planes[k];
         if (dot(pl.xyz, pos) + pl.w < -radius) {
@@ -115,6 +132,17 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Deterministic order (headless preview): by UniqueID, independent
             // of the slot order atomic compaction produced.
             key = min(bitcast<u32>(pw(27u, i)), 0xFFFFFFFEu);
+        }
+        if (vp.sort_mode >= 4u) {
+            // Ribbons: ribbon id in the top 8 bits, then the link order.
+            let ribbon = u32(clamp(bitcast<i32>(pw(35u, i)), 0, 254));
+            var order = bitcast<u32>(pw(27u, i)) & 0xFFFFFFu;
+            if (vp.sort_mode == 5u) {
+                // Float to an order-preserving uint, top 24 bits.
+                let b = bitcast<u32>(pw(38u, i));
+                order = select(b | 0x80000000u, ~b, (b & 0x80000000u) != 0u) >> 8u;
+            }
+            key = min((ribbon << 24u) | order, 0xFFFFFFFEu);
         }
         atomicAdd(&draw[1], 1u);
     }

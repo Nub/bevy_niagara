@@ -1,0 +1,39 @@
+// Light embers: glowing sparks rising from the floor; each also emits a
+// point light (Light renderer, the 24 nearest the camera) that lights the
+// ground around it.
+(
+    name: "Light Embers",
+    emitters: [
+        (
+            name: "Embers",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(40.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.5), Float(2.5)),
+                    "Position": RandomRange(Vec3((-1.2, 0.05, -0.8)), Vec3((1.2, 0.1, 0.8))),
+                    "Color": RandomRange(Color((3.0, 0.8, 0.15, 1.0)), Color((4.0, 1.6, 0.3, 1.0))),
+                    "Sprite Size": RandomRange(Vec2((0.05, 0.05)), Vec2((0.09, 0.09))),
+                }),
+                (module: "Initialize Light", inputs: { "Light Radius": RandomRange(Float(0.8), Float(1.4)) }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(15.0),
+                    "Velocity Strength": RandomRange(Float(0.4), Float(0.9)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: { "Noise Strength": Float(1.5), "Noise Frequency": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (0.7, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [
+                Sprite((blend_mode: Additive)),
+                Light((max_lights: 24, intensity: 1500.0, radius_scale: 1.0)),
+            ],
+        ),
+    ],
+)

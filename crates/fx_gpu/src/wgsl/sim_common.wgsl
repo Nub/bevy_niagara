@@ -146,7 +146,51 @@ fn basis_t2(n: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(b, sign + n.y * n.y * a, -n.y);
 }
 
+// ---- quaternions (x, y, z, w), as fx_core::sim::{euler_quat, quat_mul, quat_normalize} ----
+
+const HALF_RADIANS_PER_DEGREE: f32 = 0.008726646;
+
+// Rotation by Euler angles in degrees, X applied first: qz * qy * qx, written out.
+fn euler_quat(deg: vec3<f32>) -> vec4<f32> {
+    let h = deg * HALF_RADIANS_PER_DEGREE;
+    let sx = sin(h.x);
+    let cx = cos(h.x);
+    let sy = sin(h.y);
+    let cy = cos(h.y);
+    let sz = sin(h.z);
+    let cz = cos(h.z);
+    return vec4<f32>(
+        cz * cy * sx - sz * sy * cx,
+        cz * sy * cx + sz * cy * sx,
+        sz * cy * cx - cz * sy * sx,
+        cz * cy * cx + sz * sy * sx,
+    );
+}
+
+// Hamilton product a * b (b's rotation first).
+fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    );
+}
+
+// q at unit length, or the identity if its length is 0 or not finite.
+fn quat_normalize(q: vec4<f32>) -> vec4<f32> {
+    let rl = 1.0 / length(q);
+    if (rl > 0.0 && rl <= 3.4028235e38) {
+        return q * rl;
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
 // ---- particles: structure of arrays, word w of particle i at w * capacity + i ----
+// Words 0..27 are the base attributes every emitter stores. Words 28..43 (Scale,
+// MeshOrientation, the Ribbon attributes, LightRadius, DynamicMaterialParameter)
+// exist only when the generated `EXT` is true; otherwise they stay at their
+// defaults in registers and the buffers end at word 27.
 
 struct Particle {
     position: vec3<f32>,
@@ -162,6 +206,14 @@ struct Particle {
     initial_sprite_size: vec2<f32>,
     force: vec3<f32>,
     drag: f32,
+    scale: vec3<f32>,
+    mesh_orientation: vec4<f32>,
+    ribbon_id: i32,
+    ribbon_width: f32,
+    ribbon_twist: f32,
+    ribbon_link_order: f32,
+    light_radius: f32,
+    dynamic_material_parameter: vec4<f32>,
     id: u32,
     alive: bool,
 }
@@ -181,6 +233,14 @@ fn new_particle(id: u32) -> Particle {
     p.initial_sprite_size = vec2<f32>(0.1);
     p.force = vec3<f32>(0.0);
     p.drag = 0.0;
+    p.scale = vec3<f32>(1.0);
+    p.mesh_orientation = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    p.ribbon_id = 0;
+    p.ribbon_width = 0.1;
+    p.ribbon_twist = 0.0;
+    p.ribbon_link_order = 0.0;
+    p.light_radius = 1.0;
+    p.dynamic_material_parameter = vec4<f32>(0.0);
     p.id = id;
     p.alive = true;
     return p;
@@ -191,7 +251,7 @@ fn ld(w: u32, i: u32) -> f32 {
 }
 
 fn load_particle(i: u32) -> Particle {
-    var p: Particle;
+    var p = new_particle(bitcast<u32>(ld(27u, i)));
     p.position = vec3<f32>(ld(0u, i), ld(1u, i), ld(2u, i));
     p.velocity = vec3<f32>(ld(3u, i), ld(4u, i), ld(5u, i));
     p.color = vec4<f32>(ld(6u, i), ld(7u, i), ld(8u, i), ld(9u, i));
@@ -205,8 +265,16 @@ fn load_particle(i: u32) -> Particle {
     p.initial_sprite_size = vec2<f32>(ld(21u, i), ld(22u, i));
     p.force = vec3<f32>(ld(23u, i), ld(24u, i), ld(25u, i));
     p.drag = ld(26u, i);
-    p.id = bitcast<u32>(ld(27u, i));
-    p.alive = true;
+    if (EXT) {
+        p.scale = vec3<f32>(ld(28u, i), ld(29u, i), ld(30u, i));
+        p.mesh_orientation = vec4<f32>(ld(31u, i), ld(32u, i), ld(33u, i), ld(34u, i));
+        p.ribbon_id = bitcast<i32>(ld(35u, i));
+        p.ribbon_width = ld(36u, i);
+        p.ribbon_twist = ld(37u, i);
+        p.ribbon_link_order = ld(38u, i);
+        p.light_radius = ld(39u, i);
+        p.dynamic_material_parameter = vec4<f32>(ld(40u, i), ld(41u, i), ld(42u, i), ld(43u, i));
+    }
     return p;
 }
 
@@ -229,6 +297,18 @@ fn store_particle(i: u32, p: Particle) {
     st(23u, i, p.force.x); st(24u, i, p.force.y); st(25u, i, p.force.z);
     st(26u, i, p.drag);
     st(27u, i, bitcast<f32>(p.id));
+    if (EXT) {
+        st(28u, i, p.scale.x); st(29u, i, p.scale.y); st(30u, i, p.scale.z);
+        st(31u, i, p.mesh_orientation.x); st(32u, i, p.mesh_orientation.y);
+        st(33u, i, p.mesh_orientation.z); st(34u, i, p.mesh_orientation.w);
+        st(35u, i, bitcast<f32>(p.ribbon_id));
+        st(36u, i, p.ribbon_width);
+        st(37u, i, p.ribbon_twist);
+        st(38u, i, p.ribbon_link_order);
+        st(39u, i, p.light_radius);
+        st(40u, i, p.dynamic_material_parameter.x); st(41u, i, p.dynamic_material_parameter.y);
+        st(42u, i, p.dynamic_material_parameter.z); st(43u, i, p.dynamic_material_parameter.w);
+    }
 }
 
 fn groups(n: u32) -> u32 {

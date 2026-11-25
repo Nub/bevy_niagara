@@ -122,8 +122,10 @@ fn list_modules() {
         }
     }
     println!("\nRenderers (emitter field `renderers: [ ... ]`; every field optional):");
-    println!("Sprite(( ... ))");
-    for f in fx_core::render::SPRITE_FIELDS {
-        println!("  - {}: {} = {}  ({})", f.name, f.form, f.default, f.doc);
+    for (kind, fields) in fx_core::render::RENDERER_FIELDS {
+        println!("{kind}(( ... ))");
+        for f in *fields {
+            println!("  - {}: {} = {}  ({})", f.name, f.form, f.default, f.doc);
+        }
     }
 }

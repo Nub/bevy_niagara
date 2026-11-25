@@ -8,8 +8,12 @@
 //! ```text
 //! fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.25,0.5,1,2] [--duration S]
 //!           [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey]
-//!           [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4]
+//!           [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene]
 //! ```
+//!
+//! `--test-scene` adds an opaque pillar through the effect and a translucent
+//! glass pane in front of part of it, to check depth and ordering against
+//! scene geometry and other transparents.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,6 +48,7 @@ struct Options {
     camera: Vec3,
     target: Vec3,
     mp4: bool,
+    test_scene: bool,
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -72,6 +77,7 @@ fn parse_args() -> Result<Options, String> {
         camera: Vec3::new(0.0, 1.6, 6.5),
         target: Vec3::new(0.0, 1.3, 0.0),
         mp4: true,
+        test_scene: false,
     };
     let mut effect = None;
     while let Some(a) = args.next() {
@@ -97,6 +103,7 @@ fn parse_args() -> Result<Options, String> {
             "--camera" => o.camera = parse_vec3(&val()?)?,
             "--target" => o.target = parse_vec3(&val()?)?,
             "--no-mp4" => o.mp4 = false,
+            "--test-scene" => o.test_scene = true,
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ => effect = Some(PathBuf::from(a)),
@@ -114,7 +121,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4]";
+const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene]";
 
 fn main() -> ExitCode {
     let o = match parse_args() {
@@ -154,6 +161,11 @@ fn main() -> ExitCode {
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .set(AssetPlugin {
+                // Textures and materials resolve next to the effect file.
+                file_path: asset_root(&o.effect),
                 ..default()
             })
             .disable::<PipelinedRenderingPlugin>(),
@@ -261,6 +273,29 @@ fn setup(
         brightness: 300.0,
         ..default()
     });
+    if o.test_scene {
+        // An opaque pillar through the effect's centre, and a glass pane
+        // (another transparent) in front of its left half.
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.35, 3.0, 0.35))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.55, 0.55, 0.6),
+                perceptual_roughness: 0.6,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 1.5, 0.0),
+        ));
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(1.6, 2.2, 0.02))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(0.2, 0.5, 0.35, 0.45),
+                alpha_mode: AlphaMode::Blend,
+                perceptual_roughness: 0.2,
+                ..default()
+            })),
+            Transform::from_xyz(-0.9, 1.2, 1.4),
+        ));
+    }
     let effect = preview.effect.take().unwrap();
     commands.spawn((effect, Transform::IDENTITY));
 }
@@ -406,4 +441,15 @@ fn write_outputs(o: &Options, frames: &[Vec<u8>]) -> Result<String, String> {
         msg.push_str(&format!("\n{}", mp4.display()));
     }
     Ok(msg)
+}
+
+/// The folder holding the effect file, absolute: its `texture` and
+/// `material` paths are relative to it.
+fn asset_root(effect: &Path) -> String {
+    let dir = effect.parent().unwrap_or(Path::new("."));
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }

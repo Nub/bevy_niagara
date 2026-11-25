@@ -1,7 +1,6 @@
 //! Renderer settings: how an emitter's particles are drawn (Niagara's
-//! renderer properties). Only the Sprite renderer exists so far; Ribbon, Mesh
-//! and Light renderers become further variants of
-//! [`RendererSource`](crate::model::RendererSource) and
+//! renderer properties): Sprite, Ribbon, Mesh and Light renderers, the
+//! variants of [`RendererSource`](crate::model::RendererSource) and
 //! [`CookedRenderer`](crate::cook::CookedRenderer).
 //!
 //! The option enums here are shared by the source model (serde) and the
@@ -58,7 +57,7 @@ macro_rules! ident_enum {
 }
 
 ident_enum! {
-    /// How a sprite combines with what is behind it (Niagara's material blend mode).
+    /// How a sprite or ribbon combines with what is behind it (Niagara's material blend mode).
     BlendMode {
         /// Standard alpha blending (translucent).
         Alpha,
@@ -106,9 +105,76 @@ ident_enum! {
         ViewDistance,
     }
 }
+ident_enum! {
+    /// Which way a ribbon's surface faces (Niagara's Ribbon Facing Mode).
+    RibbonFacingMode {
+        /// Turned toward the camera around the ribbon direction.
+        Screen,
+        /// Its normal follows `custom_facing_vector`.
+        CustomFacingVector,
+    }
+}
+
+ident_enum! {
+    /// How texture U runs along a ribbon (Niagara's UV0 Leading/Trailing mode).
+    RibbonUvMode {
+        /// U goes 0..1 over the whole ribbon, the same step per segment.
+        ScaledUniformly,
+        /// U goes 0..1 over the whole ribbon, each segment's share by its length.
+        ScaledUsingRibbonSegmentLength,
+        /// U repeats every `tiling_length` metres.
+        TiledOverRibbonLength,
+    }
+}
+
+ident_enum! {
+    /// Order in which a ribbon links its particles (Niagara's Ribbon Link Order).
+    RibbonLinkOrderMode {
+        /// By `Particles.UniqueID` (spawn order).
+        SpawnOrder,
+        /// By `Particles.RibbonLinkOrder`, ascending.
+        Custom,
+    }
+}
+
+ident_enum! {
+    /// How a mesh combines with the scene.
+    MeshBlendMode {
+        /// Opaque, depth-written.
+        Opaque,
+        /// Standard alpha blending (translucent).
+        Alpha,
+        /// Colour is added; alpha scales it.
+        Additive,
+        /// Colour is already multiplied by alpha.
+        Premultiplied,
+    }
+}
+
+ident_enum! {
+    /// Which way a mesh's X axis faces (Niagara's Mesh Facing Mode).
+    MeshFacingMode {
+        /// `Particles.MeshOrientation` only.
+        Default,
+        /// X axis along the particle velocity.
+        Velocity,
+        /// X axis toward the camera's position.
+        CameraPosition,
+        /// X axis against the camera's view direction.
+        CameraPlane,
+    }
+}
+
+/// Built-in meshes a Mesh renderer can name instead of an asset path.
+pub const MESH_BUILTINS: &[&str] = &["cube", "sphere", "torus", "cylinder", "cone", "capsule"];
+
+/// Whether `mesh` names an asset file rather than a built-in shape.
+pub fn is_mesh_asset_path(mesh: &str) -> bool {
+    mesh.contains('.') || mesh.contains('/')
+}
 
 /// Names of the renderer variants, as written in `renderers: [ ... ]`.
-pub const RENDERER_KINDS: &[&str] = &["Sprite"];
+pub const RENDERER_KINDS: &[&str] = &["Sprite", "Ribbon", "Mesh", "Light"];
 
 /// One field of a renderer, for `fxc modules` and error help.
 pub struct RendererField {
@@ -116,6 +182,20 @@ pub struct RendererField {
     pub form: &'static str,
     pub default: &'static str,
     pub doc: &'static str,
+}
+
+const fn field(
+    name: &'static str,
+    form: &'static str,
+    default: &'static str,
+    doc: &'static str,
+) -> RendererField {
+    RendererField {
+        name,
+        form,
+        default,
+        doc,
+    }
 }
 
 /// Fields of `Sprite(( ... ))`, all optional.
@@ -192,18 +272,180 @@ pub const SPRITE_FIELDS: &[RendererField] = &[
         default: "none",
         doc: "sprite texture; none = built-in soft round sprite",
     },
+    RendererField {
+        name: "material",
+        form: "\"asset/path.wesl\"",
+        default: "none",
+        doc: "custom WESL fragment shader; none = built-in",
+    },
 ];
 
-pub fn sprite_field_names() -> &'static [&'static str] {
-    const N: usize = SPRITE_FIELDS.len();
-    const NAMES: [&str; N] = {
-        let mut a = [""; N];
-        let mut i = 0;
-        while i < N {
-            a[i] = SPRITE_FIELDS[i].name;
-            i += 1;
+/// Fields of `Ribbon(( ... ))`, all optional.
+pub const RIBBON_FIELDS: &[RendererField] = &[
+    field(
+        "blend_mode",
+        "Alpha | Additive | Premultiplied",
+        "Alpha",
+        "how the ribbon blends with the scene",
+    ),
+    field(
+        "facing_mode",
+        "Screen | CustomFacingVector",
+        "Screen",
+        "which way the ribbon surface faces",
+    ),
+    field(
+        "custom_facing_vector",
+        "(x, y, z)",
+        "(0.0, 0.0, 1.0)",
+        "surface normal for CustomFacingVector",
+    ),
+    field(
+        "uv_mode",
+        "ScaledUniformly | ScaledUsingRibbonSegmentLength | TiledOverRibbonLength",
+        "ScaledUniformly",
+        "how texture U runs along the ribbon",
+    ),
+    field(
+        "tiling_length",
+        "metres",
+        "1.0",
+        "texture repeat length for TiledOverRibbonLength; more than 0",
+    ),
+    field(
+        "link_order",
+        "SpawnOrder | Custom",
+        "SpawnOrder",
+        "particle order along the ribbon; Custom = by Particles.RibbonLinkOrder",
+    ),
+    field(
+        "tessellation_factor",
+        "1..=16",
+        "1",
+        "subdivisions per segment",
+    ),
+    field(
+        "texture",
+        "\"asset/path.png\"",
+        "none",
+        "ribbon texture; none = plain colour",
+    ),
+    field(
+        "material",
+        "\"asset/path.wesl\"",
+        "none",
+        "custom WESL fragment shader; none = built-in",
+    ),
+];
+
+/// Fields of `Mesh(( ... ))`, all optional.
+pub const MESH_FIELDS: &[RendererField] = &[
+    field(
+        "mesh",
+        "\"cube\" | \"sphere\" | \"torus\" | \"cylinder\" | \"cone\" | \"capsule\" | \"asset/path.glb\"",
+        "\"cube\"",
+        "a built-in shape or a mesh asset path",
+    ),
+    field(
+        "blend_mode",
+        "Opaque | Alpha | Additive | Premultiplied",
+        "Opaque",
+        "how meshes blend with the scene",
+    ),
+    field(
+        "facing_mode",
+        "Default | Velocity | CameraPosition | CameraPlane",
+        "Default",
+        "which way the mesh's X axis faces",
+    ),
+    field(
+        "lit",
+        "bool",
+        "true",
+        "lit by scene lights instead of emissive-only",
+    ),
+    field(
+        "sort_mode",
+        "None | ViewDepth | ViewDistance",
+        "None",
+        "draw order of translucent meshes",
+    ),
+    field(
+        "texture",
+        "\"asset/path.png\"",
+        "none",
+        "base colour texture; none = plain colour",
+    ),
+    field(
+        "material",
+        "\"asset/path.wesl\"",
+        "none",
+        "custom WESL fragment shader; none = built-in",
+    ),
+];
+
+/// Fields of `Light(( ... ))`, all optional.
+pub const LIGHT_FIELDS: &[RendererField] = &[
+    field(
+        "radius_scale",
+        "number >= 0",
+        "1.0",
+        "multiplies Particles.LightRadius",
+    ),
+    field(
+        "color_add",
+        "(r, g, b)",
+        "(0.0, 0.0, 0.0)",
+        "added to the particle colour",
+    ),
+    field(
+        "intensity",
+        "lumens per unit colour, >= 0",
+        "10000.0",
+        "brightness of a white particle",
+    ),
+    field(
+        "alpha_scales_brightness",
+        "bool",
+        "true",
+        "particle alpha multiplies brightness",
+    ),
+    field(
+        "max_lights",
+        "1..=256",
+        "16",
+        "most lights drawn per emitter (the closest ones win)",
+    ),
+];
+
+/// `(renderer name, its fields)`, in [`RENDERER_KINDS`] order.
+pub const RENDERER_FIELDS: &[(&str, &[RendererField])] = &[
+    ("Sprite", SPRITE_FIELDS),
+    ("Ribbon", RIBBON_FIELDS),
+    ("Mesh", MESH_FIELDS),
+    ("Light", LIGHT_FIELDS),
+];
+
+macro_rules! field_names {
+    ($fn_name:ident, $table:ident) => {
+        #[doc = concat!("Names of [`", stringify!($table), "`].")]
+        pub fn $fn_name() -> &'static [&'static str] {
+            const N: usize = $table.len();
+            const NAMES: [&str; N] = {
+                let mut a = [""; N];
+                let mut i = 0;
+                while i < N {
+                    a[i] = $table[i].name;
+                    i += 1;
+                }
+                a
+            };
+            &NAMES
         }
-        a
     };
-    &NAMES
 }
+
+field_names!(sprite_field_names, SPRITE_FIELDS);
+field_names!(ribbon_field_names, RIBBON_FIELDS);
+field_names!(mesh_field_names, MESH_FIELDS);
+field_names!(light_field_names, LIGHT_FIELDS);

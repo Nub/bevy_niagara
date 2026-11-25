@@ -2,8 +2,9 @@
 //!
 //! [`ViewDraw::record`] turns an emitter's living particles into
 //! `indices[0..n]` (visible particle slots, sorted far to near when the
-//! renderer sorts) and `draw_args` (`draw_indirect` arguments: 6 vertices,
-//! `n` instances). Sorting is a bitonic sort whose passes are all recorded
+//! renderer sorts) and `draw_args` (`draw_indirect` or `draw_indexed_indirect`
+//! arguments: [`ViewDrawConfig::vertex_count`] vertices or indices, `n`
+//! instances). Sorting is a bitonic sort whose passes are all recorded
 //! up front and sized on the GPU from the living count: passes beyond it get
 //! zero workgroups, so the cost follows the particle count, not the pool.
 
@@ -13,7 +14,9 @@ use crate::GpuEmitter;
 
 const VIEW_WGSL: &str = include_str!("wgsl/view.wgsl");
 const BLOCK: u32 = 512;
-const PARAMS_BYTES: usize = 6 * 16 + 16 + 16 + 16;
+const PARAMS_BYTES: usize = 6 * 16 + 16 + 16 + 16 + 16;
+/// Bytes of `draw_args`: room for `draw_indexed_indirect`'s five words.
+pub const DRAW_ARGS_BYTES: u64 = 20;
 const PASS_STRIDE: u64 = 256;
 
 /// Niagara's sprite sort modes.
@@ -26,6 +29,44 @@ pub enum SortMode {
     /// By particle UniqueID: a draw order independent of GPU scheduling, for
     /// bit-identical images (headless preview). Costs a sort.
     UniqueId,
+    /// Ribbons: by `Particles.RibbonID` (0..254), then by UniqueID (spawn order).
+    RibbonSpawnOrder,
+    /// Ribbons: by `Particles.RibbonID`, then by `Particles.RibbonLinkOrder` ascending.
+    RibbonLinkOrder,
+}
+
+/// The bounding radius culling uses for a particle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CullRadius {
+    /// `max(|SpriteSize.x|, |SpriteSize.y|)` (covers rotation and pivots up to 0.5).
+    SpriteSize,
+    /// Particle word `word` (e.g. `Particles.LightRadius`) times `scale`.
+    Word { word: u32, scale: f32 },
+    /// The largest of `|Particles.Scale|` (words 28..30) times `scale` (the
+    /// mesh's bounding radius).
+    MeshScale { scale: f32 },
+    /// Never culled (ribbons: a hidden particle would break its ribbon).
+    Off,
+}
+
+/// How a [`ViewDraw`] culls, sorts and fills its draw arguments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewDrawConfig {
+    pub sort_mode: SortMode,
+    /// First draw argument: vertices (or indices, for an indexed draw) per instance.
+    pub vertex_count: u32,
+    pub cull: CullRadius,
+}
+
+impl ViewDrawConfig {
+    /// Sprites: 6 vertices per particle, culled by sprite size.
+    pub fn sprites(sort_mode: SortMode) -> Self {
+        ViewDrawConfig {
+            sort_mode,
+            vertex_count: 6,
+            cull: CullRadius::SpriteSize,
+        }
+    }
 }
 
 /// What a view needs for culling and sorting.
@@ -153,6 +194,7 @@ impl ViewPipelines {
 /// One emitter seen from one view.
 pub struct ViewDraw {
     pub sort_mode: SortMode,
+    pub config: ViewDrawConfig,
     capacity: u32,
     max_pow2: u32,
     passes: Vec<PassKind>,
@@ -175,7 +217,22 @@ impl ViewDraw {
         emitter: &GpuEmitter,
         sort_mode: SortMode,
     ) -> Self {
+        Self::with_config(
+            device,
+            pipelines,
+            emitter,
+            ViewDrawConfig::sprites(sort_mode),
+        )
+    }
+
+    pub fn with_config(
+        device: &wgpu::Device,
+        pipelines: &ViewPipelines,
+        emitter: &GpuEmitter,
+        config: ViewDrawConfig,
+    ) -> Self {
         use wgpu::BufferUsages as U;
+        let sort_mode = config.sort_mode;
         let capacity = emitter.capacity;
         let max_pow2 = capacity.next_power_of_two().max(BLOCK);
         let sorted = sort_mode != SortMode::None;
@@ -197,7 +254,7 @@ impl ViewDraw {
         let indices = buf("fx view indices", len * 4, U::STORAGE | U::COPY_SRC);
         let draw_args = buf(
             "fx view draw args",
-            16,
+            DRAW_ARGS_BYTES,
             U::STORAGE | U::INDIRECT | U::COPY_SRC,
         );
         let passes = if sorted {
@@ -285,6 +342,7 @@ impl ViewDraw {
         });
         ViewDraw {
             sort_mode,
+            config,
             capacity,
             max_pow2,
             passes,
@@ -328,9 +386,22 @@ impl ViewDraw {
                 SortMode::ViewDepth => 1,
                 SortMode::ViewDistance => 2,
                 SortMode::UniqueId => 3,
+                SortMode::RibbonSpawnOrder => 4,
+                SortMode::RibbonLinkOrder => 5,
             },
         );
         put(34, self.max_pow2);
+        let c = &self.config;
+        let (mode, word, scale) = match c.cull {
+            CullRadius::SpriteSize => (0, 0, 1.0f32),
+            CullRadius::Word { word, scale } => (1, word, scale),
+            CullRadius::MeshScale { scale } => (2, 28, scale),
+            CullRadius::Off => (3, 0, 0.0),
+        };
+        put(35, mode);
+        put(36, c.vertex_count);
+        put(37, word);
+        put(38, scale.to_bits());
         queue.write_buffer(&self.params, 0, &self.scratch);
 
         let bg = &self.bind_groups[emitter.current];

@@ -1,0 +1,9 @@
+// expect: 7: unknown built-in mesh "sphre"
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Mesh((mesh: "sphre"))],
+    )],
+)

@@ -3,7 +3,10 @@
 
 use crate::diag::{Diags, suggest};
 use crate::model::*;
-use crate::render::{IdentEnum, RENDERER_KINDS, sprite_field_names};
+use crate::render::{
+    IdentEnum, MESH_BUILTINS, RENDERER_KINDS, is_mesh_asset_path, light_field_names,
+    mesh_field_names, ribbon_field_names, sprite_field_names,
+};
 use crate::ron_parse::{Field, SKind, SValue};
 use crate::types::{Curve, Value, ValueType};
 
@@ -143,7 +146,7 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
     })
 }
 
-const RENDERER_HELP: &str = "write a renderer as `Sprite(( field: value, ... ))`, e.g. `Sprite((blend_mode: Additive))`; every field is optional";
+const RENDERER_HELP: &str = "write a renderer as `Kind(( field: value, ... ))` with Kind one of Sprite, Ribbon, Mesh or Light, e.g. `Sprite((blend_mode: Additive))`; every field is optional";
 
 fn decode_renderer(v: &SValue, d: &mut Diags) -> Option<RendererSource> {
     // `Sprite((...))`, `Sprite(...fields...)`, `Sprite(())`, `Sprite()` or bare `Sprite`.
@@ -176,19 +179,22 @@ fn decode_renderer(v: &SValue, d: &mut Diags) -> Option<RendererSource> {
     };
     match tag {
         "Sprite" => decode_sprite(body, v, d).map(RendererSource::Sprite),
+        "Ribbon" => decode_ribbon(body, v, d).map(RendererSource::Ribbon),
+        "Mesh" => decode_mesh(body, v, d).map(RendererSource::Mesh),
+        "Light" => decode_light(body, v, d).map(RendererSource::Light),
         _ => {
             let kinds = RENDERER_KINDS.join(", ");
             let help = match suggest(tag, RENDERER_KINDS.iter().copied()) {
                 Some(s) => format!("did you mean `{s}`? Renderers are: {kinds}"),
-                None => {
-                    format!("renderers are: {kinds} (Ribbon, Mesh and Light are not supported yet)")
-                }
+                None => format!("renderers are: {kinds}"),
             };
             d.error(v.span, format!("unknown renderer `{tag}`"), Some(help));
             None
         }
     }
 }
+
+const MATERIAL_HELP: &str = "write e.g. `material: \"shaders/glow.wesl\"` (a WESL fragment shader), or leave it out for the built-in shader";
 
 fn decode_sprite(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<SpriteSource> {
     let mut s = SpriteSource {
@@ -251,20 +257,266 @@ fn decode_sprite(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option
         }
     }
     if let Some(v) = f.take("texture") {
-        match &v.kind {
-            SKind::Str(p) => s.texture = Some(p.clone()),
-            other => d.error(
-                v.span,
-                format!(
-                    "`texture` must be an asset path \"string\", found {}",
-                    other.describe()
-                ),
-                Some("write e.g. `texture: \"textures/smoke.png\"`, or leave it out for the built-in soft round sprite".into()),
-            ),
-        }
+        s.texture = asset_path(
+            v,
+            "texture",
+            "write e.g. `texture: \"textures/smoke.png\"`, or leave it out for the built-in soft round sprite",
+            d,
+        );
+    }
+    if let Some(v) = f.take("material") {
+        s.material = asset_path(v, "material", MATERIAL_HELP, d);
     }
     f.finish(d);
     Some(s)
+}
+
+fn decode_ribbon(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<RibbonSource> {
+    let mut r = RibbonSource {
+        span: whole.span,
+        ..RibbonSource::default()
+    };
+    let Some(body) = body else {
+        return Some(r);
+    };
+    let mut f = Fields::new(body, "a Ribbon renderer", ribbon_field_names(), d)?;
+    if let Some(v) = f.take("blend_mode") {
+        r.blend_mode = ident_enum(v, "blend_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("facing_mode") {
+        r.facing_mode = ident_enum(v, "facing_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("custom_facing_vector") {
+        r.custom_facing_vector = floats(v, "custom_facing_vector", "(0.0, 0.0, 1.0)", d)
+            .unwrap_or(r.custom_facing_vector);
+    }
+    if let Some(v) = f.take("uv_mode") {
+        r.uv_mode = ident_enum(v, "uv_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("tiling_length") {
+        match v.kind {
+            SKind::Number(n, _) if n > 0.0 && n.is_finite() => r.tiling_length = n as f32,
+            _ => d.error(
+                v.span,
+                format!(
+                    "`tiling_length` must be a length of more than 0 metres, found {}",
+                    v.kind.describe()
+                ),
+                Some(
+                    "write e.g. `tiling_length: 1.0` (metres of ribbon per texture repeat)".into(),
+                ),
+            ),
+        }
+    }
+    if let Some(v) = f.take("link_order") {
+        r.link_order = ident_enum(v, "link_order", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("tessellation_factor") {
+        r.tessellation_factor = whole_in_range(
+            v,
+            "tessellation_factor",
+            1..=16,
+            "write e.g. `tessellation_factor: 4` (subdivisions per segment; 1 = none)",
+            d,
+        )
+        .unwrap_or(r.tessellation_factor);
+    }
+    if let Some(v) = f.take("texture") {
+        r.texture = asset_path(
+            v,
+            "texture",
+            "write e.g. `texture: \"textures/trail.png\"`, or leave it out for plain colour",
+            d,
+        );
+    }
+    if let Some(v) = f.take("material") {
+        r.material = asset_path(v, "material", MATERIAL_HELP, d);
+    }
+    f.finish(d);
+    Some(r)
+}
+
+fn decode_mesh(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<MeshSource> {
+    let mut m = MeshSource {
+        span: whole.span,
+        ..MeshSource::default()
+    };
+    let Some(body) = body else {
+        return Some(m);
+    };
+    let mut f = Fields::new(body, "a Mesh renderer", mesh_field_names(), d)?;
+    if let Some(v) = f.take("mesh") {
+        let name = match &v.kind {
+            SKind::Str(s) => Some(s.as_str()),
+            SKind::Ident(i) => Some(i.as_str()),
+            _ => None,
+        };
+        match name {
+            Some(n) if matches!(v.kind, SKind::Str(_)) => {
+                if let Some((msg, help)) = mesh_name_error(n) {
+                    d.error(v.span, msg, Some(help));
+                } else {
+                    m.mesh = n.to_string();
+                }
+            }
+            _ => d.error(
+                v.span,
+                format!(
+                    "`mesh` must be a built-in mesh name or an asset path \"string\", found {}",
+                    v.kind.describe()
+                ),
+                Some(match name {
+                    Some(n) => format!("write it in quotes: `mesh: \"{n}\"`"),
+                    None => format!(
+                        "write e.g. `mesh: \"sphere\"` (built-in meshes: {}) or `mesh: \"meshes/rock.glb\"`",
+                        MESH_BUILTINS.join(", ")
+                    ),
+                }),
+            ),
+        }
+    }
+    if let Some(v) = f.take("blend_mode") {
+        m.blend_mode = ident_enum(v, "blend_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("facing_mode") {
+        m.facing_mode = ident_enum(v, "facing_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("lit") {
+        m.lit = boolean(v, "lit", d).unwrap_or(m.lit);
+    }
+    if let Some(v) = f.take("sort_mode") {
+        m.sort_mode = ident_enum(v, "sort_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("texture") {
+        m.texture = asset_path(
+            v,
+            "texture",
+            "write e.g. `texture: \"textures/rock.png\"`, or leave it out for plain colour",
+            d,
+        );
+    }
+    if let Some(v) = f.take("material") {
+        m.material = asset_path(v, "material", MATERIAL_HELP, d);
+    }
+    f.finish(d);
+    Some(m)
+}
+
+/// Why `mesh` is neither a built-in mesh nor an asset path: `(message, help)`.
+pub fn mesh_name_error(mesh: &str) -> Option<(String, String)> {
+    if MESH_BUILTINS.contains(&mesh) || is_mesh_asset_path(mesh) {
+        return None;
+    }
+    let builtins = MESH_BUILTINS.join(", ");
+    let help = match suggest(mesh, MESH_BUILTINS.iter().copied()) {
+        Some(s) => format!(
+            "did you mean `mesh: \"{s}\"`? Built-in meshes: {builtins}; an asset path contains a '.' or '/', e.g. \"meshes/rock.glb\""
+        ),
+        None => format!(
+            "built-in meshes: {builtins}; or give an asset path (it contains a '.' or '/'), e.g. `mesh: \"meshes/rock.glb\"`"
+        ),
+    };
+    Some((format!("unknown built-in mesh \"{mesh}\""), help))
+}
+
+fn decode_light(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<LightSource> {
+    let mut l = LightSource {
+        span: whole.span,
+        ..LightSource::default()
+    };
+    let Some(body) = body else {
+        return Some(l);
+    };
+    let mut f = Fields::new(body, "a Light renderer", light_field_names(), d)?;
+    if let Some(v) = f.take("radius_scale") {
+        match v.kind {
+            SKind::Number(n, _) if n >= 0.0 && n.is_finite() => l.radius_scale = n as f32,
+            _ => d.error(
+                v.span,
+                format!(
+                    "`radius_scale` must be a number of at least 0, found {}",
+                    v.kind.describe()
+                ),
+                Some("write e.g. `radius_scale: 2.0` (multiplies Particles.LightRadius)".into()),
+            ),
+        }
+    }
+    if let Some(v) = f.take("color_add") {
+        l.color_add = floats(v, "color_add", "(0.0, 0.0, 0.0)", d).unwrap_or(l.color_add);
+    }
+    if let Some(v) = f.take("intensity") {
+        match v.kind {
+            SKind::Number(n, _) if n >= 0.0 && n.is_finite() => l.intensity = n as f32,
+            _ => d.error(
+                v.span,
+                format!(
+                    "`intensity` must be at least 0 lumens per unit colour, found {}",
+                    v.kind.describe()
+                ),
+                Some("write e.g. `intensity: 10000.0` (lumens for a white particle)".into()),
+            ),
+        }
+    }
+    if let Some(v) = f.take("alpha_scales_brightness") {
+        l.alpha_scales_brightness =
+            boolean(v, "alpha_scales_brightness", d).unwrap_or(l.alpha_scales_brightness);
+    }
+    if let Some(v) = f.take("max_lights") {
+        l.max_lights = whole_in_range(
+            v,
+            "max_lights",
+            1..=256,
+            "write e.g. `max_lights: 16` (the lights closest to the camera are kept)",
+            d,
+        )
+        .unwrap_or(l.max_lights);
+    }
+    f.finish(d);
+    Some(l)
+}
+
+fn asset_path(v: &SValue, field: &str, help: &str, d: &mut Diags) -> Option<String> {
+    match &v.kind {
+        SKind::Str(p) => Some(p.clone()),
+        other => {
+            d.error(
+                v.span,
+                format!(
+                    "`{field}` must be an asset path \"string\", found {}",
+                    other.describe()
+                ),
+                Some(help.into()),
+            );
+            None
+        }
+    }
+}
+
+fn whole_in_range(
+    v: &SValue,
+    field: &str,
+    range: std::ops::RangeInclusive<u32>,
+    help: &str,
+    d: &mut Diags,
+) -> Option<u32> {
+    match v.kind {
+        SKind::Number(n, true) if n >= *range.start() as f64 && n <= *range.end() as f64 => {
+            Some(n as u32)
+        }
+        _ => {
+            d.error(
+                v.span,
+                format!(
+                    "`{field}` must be a whole number from {} to {}, found {}",
+                    range.start(),
+                    range.end(),
+                    v.kind.describe()
+                ),
+                Some(help.into()),
+            );
+            None
+        }
+    }
 }
 
 fn ident_enum<T: IdentEnum>(v: &SValue, field: &str, d: &mut Diags) -> Option<T> {

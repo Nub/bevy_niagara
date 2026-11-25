@@ -3,8 +3,12 @@
 mod common;
 
 use common::*;
-use fx_core::cook::{self, CookedRenderer, CookedSprite};
-use fx_core::model::{BlendMode, FacingMode, SortMode, SpriteAlignment};
+use fx_core::cook::{self, CookedLight, CookedMesh, CookedRenderer, CookedRibbon, CookedSprite};
+use fx_core::model::{
+    BlendMode, FacingMode, MeshBlendMode, MeshFacingMode, RibbonFacingMode, RibbonLinkOrderMode,
+    RibbonUvMode, SortMode, SpriteAlignment,
+};
+use fx_core::render::{MESH_BUILTINS, RENDERER_FIELDS, RENDERER_KINDS};
 
 fn with_renderers(renderers: &str) -> String {
     format!(
@@ -26,6 +30,7 @@ fn sprites(renderers: &str) -> Vec<CookedSprite> {
         .iter()
         .map(|r| match r {
             CookedRenderer::Sprite(s) => s.clone(),
+            other => panic!("expected a sprite, got {other:?}"),
         })
         .collect()
 }
@@ -55,6 +60,7 @@ fn niagara_defaults() {
     assert_eq!(d.sort_mode, SortMode::None);
     assert_eq!(d.soft_particle_fade_distance, 0.0);
     assert_eq!(d.texture, None);
+    assert_eq!(d.material, None);
     // Every spelling of an empty sprite gives the defaults.
     assert_eq!(
         sprites("Sprite(()), Sprite(), Sprite"),
@@ -85,6 +91,7 @@ fn every_field_decodes_and_cooks() {
             sort_mode: ViewDistance,
             soft_particle_fade_distance: 0.25,
             texture: "textures/spark.png",
+            material: "shaders/spark.wesl",
         ))"#,
     );
     assert_eq!(
@@ -102,6 +109,7 @@ fn every_field_decodes_and_cooks() {
             sort_mode: SortMode::ViewDistance,
             soft_particle_fade_distance: 0.25,
             texture: Some("textures/spark.png".into()),
+            material: Some("shaders/spark.wesl".into()),
         }]
     );
 }
@@ -134,7 +142,7 @@ fn renderers_survive_the_cooked_binary() {
     ));
     let bytes = cook::to_bytes(&sys);
     assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
-    assert_eq!(cook::COOKED_FORMAT_VERSION, 2);
+    assert_eq!(cook::COOKED_FORMAT_VERSION, 3);
 }
 
 #[test]
@@ -142,7 +150,9 @@ fn samples_have_their_renderers() {
     let load = |name: &str| {
         let c = fx_core::check_file(&effects_dir().join("samples").join(name)).unwrap();
         let sys = c.cooked.unwrap();
-        let CookedRenderer::Sprite(s) = sys.emitters[0].renderers[0].clone();
+        let CookedRenderer::Sprite(s) = sys.emitters[0].renderers[0].clone() else {
+            panic!("{name}: expected a sprite renderer");
+        };
         assert_eq!(sys.emitters[0].renderers.len(), 1);
         s
     };
@@ -217,8 +227,17 @@ fn errors_point_at_the_line_and_suggest_fixes() {
     let e = error("Sprite((blend_mode: Additive), (lit: true))");
     assert!(e.contains("takes one struct"), "{e}");
 
-    let e = error("Ribbon(())");
-    assert!(e.contains("unknown renderer `Ribbon`"), "{e}");
+    let e = error("Ribon(())");
+    assert!(e.contains("unknown renderer `Ribon`"), "{e}");
+    assert!(e.contains("did you mean `Ribbon`?"), "{e}");
+    let e = error("Particles(())");
+    assert!(
+        e.contains("renderers are: Sprite, Ribbon, Mesh, Light"),
+        "{e}"
+    );
+    assert!(!e.contains("not supported"), "{e}");
+    let e = error("Sprite((material: 3))");
+    assert!(e.contains("`material` must be an asset path"), "{e}");
 }
 
 #[test]
@@ -233,4 +252,262 @@ fn raw_identifiers_parse() {
         e.contains("`lit` must be `true` or `false`, found `true`"),
         "{e}"
     );
+}
+
+fn renderers(renderers: &str) -> Vec<CookedRenderer> {
+    compile(&with_renderers(renderers)).emitters[0]
+        .renderers
+        .clone()
+}
+
+#[test]
+fn ribbon_mesh_light_defaults() {
+    let r = CookedRibbon::default();
+    assert_eq!(r.blend_mode, BlendMode::Alpha);
+    assert_eq!(r.facing_mode, RibbonFacingMode::Screen);
+    assert_eq!(r.custom_facing_vector, [0.0, 0.0, 1.0]);
+    assert_eq!(r.uv_mode, RibbonUvMode::ScaledUniformly);
+    assert_eq!(r.tiling_length, 1.0);
+    assert_eq!(r.link_order, RibbonLinkOrderMode::SpawnOrder);
+    assert_eq!(r.tessellation_factor, 1);
+    assert_eq!((r.texture.clone(), r.material.clone()), (None, None));
+
+    let m = CookedMesh::default();
+    assert_eq!(m.mesh, "cube");
+    assert_eq!(m.blend_mode, MeshBlendMode::Opaque);
+    assert_eq!(m.facing_mode, MeshFacingMode::Default);
+    assert!(m.lit);
+    assert_eq!(m.sort_mode, SortMode::None);
+    assert_eq!((m.texture.clone(), m.material.clone()), (None, None));
+
+    let l = CookedLight::default();
+    assert_eq!(l.radius_scale, 1.0);
+    assert_eq!(l.color_add, [0.0; 3]);
+    assert_eq!(l.intensity, 10000.0);
+    assert!(l.alpha_scales_brightness);
+    assert_eq!(l.max_lights, 16);
+
+    assert_eq!(
+        renderers("Ribbon, Mesh(()), Light()"),
+        vec![
+            CookedRenderer::Ribbon(r),
+            CookedRenderer::Mesh(m),
+            CookedRenderer::Light(l)
+        ]
+    );
+}
+
+#[test]
+fn every_ribbon_mesh_light_field_decodes() {
+    let rs = renderers(
+        r#"Ribbon((
+            blend_mode: Additive,
+            facing_mode: CustomFacingVector,
+            custom_facing_vector: (0.0, 1.0, 0.0),
+            uv_mode: TiledOverRibbonLength,
+            tiling_length: 2.5,
+            link_order: Custom,
+            tessellation_factor: 16,
+            texture: "textures/trail.png",
+            material: "shaders/trail.wesl",
+        )),
+        Mesh((
+            mesh: "meshes/rock.glb",
+            blend_mode: Premultiplied,
+            facing_mode: CameraPlane,
+            lit: false,
+            sort_mode: ViewDistance,
+            texture: "textures/rock.png",
+            material: "shaders/rock.wesl",
+        )),
+        Mesh((mesh: "torus")),
+        Light((
+            radius_scale: 0.0,
+            color_add: (0.1, 0.2, 0.3),
+            intensity: 500,
+            alpha_scales_brightness: false,
+            max_lights: 256,
+        ))"#,
+    );
+    assert_eq!(
+        rs,
+        vec![
+            CookedRenderer::Ribbon(CookedRibbon {
+                blend_mode: BlendMode::Additive,
+                facing_mode: RibbonFacingMode::CustomFacingVector,
+                custom_facing_vector: [0.0, 1.0, 0.0],
+                uv_mode: RibbonUvMode::TiledOverRibbonLength,
+                tiling_length: 2.5,
+                link_order: RibbonLinkOrderMode::Custom,
+                tessellation_factor: 16,
+                texture: Some("textures/trail.png".into()),
+                material: Some("shaders/trail.wesl".into()),
+            }),
+            CookedRenderer::Mesh(CookedMesh {
+                mesh: "meshes/rock.glb".into(),
+                blend_mode: MeshBlendMode::Premultiplied,
+                facing_mode: MeshFacingMode::CameraPlane,
+                lit: false,
+                sort_mode: SortMode::ViewDistance,
+                texture: Some("textures/rock.png".into()),
+                material: Some("shaders/rock.wesl".into()),
+            }),
+            CookedRenderer::Mesh(CookedMesh {
+                mesh: "torus".into(),
+                ..CookedMesh::default()
+            }),
+            CookedRenderer::Light(CookedLight {
+                radius_scale: 0.0,
+                color_add: [0.1, 0.2, 0.3],
+                intensity: 500.0,
+                alpha_scales_brightness: false,
+                max_lights: 256,
+            }),
+        ]
+    );
+    // And they survive the cooked binary.
+    let sys = compile(&with_renderers(
+        r#"Ribbon((link_order: Custom)), Mesh((mesh: "sphere")), Light((max_lights: 4))"#,
+    ));
+    assert_eq!(cook::from_bytes(&cook::to_bytes(&sys)).unwrap(), sys);
+}
+
+#[test]
+fn every_builtin_mesh_is_accepted() {
+    for name in MESH_BUILTINS {
+        let rs = renderers(&format!("Mesh((mesh: \"{name}\"))"));
+        assert!(matches!(&rs[0], CookedRenderer::Mesh(m) if m.mesh == *name));
+    }
+}
+
+#[test]
+fn field_tables_list_every_renderer() {
+    let kinds: Vec<_> = RENDERER_FIELDS.iter().map(|(k, _)| *k).collect();
+    assert_eq!(kinds, RENDERER_KINDS);
+    // Every listed field decodes (its absence of an "unknown field" error).
+    for (kind, fields) in RENDERER_FIELDS {
+        for f in *fields {
+            let c = fx_core::check_source(
+                "test.fx.ron",
+                &with_renderers(&format!("{kind}(({}: ()))", f.name)),
+            );
+            assert!(
+                c.errors().all(|e| !e.message.contains("unknown field")),
+                "{kind}.{}",
+                f.name
+            );
+        }
+    }
+}
+
+#[test]
+fn ribbon_errors() {
+    let e = error("Ribbon((tessellation_factor: 0))");
+    assert!(
+        e.contains(
+            "`tessellation_factor` must be a whole number from 1 to 16, found the integer 0"
+        ),
+        "{e}"
+    );
+    let e = error("Ribbon((tessellation_factor: 17))");
+    assert!(e.contains("from 1 to 16"), "{e}");
+    let e = error("Ribbon((tiling_length: 0.0))");
+    assert!(
+        e.contains("`tiling_length` must be a length of more than 0 metres"),
+        "{e}"
+    );
+    let e = error("Ribbon((link_order: Spawn))");
+    assert!(
+        e.contains("`link_order` must be `SpawnOrder` or `Custom`"),
+        "{e}"
+    );
+    let e = error("Ribbon((uv_mode: TiledOverRibonLength))");
+    assert!(
+        e.contains("did you mean `uv_mode: TiledOverRibbonLength`?"),
+        "{e}"
+    );
+    let e = error("Ribbon((facing_mod: Screen))");
+    assert!(
+        e.contains("unknown field `facing_mod` in a Ribbon renderer"),
+        "{e}"
+    );
+    assert!(e.contains("did you mean `facing_mode`?"), "{e}");
+}
+
+#[test]
+fn mesh_errors() {
+    let e = error(r#"Mesh((mesh: "sphre"))"#);
+    assert!(e.contains("unknown built-in mesh \"sphre\""), "{e}");
+    assert!(e.contains("did you mean `mesh: \"sphere\"`?"), "{e}");
+    let e = error(r#"Mesh((mesh: "blob"))"#);
+    assert!(e.contains("built-in meshes: cube, sphere"), "{e}");
+    let e = error("Mesh((mesh: cube))");
+    assert!(e.contains("write it in quotes: `mesh: \"cube\"`"), "{e}");
+    let e = error("Mesh((blend_mode: Translucent))");
+    assert!(
+        e.contains("`blend_mode` must be `Opaque`, `Alpha`, `Additive` or `Premultiplied`"),
+        "{e}"
+    );
+    let e = error("Mesh((facing_mode: FaceCamera))");
+    assert!(
+        e.contains("`facing_mode` must be `Default`, `Velocity`"),
+        "{e}"
+    );
+}
+
+#[test]
+fn light_errors() {
+    let e = error("Light((max_lights: 0))");
+    assert!(
+        e.contains("`max_lights` must be a whole number from 1 to 256"),
+        "{e}"
+    );
+    let e = error("Light((max_lights: 300))");
+    assert!(e.contains("from 1 to 256"), "{e}");
+    let e = error("Light((intensity: -1.0))");
+    assert!(
+        e.contains("`intensity` must be at least 0 lumens per unit colour"),
+        "{e}"
+    );
+    let e = error("Light((radius_scale: -0.5))");
+    assert!(
+        e.contains("`radius_scale` must be a number of at least 0"),
+        "{e}"
+    );
+    let e = error("Light((color_add: (1.0, 1.0)))");
+    assert!(
+        e.contains("`color_add` must be a tuple of 3 numbers"),
+        "{e}"
+    );
+    let e = error("Light((texture: \"a.png\"))");
+    assert!(
+        e.contains("unknown field `texture` in a Light renderer"),
+        "{e}"
+    );
+}
+
+#[test]
+fn renderers_decide_extended_attributes() {
+    let ext = |r: &str| compile(&with_renderers(r)).emitters[0].uses_extended_attributes();
+    assert!(!ext(""));
+    assert!(!ext("Sprite"));
+    assert!(ext("Sprite, Ribbon"));
+    assert!(ext("Mesh"));
+    assert!(ext("Light"));
+}
+
+#[test]
+fn new_renderers_serialise_to_ron_that_parses_back() {
+    let text = with_renderers(
+        r#"Sprite((material: "m.wesl")),
+        Ribbon((uv_mode: ScaledUsingRibbonSegmentLength, tiling_length: 0.5, texture: "t.png")),
+        Mesh((mesh: "capsule", blend_mode: Alpha, facing_mode: Velocity, sort_mode: ViewDepth)),
+        Light((color_add: (0.5, 0.0, 0.25), intensity: 250.0, max_lights: 32))"#,
+    );
+    let c = fx_core::check_source("test.fx.ron", &text);
+    let src = c.source.unwrap();
+    let ron_text = ron::ser::to_string_pretty(&src, ron::ser::PrettyConfig::default()).unwrap();
+    let again = fx_core::check_source("roundtrip.fx.ron", &ron_text);
+    assert!(again.ok(), "{ron_text}");
+    assert_eq!(again.cooked.unwrap(), c.cooked.unwrap());
 }

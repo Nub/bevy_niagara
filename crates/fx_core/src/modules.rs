@@ -24,6 +24,11 @@ pub enum ModuleKind {
     SolveForcesAndVelocity = 10,
     ParticleState = 11,
     KillParticles = 12,
+    InitializeRibbon = 13,
+    InitializeMesh = 14,
+    UpdateMeshOrientation = 15,
+    InitializeLight = 16,
+    DynamicMaterialParameters = 17,
 }
 
 pub struct InputDef {
@@ -212,8 +217,14 @@ pub static MODULES: &[ModuleDef] = &[
                 Value::Vec3([0.0; 3]),
                 "pans the noise field (link Engine.Time for motion)",
             ),
+            i(
+                "Pan Noise Field",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "moves the noise field over time (noise-space units per second)",
+            ),
         ],
-        doc: "Adds a divergence-free curl-noise force sampled at the particle position.",
+        doc: "Adds a divergence-free curl-noise force sampled at Position * Noise Frequency + Noise Offset + Pan Noise Field * Engine.Time.",
     },
     ModuleDef {
         kind: ModuleKind::ScaleColor,
@@ -277,6 +288,84 @@ pub static MODULES: &[ModuleDef] = &[
             "kill the particle when true",
         )],
         doc: "Kills the particle when Kill Particles is true.",
+    },
+    ModuleDef {
+        kind: ModuleKind::InitializeRibbon,
+        name: "Initialize Ribbon",
+        stages: &[ParticleSpawn],
+        inputs: &[
+            i("Ribbon Width", T::Float, Value::Float(0.1), "metres"),
+            i(
+                "Ribbon Twist",
+                T::Float,
+                Value::Float(0.0),
+                "degrees around the ribbon direction",
+            ),
+            i(
+                "Ribbon ID",
+                T::Int,
+                Value::Int(0),
+                "which ribbon the particle joins (0..255)",
+            ),
+            i(
+                "Ribbon Link Order",
+                T::Float,
+                Value::Float(0.0),
+                "order along the ribbon when the renderer's link_order is Custom",
+            ),
+        ],
+        doc: "Sets Particles.RibbonWidth, RibbonTwist, RibbonID and RibbonLinkOrder for a Ribbon renderer.",
+    },
+    ModuleDef {
+        kind: ModuleKind::InitializeMesh,
+        name: "Initialize Mesh",
+        stages: &[ParticleSpawn],
+        inputs: &[
+            i(
+                "Mesh Scale",
+                T::Vec3,
+                Value::Vec3([1.0; 3]),
+                "scale per axis",
+            ),
+            i(
+                "Mesh Rotation",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "Euler angles in degrees, applied X, then Y, then Z",
+            ),
+        ],
+        doc: "Sets Particles.Scale and Particles.MeshOrientation for a Mesh renderer.",
+    },
+    ModuleDef {
+        kind: ModuleKind::UpdateMeshOrientation,
+        name: "Update Mesh Orientation",
+        stages: &[ParticleUpdate],
+        inputs: &[i(
+            "Rotation Rate",
+            T::Vec3,
+            Value::Vec3([0.0; 3]),
+            "degrees per second around X, Y and Z",
+        )],
+        doc: "Particles.MeshOrientation = normalize(MeshOrientation * rotation by Rotation Rate * DeltaTime).",
+    },
+    ModuleDef {
+        kind: ModuleKind::InitializeLight,
+        name: "Initialize Light",
+        stages: PARTICLE,
+        inputs: &[i("Light Radius", T::Float, Value::Float(1.0), "metres")],
+        doc: "Sets Particles.LightRadius for a Light renderer.",
+    },
+    ModuleDef {
+        kind: ModuleKind::DynamicMaterialParameters,
+        name: "Dynamic Material Parameters",
+        stages: PARTICLE,
+        inputs: &[i(
+            "Dynamic Material Parameter",
+            T::Vec4,
+            Value::Vec4([0.0; 4]),
+            "four free values exposed to custom materials",
+        )],
+        doc: "Sets Particles.DynamicMaterialParameter, which custom materials can read.",
     },
 ];
 

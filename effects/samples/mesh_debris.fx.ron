@@ -1,0 +1,74 @@
+// Mesh debris: a burst of lit, opaque tumbling cubes thrown up under
+// gravity, plus a steady stream of translucent tori aligned with their
+// velocity, tinted by a custom material from a dynamic material parameter.
+(
+    name: "Mesh Debris",
+    emitters: [
+        (
+            name: "Chunks",
+            max_particles: 200,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(60), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(60), "Spawn Time": Float(1.2) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.0), Float(2.6)),
+                    "Position": RandomRange(Vec3((-0.2, 0.1, -0.2)), Vec3((0.2, 0.3, 0.2))),
+                    "Color": RandomRange(Color((0.5, 0.35, 0.25, 1.0)), Color((0.85, 0.6, 0.4, 1.0))),
+                }),
+                (module: "Initialize Mesh", inputs: {
+                    "Mesh Scale": RandomRange(Vec3((0.08, 0.08, 0.08)), Vec3((0.2, 0.16, 0.2))),
+                    "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((360.0, 360.0, 360.0))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(35.0),
+                    "Velocity Strength": RandomRange(Float(3.5), Float(5.5)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Update Mesh Orientation", inputs: { "Rotation Rate": Vec3((240.0, 90.0, 160.0)) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+            renderers: [Mesh((mesh: "cube", blend_mode: Opaque, lit: true))],
+        ),
+        (
+            name: "Rings",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(25.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": Vec3((0.0, 0.2, 0.0)),
+                    "Color": Color((0.4, 0.9, 1.0, 0.8)),
+                }),
+                (module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((0.35, 0.35, 0.35)) }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(20.0),
+                    "Velocity Strength": Float(1.5),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (1.0, 0.0)])),
+                }),
+                (module: "Dynamic Material Parameters", inputs: {
+                    "Dynamic Material Parameter": CurveOverAge(Vec4([(0.0, (0.0, 0.0, 0.0, 0.0)), (1.0, (1.0, 0.0, 0.0, 0.0))])),
+                }),
+            ],
+            renderers: [Mesh((
+                mesh: "torus",
+                blend_mode: Additive,
+                lit: false,
+                facing_mode: Velocity,
+                material: "materials/age_tint.wesl",
+            ))],
+        ),
+    ],
+)
