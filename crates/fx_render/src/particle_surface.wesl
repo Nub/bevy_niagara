@@ -110,3 +110,72 @@ fn sprite_corner(
     let r = vec2<f32>(q.x * c - q.y * s, q.x * s + q.y * c);
     return SpriteCorner(pos + right * r.x + up * r.y, n, right);
 }
+
+// ---------------------------------------------------------------- ribbons
+// Shared by the raster ribbon shader (`ribbon.wesl`) and fx_solari's ribbon
+// proxy pass and hit function.
+
+// U at sorted position k of the ribbon spanning sorted positions s..=e, from
+// the distances along the sorted polyline at k, s and e. `uv_mode`: 0 scaled
+// uniformly, 1 by segment length, 2 tiled every `tiling_length` metres.
+fn ribbon_u(
+    k: u32, s: u32, e: u32, dk: f32, ds: f32, de: f32,
+    uv_mode: u32, from_end: bool, tiling_length: f32,
+) -> f32 {
+    switch uv_mode {
+        case 1u: {
+            let total = max(de - ds, 1e-6);
+            return select(dk - ds, de - dk, from_end) / total;
+        }
+        case 2u: {
+            return select(dk - ds, de - dk, from_end) / tiling_length;
+        }
+        default: {
+            let span = f32(max(e - s, 1u));
+            return select(f32(k - s), f32(e - k), from_end) / span;
+        }
+    }
+}
+
+// A point on a ribbon's surface.
+struct RibbonPoint {
+    world: vec3<f32>,
+    // cross(side, tangent): one fixed side of the surface (not flipped to the viewer).
+    normal: vec3<f32>,
+}
+
+// The point at `t` in 0..1 along the segment p1 → p2 (uniform Catmull-Rom with
+// neighbours p0 and p3), `side_sign` (-1 or 1) half a `width` across it. The
+// width runs across the tangent, seen face-on from `cam_position` (facing
+// mode 0, Screen) or facing `custom_facing` (1), then turned by `twist`
+// radians. `cam_up` / `cam_right` are fallbacks for degenerate directions.
+fn ribbon_point(
+    p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>,
+    t: f32, side_sign: f32, width: f32, twist: f32,
+    facing_mode: u32, custom_facing: vec3<f32>,
+    cam_position: vec3<f32>, cam_right: vec3<f32>, cam_up: vec3<f32>,
+) -> RibbonPoint {
+    let a = 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3;
+    let b = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+    let pos = 0.5 * (2.0 * p1 + (p2 - p0) * t + a * t * t + b * t * t * t);
+    let d = 0.5 * ((p2 - p0) + 2.0 * a * t + 3.0 * b * t * t);
+    let tangent = surface_safe_normalize(d, surface_safe_normalize(p2 - p1, vec3<f32>(0.0, 1.0, 0.0)));
+
+    var facing = cam_position - pos;
+    if (facing_mode == 1u) {
+        facing = custom_facing;
+    }
+    var side = cross(tangent, facing);
+    if (length(side) < 1e-6) {
+        side = cross(tangent, cam_up);
+    }
+    side = surface_safe_normalize(side, cam_right);
+    side = side * cos(twist) + cross(tangent, side) * sin(twist);
+    return RibbonPoint(pos + side * (0.5 * width * side_sign), cross(side, tangent));
+}
+
+// The built-in ribbon look (no texture): soft edges across the width, `v` in 0..1.
+fn ribbon_builtin_texel(v: f32) -> vec4<f32> {
+    let x = v * 2.0 - 1.0;
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0 - x * x);
+}

@@ -1661,6 +1661,31 @@ impl FxState {
     pub fn view_pipelines(&self) -> &ViewPipelines {
         &self.view_pipelines
     }
+
+    /// The GPU-built ribbon of renderer `renderer` (index among all the
+    /// effect's renderers) of effect `main`, once it was prepared: built in
+    /// [`FxRenderGraphSystems::Simulate`], read it after.
+    pub fn ribbon(&self, main: Entity, renderer: usize) -> Option<RibbonBuffers<'_>> {
+        let rs = self.effects.get(&main)?.draws.get(renderer)?.ribbon.as_ref()?;
+        Some(RibbonBuffers {
+            indices: &rs.view.draw.indices,
+            dist: &rs.build.dist,
+            ribbons: &rs.build.ribbons,
+            meta: &rs.build.meta,
+        })
+    }
+}
+
+/// A ribbon renderer's GPU-built inputs (see [`fx_gpu::ribbon::RibbonBuild`]).
+pub struct RibbonBuffers<'a> {
+    /// Particle indices sorted by (RibbonID, link order) (`array<u32>`).
+    pub indices: &'a wgpu::Buffer,
+    /// Distance along the sorted polyline at each sorted position (`array<f32>`).
+    pub dist: &'a wgpu::Buffer,
+    /// (first, last) sorted position per ribbon id (`array<u32>`).
+    pub ribbons: &'a wgpu::Buffer,
+    /// `[sorted particle count, ..]` (`array<u32>`).
+    pub meta: &'a wgpu::Buffer,
 }
 
 /// The built-in sprite texture (soft round dot, or a puff per flipbook cell

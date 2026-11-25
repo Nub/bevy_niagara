@@ -18,7 +18,10 @@
 //! use ReSTIR.
 //! `bench` prints the median GPU ms of every render span over the measured
 //! frames (and the median CPU frame time); `--copies` places N fire+sparks
-//! pairs side by side.
+//! pairs (or N copies of `--effect`) side by side.
+//!
+//! `scenes/sword_trail_rt.fx.ron` (with `--effect`) is the ribbon test: a
+//! glowing sword trail lighting the back wall, seen in the mirror.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -131,8 +134,10 @@ fn load_path(path: &Path, ray_tracing: bool) -> Result<CookedSystem, String> {
         .ok_or_else(|| format!("{} has errors", path.display()))?;
     for e in &mut sys.emitters {
         for r in &mut e.renderers {
-            if let CookedRenderer::Sprite(s) = r {
-                s.ray_tracing &= ray_tracing;
+            match r {
+                CookedRenderer::Sprite(s) => s.ray_tracing &= ray_tracing,
+                CookedRenderer::Ribbon(s) => s.ray_tracing &= ray_tracing,
+                _ => {}
             }
         }
     }
@@ -368,7 +373,18 @@ fn setup(
     ));
     let _ = span;
     if let Some(extra) = extra {
-        commands.spawn((ParticleEffect::new(extra.clone(), 1), Transform::from_xyz(0.0, 0.0, -0.4)));
+        // `--copies` side by side (bench).
+        for c in 0..o.copies {
+            let dx = 2.5 * c as f32 - 1.25 * (o.copies - 1) as f32;
+            commands.spawn((ParticleEffect::new(extra.clone(), 1 + c), Transform::from_xyz(dx, 0.0, -0.4)));
+        }
+        // Shots: one more behind the camera, turned around, seen in the mirror.
+        if !o.bench {
+            commands.spawn((
+                ParticleEffect::new(extra.clone(), 2),
+                Transform::from_xyz(2.2, 0.0, 6.0).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            ));
+        }
         return;
     }
     for c in 0..o.copies {

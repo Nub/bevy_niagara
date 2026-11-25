@@ -52,8 +52,8 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 use bevy::shader::load_shader_library;
 use bevy::solari::prelude::{RaytracingMesh3d, SolariLighting};
 use bevy::solari::scene::{RaytracingMaterial, RaytracingMaterialDescription, SolariMaterialPlugin};
-use fx_core::cook::{CookedRenderer, CookedSprite, CookedSystem};
-use fx_core::render::{BlendMode, FacingMode, SpriteAlignment};
+use fx_core::cook::{CookedRenderer, CookedRibbon, CookedSprite, CookedSystem};
+use fx_core::render::{BlendMode, FacingMode, RibbonFacingMode, RibbonLinkOrderMode, RibbonUvMode, SpriteAlignment};
 use fx_gpu::view::{CullRadius, SortMode, ViewDraw, ViewDrawConfig};
 use fx_gpu::wgpu;
 use fx_render::{FxRenderGraphSystems, FxState, NO_VIEW, ParticleEffect};
@@ -75,6 +75,7 @@ impl Plugin for FxSolariPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "particle_hit.wesl");
         embedded_asset!(app, "proxy.wesl");
+        embedded_asset!(app, "ribbon_proxy.wesl");
         app.init_asset::<ParticleRtMaterial>()
             .add_plugins(SolariMaterialPlugin::<ParticleRtMaterial>::default())
             .init_resource::<Proxies>()
@@ -113,7 +114,8 @@ impl Plugin for FxSolariPlugin {
 /// no `Mesh3d`).
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct ParticleRtMaterial {
-    pub sprite: Handle<Image>,
+    /// Sprite or ribbon texture (ribbons: `None` = the built-in soft edges).
+    pub sprite: Option<Handle<Image>>,
     pub data: Handle<Image>,
     /// Unlit or additive: emits its colour.
     pub emissive: bool,
@@ -122,6 +124,8 @@ pub struct ParticleRtMaterial {
     pub sub_uv_blending: bool,
     /// Radiance per unit of raster colour: 1 / the Solari camera's exposure.
     pub radiance_scale: f32,
+    /// A ribbon proxy (`ribbon_proxy.wesl`) instead of sprites.
+    pub ribbon: bool,
 }
 
 impl Material for ParticleRtMaterial {}
@@ -132,7 +136,7 @@ impl RaytracingMaterial for ParticleRtMaterial {
     }
 
     fn raytracing_description(&self) -> RaytracingMaterialDescription {
-        let flags = self.emissive as u32 | (self.additive as u32) << 1;
+        let flags = self.emissive as u32 | (self.additive as u32) << 1 | (self.ribbon as u32) << 2;
         RaytracingMaterialDescription {
             fallback: StandardMaterial {
                 base_color: if self.emissive { Color::BLACK } else { Color::WHITE },
@@ -161,25 +165,38 @@ impl RaytracingMaterial for ParticleRtMaterial {
                 Vec4::ZERO,
                 Vec4::ZERO,
             ],
-            textures: [Some(self.sprite.clone()), Some(self.data.clone()), None, None],
+            textures: [self.sprite.clone(), Some(self.data.clone()), None, None],
         }
     }
 }
 
 // ---------------------------------------------------------------- main world
 
-/// The ray-tracing proxy of one sprite renderer of a [`ParticleEffect`].
+/// The renderer a proxy traces.
+#[derive(Clone)]
+pub enum ProxyRenderer {
+    Sprite(CookedSprite),
+    Ribbon(CookedRibbon),
+}
+
+/// The ray-tracing proxy of one sprite or ribbon renderer of a [`ParticleEffect`].
 #[derive(Component, Clone)]
 pub struct ParticleRtProxy {
     pub effect: Entity,
     /// Index among all the effect's renderers.
     pub renderer: usize,
     pub emitter: usize,
-    /// Particle slots in the proxy mesh.
+    /// Quad slots in the proxy mesh: one per particle (sprites) or per
+    /// segment subdivision (ribbons).
     pub slots: u32,
     pub data: Handle<Image>,
-    pub sprite: CookedSprite,
+    pub settings: ProxyRenderer,
 }
+
+/// Data texels per slot: sprites colour and age; ribbons the colour at both
+/// ends of the sub-segment and its U range.
+const SPRITE_TEXELS: u32 = 2;
+const RIBBON_TEXELS: u32 = 3;
 
 /// Main world: proxy entity and system of each (effect, renderer).
 #[derive(Resource, Default)]
@@ -228,8 +245,7 @@ fn proxy_mesh(slots: u32) -> Mesh {
     mesh
 }
 
-fn data_image(slots: u32) -> Image {
-    let texels = 2 * slots;
+fn data_image(texels: u32) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
             width: DATA_WIDTH,
@@ -245,8 +261,15 @@ fn data_image(slots: u32) -> Image {
     image
 }
 
-/// Spawns, replaces and despawns the proxies of ray-traced sprite renderers
-/// (only while a Solari camera is active),
+/// Quad slots of a ribbon proxy: every segment subdivision of an emitter of
+/// `max_particles` (at most [`MAX_SLOTS`]: past it, the first segments in
+/// ribbon order are traced).
+fn ribbon_slots(max_particles: u32, tessellation: u32) -> u32 {
+    (max_particles.saturating_sub(1).max(1) * tessellation.clamp(1, 16)).min(MAX_SLOTS)
+}
+
+/// Spawns, replaces and despawns the proxies of ray-traced sprite and ribbon
+/// renderers (only while a Solari camera is active),
 /// and keeps their emission in step with the Solari camera's exposure.
 #[allow(clippy::too_many_arguments)]
 fn sync_proxies(
@@ -281,8 +304,12 @@ fn sync_proxies(
     for (effect, fx) in effects.iter().filter(|_| solari_camera.is_some()) {
         let system_ptr = Arc::as_ptr(&fx.system) as usize;
         for (ri, (ei, r)) in renderers(&fx.system).enumerate() {
-            let CookedRenderer::Sprite(s) = r else { continue };
-            if !s.ray_tracing {
+            let traced = match r {
+                CookedRenderer::Sprite(s) => s.ray_tracing,
+                CookedRenderer::Ribbon(r) => r.ray_tracing,
+                _ => false,
+            };
+            if !traced {
                 continue;
             }
             live.insert((effect, ri));
@@ -291,28 +318,53 @@ fn sync_proxies(
                 Some(&(old, _)) => commands.entity(old).despawn(),
                 None => {}
             }
-            let slots = fx.system.emitters[ei].max_particles.clamp(1, MAX_SLOTS);
-            let data = images.add(data_image(slots));
-            let sprite = match &s.texture {
-                Some(path) => asset_server.load::<Image>(path.clone()),
-                None => {
-                    let key = (s.sub_image_size[0].max(1), s.sub_image_size[1].max(1));
-                    proxies
-                        .builtin_sprites
-                        .entry(key)
-                        .or_insert_with(|| images.add(fx_render::builtin_sprite_image(key.0, key.1)))
-                        .clone()
+            let max_particles = fx.system.emitters[ei].max_particles;
+            let (slots, data, material, settings) = match r {
+                CookedRenderer::Sprite(s) => {
+                    let slots = max_particles.clamp(1, MAX_SLOTS);
+                    let data = images.add(data_image(SPRITE_TEXELS * slots));
+                    let sprite = match &s.texture {
+                        Some(path) => asset_server.load::<Image>(path.clone()),
+                        None => {
+                            let key = (s.sub_image_size[0].max(1), s.sub_image_size[1].max(1));
+                            proxies
+                                .builtin_sprites
+                                .entry(key)
+                                .or_insert_with(|| images.add(fx_render::builtin_sprite_image(key.0, key.1)))
+                                .clone()
+                        }
+                    };
+                    let material = ParticleRtMaterial {
+                        sprite: Some(sprite),
+                        data: data.clone(),
+                        emissive: !s.lit || s.blend_mode == BlendMode::Additive,
+                        additive: s.blend_mode == BlendMode::Additive,
+                        sub_image: s.sub_image_size,
+                        sub_uv_blending: s.sub_uv_blending,
+                        radiance_scale,
+                        ribbon: false,
+                    };
+                    (slots, data, material, ProxyRenderer::Sprite(s.clone()))
                 }
+                CookedRenderer::Ribbon(rb) => {
+                    let slots = ribbon_slots(max_particles, rb.tessellation_factor);
+                    let data = images.add(data_image(RIBBON_TEXELS * slots));
+                    let material = ParticleRtMaterial {
+                        sprite: rb.texture.as_ref().map(|path| asset_server.load::<Image>(path.clone())),
+                        data: data.clone(),
+                        // Ribbons are unlit: they show (and emit) their colour.
+                        emissive: true,
+                        additive: rb.blend_mode == BlendMode::Additive,
+                        sub_image: [1, 1],
+                        sub_uv_blending: false,
+                        radiance_scale,
+                        ribbon: true,
+                    };
+                    (slots, data, material, ProxyRenderer::Ribbon(rb.clone()))
+                }
+                _ => unreachable!(),
             };
-            let material = materials.add(ParticleRtMaterial {
-                sprite,
-                data: data.clone(),
-                emissive: !s.lit || s.blend_mode == BlendMode::Additive,
-                additive: s.blend_mode == BlendMode::Additive,
-                sub_image: s.sub_image_size,
-                sub_uv_blending: s.sub_uv_blending,
-                radiance_scale,
-            });
+            let material = materials.add(material);
             let proxy = commands
                 .spawn((
                     Name::new(format!("fx ray-tracing proxy {ri}")),
@@ -322,7 +374,7 @@ fn sync_proxies(
                         emitter: ei,
                         slots,
                         data,
-                        sprite: s.clone(),
+                        settings,
                     },
                     RaytracingMesh3d(meshes.add(proxy_mesh(slots))),
                     MeshMaterial3d(material),
@@ -352,11 +404,12 @@ fn sync_proxies(
 struct ExtractedProxy {
     render: Entity,
     effect: Entity,
+    renderer: usize,
     emitter: usize,
     slots: u32,
     mesh: AssetId<Mesh>,
     data: AssetId<Image>,
-    sprite: CookedSprite,
+    settings: ProxyRenderer,
 }
 
 #[derive(Resource, Default)]
@@ -371,18 +424,20 @@ fn extract_proxies(
         out.0.push(ExtractedProxy {
             render,
             effect: p.effect,
+            renderer: p.renderer,
             emitter: p.emitter,
             slots: p.slots,
             mesh: mesh.id(),
             data: p.data.id(),
-            sprite: p.sprite.clone(),
+            settings: p.settings.clone(),
         });
     }
 }
 
 struct ProxyGpu {
     particles: wgpu::Buffer,
-    draw: ViewDraw,
+    /// Sprites: every living particle, compacted. Ribbons use fx_render's sort.
+    draw: Option<ViewDraw>,
     uniform: wgpu::Buffer,
     data_view: Option<(AssetId<Image>, TextureView)>,
     scratch: [u8; PARAMS_BYTES],
@@ -393,6 +448,8 @@ struct ProxyGpu {
 struct ProxyState {
     layout: BindGroupLayoutDescriptor,
     pipeline: CachedComputePipelineId,
+    ribbon_layout: BindGroupLayoutDescriptor,
+    ribbon_pipeline: CachedComputePipelineId,
     entries: HashMap<Entity, ProxyGpu>,
     /// The camera sprites face: position, right, up, back (world).
     camera: [Vec4; 4],
@@ -420,16 +477,41 @@ fn init_proxy_state(mut commands: Commands, asset_server: Res<AssetServer>, cach
         entry_point: Some("proxy".into()),
         ..default()
     });
+    let ribbon_layout = BindGroupLayoutDescriptor::new(
+        "fx rt ribbon proxy",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_sized(false, None),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            ),
+        ),
+    );
+    let ribbon_pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("fx rt ribbon proxy".into()),
+        layout: vec![ribbon_layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "ribbon_proxy.wesl"),
+        entry_point: Some("ribbon_proxy".into()),
+        ..default()
+    });
     commands.insert_resource(ProxyState {
         layout,
         pipeline,
+        ribbon_layout,
+        ribbon_pipeline,
         entries: HashMap::default(),
         camera: [Vec4::ZERO, Vec4::X, Vec4::Y, Vec4::Z],
     });
 }
 
-/// Per proxy: the cull (no frustum: every living particle, compacted) and
-/// the uniform; the camera sprites face this frame.
+/// Per proxy: the uniform and, for sprites, the cull (no frustum: every
+/// living particle, compacted); the camera sprites face this frame.
 fn prepare_proxies(
     mut state: ResMut<ProxyState>,
     extracted: Res<ExtractedProxies>,
@@ -459,16 +541,18 @@ fn prepare_proxies(
                 p.render,
                 ProxyGpu {
                     particles: em.particles[0].clone(),
-                    draw: ViewDraw::with_config(
-                        wd,
-                        fx.view_pipelines(),
-                        em,
-                        ViewDrawConfig {
-                            sort_mode: SortMode::None,
-                            vertex_count: 6,
-                            cull: CullRadius::Off,
-                        },
-                    ),
+                    draw: matches!(p.settings, ProxyRenderer::Sprite(_)).then(|| {
+                        ViewDraw::with_config(
+                            wd,
+                            fx.view_pipelines(),
+                            em,
+                            ViewDrawConfig {
+                                sort_mode: SortMode::None,
+                                vertex_count: 6,
+                                cull: CullRadius::Off,
+                            },
+                        )
+                    }),
                     uniform: wd.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("fx rt proxy params"),
                         size: PARAMS_BYTES as u64,
@@ -542,10 +626,14 @@ fn write_proxies(
     if extracted.0.is_empty() {
         return;
     }
-    let Some(pipeline) = pipeline_cache.get_compute_pipeline(state.pipeline) else {
+    let (Some(pipeline), Some(ribbon_pipeline)) = (
+        pipeline_cache.get_compute_pipeline(state.pipeline),
+        pipeline_cache.get_compute_pipeline(state.ribbon_pipeline),
+    ) else {
         return;
     };
     let layout = pipeline_cache.get_bind_group_layout(&state.layout);
+    let ribbon_layout = pipeline_cache.get_bind_group_layout(&state.ribbon_layout);
     let state = &mut *state;
     let camera = state.camera;
     let recorder = ctx.diagnostic_recorder();
@@ -574,8 +662,6 @@ fn write_proxies(
         }
         let Some((_, data_view)) = &entry.data_view else { continue };
 
-        // Uniform (see `ProxyParams` in proxy.wesl).
-        let s = &p.sprite;
         let mut words = [0u32; 52];
         let mut f = |i: usize, v: f32| words[i] = v.to_bits();
         let m: Mat4 = world_from_local;
@@ -587,64 +673,103 @@ fn write_proxies(
                 f(16 + 4 * j + k, *v);
             }
         }
-        for k in 0..3 {
-            f(32 + k, s.custom_facing_vector[k]);
-            f(36 + k, s.custom_alignment_vector[k]);
+        let texture = |binding: u32| wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(data_view),
+        };
+        fn buffer(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: b.as_entire_binding(),
+            }
         }
-        f(40, s.pivot_in_uv_space[0]);
-        f(41, s.pivot_in_uv_space[1]);
-        words[42] = em.capacity;
-        words[43] = p.slots.min(em.capacity);
-        words[44] = facing_index(s.facing_mode);
-        words[45] = alignment_index(s.alignment);
-        words[46] = slice.range.start * stride;
-        words[47] = stride;
-        words[48] = normal_offset;
-        words[49] = tangent_offset;
-        words[50] = DATA_WIDTH;
+        let (bind_group, pipeline, threads) = match &p.settings {
+            ProxyRenderer::Sprite(s) => {
+                let Some(draw) = &mut entry.draw else { continue };
+                // Uniform (see `ProxyParams` in proxy.wesl).
+                for k in 0..3 {
+                    f(32 + k, s.custom_facing_vector[k]);
+                    f(36 + k, s.custom_alignment_vector[k]);
+                }
+                f(40, s.pivot_in_uv_space[0]);
+                f(41, s.pivot_in_uv_space[1]);
+                words[42] = em.capacity;
+                words[43] = p.slots.min(em.capacity);
+                words[44] = facing_index(s.facing_mode);
+                words[45] = alignment_index(s.alignment);
+                words[46] = slice.range.start * stride;
+                words[47] = stride;
+                words[48] = normal_offset;
+                words[49] = tangent_offset;
+                words[50] = DATA_WIDTH;
+                draw.record(&queue, encoder, fx.view_pipelines(), em, &NO_VIEW);
+                let bind_group = device.wgpu_device().create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("fx rt proxy"),
+                    layout: &layout,
+                    entries: &[
+                        buffer(0, &entry.uniform),
+                        buffer(1, &em.particles[em.current]),
+                        buffer(2, &draw.indices),
+                        buffer(3, &draw.draw_args),
+                        buffer(4, &slice.buffer),
+                        texture(5),
+                    ],
+                });
+                (bind_group, pipeline, words[43])
+            }
+            ProxyRenderer::Ribbon(r) => {
+                // This frame's sort and ribbon build, recorded by fx_render.
+                let Some(rb) = fx.ribbon(p.effect, p.renderer) else { continue };
+                // Uniform (see `RibbonProxyParams` in ribbon_proxy.wesl).
+                for k in 0..3 {
+                    f(32 + k, r.custom_facing_vector[k]);
+                }
+                words[36] = em.capacity;
+                words[37] = p.slots;
+                words[38] = r.tessellation_factor.clamp(1, 16);
+                words[39] = match r.facing_mode {
+                    RibbonFacingMode::Screen => 0,
+                    RibbonFacingMode::CustomFacingVector => 1,
+                };
+                words[40] = slice.range.start * stride;
+                words[41] = stride;
+                words[42] = normal_offset;
+                words[43] = tangent_offset;
+                words[44] = DATA_WIDTH;
+                words[45] = match r.uv_mode {
+                    RibbonUvMode::ScaledUniformly => 0,
+                    RibbonUvMode::ScaledUsingRibbonSegmentLength => 1,
+                    RibbonUvMode::TiledOverRibbonLength => 2,
+                };
+                // As fx_render's ribbon uniform: spawn order runs U from the newest end.
+                words[46] = (r.link_order == RibbonLinkOrderMode::SpawnOrder) as u32;
+                words[47] = r.tiling_length.max(1e-4).to_bits();
+                let bind_group = device.wgpu_device().create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("fx rt ribbon proxy"),
+                    layout: &ribbon_layout,
+                    entries: &[
+                        buffer(0, &entry.uniform),
+                        buffer(1, &em.particles[em.current]),
+                        buffer(2, rb.indices),
+                        buffer(3, rb.dist),
+                        buffer(4, rb.ribbons),
+                        buffer(5, rb.meta),
+                        buffer(6, &slice.buffer),
+                        texture(7),
+                    ],
+                });
+                (bind_group, ribbon_pipeline, p.slots)
+            }
+        };
         entry.scratch.copy_from_slice(bytemuck::cast_slice(&words));
         queue.write_buffer(&entry.uniform, 0, &entry.scratch);
-
-        entry
-            .draw
-            .record(&queue, encoder, fx.view_pipelines(), em, &NO_VIEW);
-        let bind_group = device.wgpu_device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fx rt proxy"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: entry.uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: em.particles[em.current].as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: entry.draw.indices.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: entry.draw.draw_args.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: slice.buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(data_view),
-                },
-            ],
-        });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("fx rt proxy"),
             timestamp_writes: None,
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(words[43].div_ceil(64), 1, 1);
+        pass.dispatch_workgroups(threads.div_ceil(64), 1, 1);
     }
     span.end(encoder);
 }
@@ -676,12 +801,20 @@ mod tests {
 
     #[test]
     fn data_texture_holds_two_texels_per_slot() {
-        let image = data_image(MAX_SLOTS);
+        let image = data_image(RIBBON_TEXELS * MAX_SLOTS);
         let size = image.texture_descriptor.size;
-        assert!(size.width * size.height >= 2 * MAX_SLOTS);
+        assert!(size.width * size.height >= RIBBON_TEXELS * MAX_SLOTS);
         assert!(image.texture_descriptor.usage.contains(TextureUsages::STORAGE_BINDING));
         // Solari indexes an emissive mesh's triangles with 16 bits.
         assert!(4 * MAX_SLOTS <= u16::MAX as u32);
+    }
+
+    #[test]
+    fn ribbon_slots_cover_every_subsegment_up_to_the_cap() {
+        assert_eq!(ribbon_slots(64, 4), 63 * 4);
+        assert_eq!(ribbon_slots(1, 1), 1);
+        assert_eq!(ribbon_slots(0, 0), 1);
+        assert_eq!(ribbon_slots(100_000, 16), MAX_SLOTS);
     }
 }
 
