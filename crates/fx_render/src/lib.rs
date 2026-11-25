@@ -894,8 +894,8 @@ struct GpuMesh {
 struct BatchKey {
     /// (system pointer, ray tracing): the program.
     program: (usize, bool),
-    /// The renderer assets (`RendererAssetsCache` entry pointer).
-    assets: usize,
+    /// The renderer assets (a hash of their asset ids).
+    assets: u64,
     /// Systems with data interfaces get a batch per instance.
     exclusive: bool,
 }
@@ -1178,7 +1178,7 @@ fn prepare_effects(
         let program_key = (Arc::as_ptr(&ex.system) as usize, ray_tracing);
         let key = BatchKey {
             program: program_key,
-            assets: Arc::as_ptr(&ex.assets) as usize,
+            assets: assets_hash(&ex.assets),
             exclusive: !ex.system.data_interfaces.is_empty(),
         };
         state.used.insert(program_key, frame);
@@ -2404,4 +2404,16 @@ fn map_done_counts(mut rb: ResMut<DoneReadback>, inbox: Res<game::DoneInbox>) {
         }
         busy.store(false, Ordering::Release);
     });
+}
+
+/// Identity of a renderer asset list (instances drawn together share it).
+fn assets_hash(assets: &[RendererAssets]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    for a in assets {
+        a.texture.as_ref().map(|h| h.id()).hash(&mut h);
+        a.material.as_ref().map(|h| h.id()).hash(&mut h);
+        a.mesh.as_ref().map(|h| h.id()).hash(&mut h);
+    }
+    h.finish()
 }
