@@ -8,7 +8,7 @@ cargo run -p fx_core --bin fxc -- cook  effects/samples/fountain.fx.ron   # writ
 cargo run -p fx_core --bin fxc -- modules                                  # modules, stages, inputs
 ```
 
-Shape: `( name, duration, scalability: ( ... ), user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
+Shape: `( name, duration, warmup_time, warmup_tick_delta, scalability: ( ... ), user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, deterministic, fixed_bounds, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
 Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: { "Input Name": <input> })`.
 
 **Renderers** (Niagara's emitter renderers) say how particles are drawn. `renderers` is a list of `Sprite(( ... ))`, `Ribbon(( ... ))`, `Mesh(( ... ))` and `Light(( ... ))`; an emitter without it draws nothing. Every field is optional and defaults to Niagara's value. `Sprite`:
@@ -163,6 +163,27 @@ scalability: (                 // every field optional
 ```
 
 Without `duration`, the cook derives it: an emitter whose spawn modules are only `Spawn Burst Instantaneous` with constant Spawn Times stops spawning after its latest Spawn Time (no spawn modules: at once); if every emitter stops, the effect is a one-shot lasting the latest of them, otherwise (any `Spawn Rate`, or a Spawn Time that is not a constant) it loops. The game runtime stops spawning a one-shot after `duration` and despawns it when its particles are gone. A culled looping effect pauses until it is back in range or view; a culled one-shot ends. The spawn-count scale (the quality level's `spawn_count_scale` times the distance curve) multiplies every spawn request. The game picks the quality level (`Low`, `Medium`, `High` (default), `Epic`, `Cinematic`) at runtime; a level's `max_distance` and `max_instances` replace the base values. Distances, scales, `visibility_grace` and `bounds_radius` must be finite and at least 0 (`max_distance` and `duration` more than 0), curve distances strictly increasing.
+
+**Emitter loops, warm-up, bounds and determinism** (Niagara's Emitter State module and Emitter/System Properties):
+
+```ron
+warmup_time: 1.0,              // system: seconds simulated before the first visible step (default 0)
+warmup_tick_delta: 0.0333,     // system: step length of the warm-up (default 1/15 s)
+emitters: [(
+    name: "E",
+    deterministic: false,      // default true: random draws depend only on the instance seed; false mixes in a per-instance random value
+    fixed_bounds: ((-1.0, 0.0, -1.0), (1.0, 2.0, 1.0)),  // (min, max) metres, effect space; when every emitter has them, culling uses them instead of bounds_radius
+    emitter_update: [
+        (module: "Emitter State", inputs: { "Loop Behavior": Multiple, "Loop Count": Int(3), "Loop Duration": Float(1.0), "Loop Delay": Float(0.25) }),
+        (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80) }),  // fires at the start of every loop
+    ],
+    ...
+)],
+```
+
+`Emitter State` (constant inputs only): Loop Behavior `Once` / `Multiple` (Loop Count loops) / `Infinite`; Loop Duration Mode `Fixed` / `Infinite`; Loop Delay before each loop (or only the first, with Delay First Loop Only). Spawn modules spawn only while a loop is active; burst Spawn Times count from the loop's start, so bursts repeat each loop. Modules can read `Emitter.LoopedAge`, `Emitter.LoopCount` and `Emitter.NormalizedLoopAge`. With an Emitter State that ends, the derived `duration` is the end of its last loop. Without one the emitter has one endless loop (the old behaviour). The warm-up runs once before the first step (CPU: inside `Simulation::step`; GPU: `GpuEffect::warm_up`, which fx_render calls).
+
+**Engine.Owner.Velocity** is measured by fx_render from the effect entity's `GlobalTransform` each frame (the move over the simulated time, in effect space): zero on the first frame, after `EffectControl::teleported()` and for jumps faster than `TELEPORT_SPEED` (500 m/s). Spawn Per Unit and Inherit Velocity read it. `fxpreview --orbit RADIUS,SECONDS` moves the effect on a circle to preview them (`samples/trail.fx.ron`).
 
 **Using effects from a game** (`fx_render::game`; full example in `examples/arena`):
 
