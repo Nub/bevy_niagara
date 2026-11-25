@@ -1,0 +1,1095 @@
+{
+  "schema": 1,
+  "commit": "cafc3cb21d",
+  "commit_time": 1795579817,
+  "subject": "task_d06f251ed4: depth-buffer collisions in fx_render, Solari TLAS for RayTraced, docs, bench scenes",
+  "dirty": false,
+  "run_time": 1795579841,
+  "host": "graybeard",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "warm_frames": 180,
+  "scenes": [
+    {
+      "name": "sprites_1m",
+      "file": "bench/scenes/sprites_1m.fx.ron",
+      "max_particles": 1000000,
+      "budget_gpu_ms": 2.0,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.326656,
+        "sort": 0.05632,
+        "draw": 0.80896,
+        "rt_build": null,
+        "total": 1.191936
+      },
+      "cpu_ms": {
+        "frame": 1.049319,
+        "fx_encode": 0.009567
+      },
+      "allocs_per_frame": 2274.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000962
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000611
+        },
+        "render/clustering": {
+          "gpu_ms": 0.089088,
+          "cpu_ms": 0.006843
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000491
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00025100000000000003
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.05632,
+          "cpu_ms": 0.002765
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00011
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00011
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.326656,
+          "cpu_ms": 0.005039
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000481
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.80896,
+          "cpu_ms": 0.001763
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00021
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.03584,
+          "cpu_ms": 0.001312
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000511
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.024576,
+          "cpu_ms": 0.000851
+        }
+      }
+    },
+    {
+      "name": "sprites_1m_sorted",
+      "file": "bench/scenes/sprites_1m_sorted.fx.ron",
+      "max_particles": 1000000,
+      "budget_gpu_ms": null,
+      "within_budget": null,
+      "gpu_ms": {
+        "sim": 0.324608,
+        "sort": 1.958912,
+        "draw": 2.783232,
+        "rt_build": null,
+        "total": 5.066752
+      },
+      "cpu_ms": {
+        "frame": 5.400488,
+        "fx_encode": 0.023134
+      },
+      "allocs_per_frame": 2452.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.001203
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000942
+        },
+        "render/clustering": {
+          "gpu_ms": 0.086016,
+          "cpu_ms": 0.008576
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.0006309999999999999
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00042
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 1.958912,
+          "cpu_ms": 0.013666
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00016
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00016
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.324608,
+          "cpu_ms": 0.007214
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000551
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 2.783232,
+          "cpu_ms": 0.002254
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000411
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.032768,
+          "cpu_ms": 0.001493
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000722
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.022528,
+          "cpu_ms": 0.001143
+        }
+      }
+    },
+    {
+      "name": "fire",
+      "file": "bench/scenes/fire.fx.ron",
+      "max_particles": 1152,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.07168,
+        "sort": 0.034816,
+        "draw": 0.057344,
+        "rt_build": null,
+        "total": 0.16384
+      },
+      "cpu_ms": {
+        "frame": 0.863425,
+        "fx_encode": 0.013065
+      },
+      "allocs_per_frame": 2418.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000941
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000511
+        },
+        "render/clustering": {
+          "gpu_ms": 0.077824,
+          "cpu_ms": 0.005541
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000491
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00023
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.034816,
+          "cpu_ms": 0.004068
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00012
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00025100000000000003
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.07168,
+          "cpu_ms": 0.007043
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000451
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.057344,
+          "cpu_ms": 0.001954
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000221
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.000992
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00046
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.000671
+        }
+      }
+    },
+    {
+      "name": "sparks",
+      "file": "bench/scenes/sparks.fx.ron",
+      "max_particles": 512,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.032768,
+        "sort": 0.02048,
+        "draw": 0.00512,
+        "rt_build": null,
+        "total": 0.058368
+      },
+      "cpu_ms": {
+        "frame": 0.8351609999999999,
+        "fx_encode": 0.008485
+      },
+      "allocs_per_frame": 2265.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000911
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000451
+        },
+        "render/clustering": {
+          "gpu_ms": 0.077824,
+          "cpu_ms": 0.00541
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000471
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000221
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.02048,
+          "cpu_ms": 0.002504
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00011
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000101
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.032768,
+          "cpu_ms": 0.004378
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00045
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.00512,
+          "cpu_ms": 0.001603
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00022
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.000992
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000451
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.0006320000000000001
+        }
+      }
+    },
+    {
+      "name": "lib_campfire",
+      "file": "effects/library/campfire.fx.ron",
+      "max_particles": 1000,
+      "budget_gpu_ms": 0.2,
+      "within_budget": false,
+      "gpu_ms": {
+        "sim": 0.151552,
+        "sort": 0.063488,
+        "draw": 0.053248,
+        "rt_build": null,
+        "total": 0.268288
+      },
+      "cpu_ms": {
+        "frame": 1.391721,
+        "fx_encode": 0.026891
+      },
+      "allocs_per_frame": 2787.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.001022
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000812
+        },
+        "render/clustering": {
+          "gpu_ms": 0.106496,
+          "cpu_ms": 0.006902999999999999
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000531
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000361
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.063488,
+          "cpu_ms": 0.007503999999999999
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.041984,
+          "cpu_ms": 0.003406
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00014
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.151552,
+          "cpu_ms": 0.016782
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000481
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.053248,
+          "cpu_ms": 0.002605
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000341
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.029696,
+          "cpu_ms": 0.001342
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000661
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.01536,
+          "cpu_ms": 0.000922
+        }
+      }
+    },
+    {
+      "name": "lib_sparks_burst",
+      "file": "effects/library/sparks_burst.fx.ron",
+      "max_particles": 516,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.060416,
+        "sort": 0.034816,
+        "draw": 0.004096,
+        "rt_build": null,
+        "total": 0.099328
+      },
+      "cpu_ms": {
+        "frame": 0.857453,
+        "fx_encode": 0.013114
+      },
+      "allocs_per_frame": 2416.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.0008719999999999999
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000521
+        },
+        "render/clustering": {
+          "gpu_ms": 0.0768,
+          "cpu_ms": 0.00556
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000481
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00023
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.034816,
+          "cpu_ms": 0.004038
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00013
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00026
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.060416,
+          "cpu_ms": 0.007182999999999999
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000451
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.004096,
+          "cpu_ms": 0.001893
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000221
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.001012
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000451
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.000661
+        }
+      }
+    },
+    {
+      "name": "lib_rising_smoke",
+      "file": "effects/library/rising_smoke.fx.ron",
+      "max_particles": 256,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.034816,
+        "sort": 0.032768,
+        "draw": 0.070656,
+        "rt_build": null,
+        "total": 0.13824
+      },
+      "cpu_ms": {
+        "frame": 0.8325659999999999,
+        "fx_encode": 0.008597
+      },
+      "allocs_per_frame": 2267.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000921
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00041
+        },
+        "render/clustering": {
+          "gpu_ms": 0.0768,
+          "cpu_ms": 0.005481
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000471
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00022
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.032768,
+          "cpu_ms": 0.002595
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00011
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00011
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.034816,
+          "cpu_ms": 0.004389
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000441
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.070656,
+          "cpu_ms": 0.001613
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00023
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.026624,
+          "cpu_ms": 0.000972
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000441
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.0006320000000000001
+        }
+      }
+    },
+    {
+      "name": "lib_magic_swirl",
+      "file": "effects/library/magic_swirl.fx.ron",
+      "max_particles": 868,
+      "budget_gpu_ms": 0.2,
+      "within_budget": false,
+      "gpu_ms": {
+        "sim": 0.172032,
+        "sort": 0.031744,
+        "draw": 0.013312,
+        "rt_build": null,
+        "total": 0.217088
+      },
+      "cpu_ms": {
+        "frame": 1.021295,
+        "fx_encode": 0.020179
+      },
+      "allocs_per_frame": 3006.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000882
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000441
+        },
+        "render/clustering": {
+          "gpu_ms": 0.077824,
+          "cpu_ms": 0.005571
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000471
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000231
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.031744,
+          "cpu_ms": 0.003687
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000131
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.155648,
+          "cpu_ms": 0.006601999999999999
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.172032,
+          "cpu_ms": 0.013997
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000451
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.013312,
+          "cpu_ms": 0.002495
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00022
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.000992
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000471
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.01536,
+          "cpu_ms": 0.000641
+        }
+      }
+    },
+    {
+      "name": "lib_sword_trail",
+      "file": "effects/library/sword_trail.fx.ron",
+      "max_particles": 256,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.070656,
+        "sort": 0.001024,
+        "draw": 0.008192,
+        "rt_build": null,
+        "total": 0.079872
+      },
+      "cpu_ms": {
+        "frame": 0.901647,
+        "fx_encode": 0.009299
+      },
+      "allocs_per_frame": 2512.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000912
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000461
+        },
+        "render/clustering": {
+          "gpu_ms": 0.0768,
+          "cpu_ms": 0.005651
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000471
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000221
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000201
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00013
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.108544,
+          "cpu_ms": 0.00524
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.070656,
+          "cpu_ms": 0.007214
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000461
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.008192,
+          "cpu_ms": 0.001884
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00023
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.001032
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000461
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.000671
+        }
+      }
+    },
+    {
+      "name": "lib_debris",
+      "file": "effects/library/debris.fx.ron",
+      "max_particles": 384,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.062464,
+        "sort": 0.047104,
+        "draw": 0.011264,
+        "rt_build": null,
+        "total": 0.120832
+      },
+      "cpu_ms": {
+        "frame": 0.8708589999999999,
+        "fx_encode": 0.013705000000000002
+      },
+      "allocs_per_frame": 2423.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000932
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000471
+        },
+        "render/clustering": {
+          "gpu_ms": 0.0768,
+          "cpu_ms": 0.00558
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000471
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00023
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.047104,
+          "cpu_ms": 0.0042780000000000006
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000121
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00024
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.062464,
+          "cpu_ms": 0.007303
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00046
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.011264,
+          "cpu_ms": 0.002124
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00022
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.001042
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000451
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.000671
+        }
+      }
+    },
+    {
+      "name": "fireworks",
+      "file": "bench/scenes/fireworks.fx.ron",
+      "max_particles": 2116,
+      "budget_gpu_ms": 0.2,
+      "within_budget": true,
+      "gpu_ms": {
+        "sim": 0.111616,
+        "sort": 0.055296,
+        "draw": 0.004096,
+        "rt_build": null,
+        "total": 0.171008
+      },
+      "cpu_ms": {
+        "frame": 0.903391,
+        "fx_encode": 0.017063000000000002
+      },
+      "allocs_per_frame": 2587.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000961
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000511
+        },
+        "render/clustering": {
+          "gpu_ms": 0.0768,
+          "cpu_ms": 0.0056110000000000005
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00048
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.00023
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.055296,
+          "cpu_ms": 0.00531
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000121
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00014
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.111616,
+          "cpu_ms": 0.009619
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000441
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.004096,
+          "cpu_ms": 0.0021339999999999996
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000231
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.027648,
+          "cpu_ms": 0.001042
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000471
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.014336,
+          "cpu_ms": 0.000651
+        }
+      }
+    },
+    {
+      "name": "collision_100k",
+      "file": "bench/scenes/collision_100k.fx.ron",
+      "max_particles": 114000,
+      "budget_gpu_ms": null,
+      "within_budget": null,
+      "gpu_ms": {
+        "sim": 0.212992,
+        "sort": 0.03584,
+        "draw": 0.079872,
+        "rt_build": null,
+        "total": 0.328704
+      },
+      "cpu_ms": {
+        "frame": 1.310156,
+        "fx_encode": 0.019217
+      },
+      "allocs_per_frame": 2440.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.001213
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000752
+        },
+        "render/clustering": {
+          "gpu_ms": 0.077824,
+          "cpu_ms": 0.007374
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000511
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.000311
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.03584,
+          "cpu_ms": 0.005872
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00013
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00013
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.212992,
+          "cpu_ms": 0.010871
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.000501
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.079872,
+          "cpu_ms": 0.002474
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000341
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.029696,
+          "cpu_ms": 0.001413
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.007168,
+          "cpu_ms": 0.0006810000000000001
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.02048,
+          "cpu_ms": 0.001162
+        }
+      }
+    },
+    {
+      "name": "collision_depth_100k",
+      "file": "bench/scenes/collision_depth_100k.fx.ron",
+      "max_particles": 114000,
+      "budget_gpu_ms": null,
+      "within_budget": null,
+      "gpu_ms": {
+        "sim": 0.224256,
+        "sort": 0.03584,
+        "draw": 0.08192,
+        "rt_build": null,
+        "total": 0.342016
+      },
+      "cpu_ms": {
+        "frame": 0.977322,
+        "fx_encode": 0.012362
+      },
+      "allocs_per_frame": 3010.0,
+      "frames": 300,
+      "adapter": "NVIDIA GeForce RTX 3080",
+      "passes": {
+        "render/auxiliary_views": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.000931
+        },
+        "render/bin_unpacking": {
+          "gpu_ms": 0.011264,
+          "cpu_ms": 0.001162
+        },
+        "render/clustering": {
+          "gpu_ms": 0.0768,
+          "cpu_ms": 0.005580999999999999
+        },
+        "render/early prepass": {
+          "gpu_ms": 0.003072,
+          "cpu_ms": 0.003877
+        },
+        "render/early_mesh_preprocessing": {
+          "gpu_ms": 0.012288,
+          "cpu_ms": 0.000782
+        },
+        "render/fx_cull_sort": {
+          "gpu_ms": 0.03584,
+          "cpu_ms": 0.004148
+        },
+        "render/fx_lights": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00012
+        },
+        "render/fx_ribbon_build": {
+          "gpu_ms": 0.002048,
+          "cpu_ms": 0.00012
+        },
+        "render/fx_sim": {
+          "gpu_ms": 0.224256,
+          "cpu_ms": 0.0067020000000000005
+        },
+        "render/main_opaque_pass_3d": {
+          "gpu_ms": 0.03584,
+          "cpu_ms": 0.003547
+        },
+        "render/main_transparent_pass_3d": {
+          "gpu_ms": 0.08192,
+          "cpu_ms": 0.001512
+        },
+        "render/per_view_shadow_pass": {
+          "gpu_ms": 0.001024,
+          "cpu_ms": 0.00025100000000000003
+        },
+        "render/tonemapping": {
+          "gpu_ms": 0.029696,
+          "cpu_ms": 0.000982
+        },
+        "render/uniform_allocation": {
+          "gpu_ms": 0.011264,
+          "cpu_ms": 0.000962
+        },
+        "render/upscaling": {
+          "gpu_ms": 0.019456,
+          "cpu_ms": 0.000661
+        }
+      }
+    }
+  ]
+}
