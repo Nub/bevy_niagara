@@ -3,8 +3,8 @@
 // sprites light both sides) into the proxy mesh's vertices, which Solari's
 // deform pass copies and builds the emitter's one BLAS from; and the
 // particle's colour and age into the data texture the hit function reads.
-// Slots past the living particles collapse to a point (zero area: never hit,
-// never emit).
+// Slots past the living particles collapse to a point at the effect's origin
+// (zero area: never hit, never emit).
 
 import fx_render::particle_surface::sprite_corner;
 
@@ -70,8 +70,10 @@ fn proxy(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = id.x;
     if k >= p.slots { return; }
     if k >= draw_args[1] {
+        // At the effect's origin, not the world's: keeps the BLAS bounds tight.
+        let anchor = p.world_from_local[3].xyz;
         for (var v = 0u; v < 8u; v++) {
-            write_vertex(8u * k + v, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0));
+            write_vertex(8u * k + v, anchor, vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0));
         }
         write_texel(2u * k, vec4<f32>(0.0));
         write_texel(2u * k + 1u, vec4<f32>(0.0));
