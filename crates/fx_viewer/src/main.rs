@@ -311,7 +311,7 @@ struct TimelineFill;
 #[derive(Component)]
 struct TimelineLabel;
 
-const HELP: &str = "Space play/pause   R restart   \u{2190}/\u{2192} scrub (Shift: 1 s)\n\u{2191}/\u{2193} speed   B backdrop   L loop   F reset camera\nLeft drag orbit   Right drag pan   Wheel zoom\nF12 screenshot   H hide help";
+const HELP: &str = "Space play/pause   R restart   Left/Right scrub (Shift: 1 s)\nUp/Down speed   B backdrop   L loop   F reset camera\nLeft drag orbit   Right drag pan   Wheel zoom\nF12 screenshot   H hide help";
 
 fn mono(size: f32) -> TextFont {
     TextFont {
@@ -492,7 +492,7 @@ fn apply_effect(
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "no effect".into());
-        w.title = format!("fxviewer \u{2014} {name}");
+        w.title = format!("fxviewer - {name}");
     }
 }
 
@@ -923,7 +923,7 @@ fn update_overlay(
     if let Ok(mut t) = label.single_mut() {
         t.0 = format!(
             "{} {:5.2} / {:.2} s   speed {}x{}",
-            if v.playing { "\u{25b6}" } else { "\u{2016}" },
+            if v.playing { "PLAY " } else { "PAUSE" },
             v.time,
             v.duration,
             v.speed,
