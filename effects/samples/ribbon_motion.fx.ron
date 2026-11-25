@@ -1,0 +1,45 @@
+// Ribbon modules (batch 2). Left: a ribbon whose points spiral up with
+// Rotate Around Point while Ribbon Twist Rate turns the strip as it ages.
+// Right: a ribbon thrown in an arc; Scale Ribbon Width by Speed thins it
+// where it moves fast (launch) and widens it at the slow top of the arc.
+(
+    name: "Ribbon Motion",
+    emitters: [
+        (
+            name: "Twisting Spiral",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(2.0), "Color": Color((0.3, 0.9, 1.6, 1.0)) }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.2) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Rotate Around Point", inputs: {
+                    "Rotation Center": Dynamic("Make Vec3 from Floats", { "X": Float(-1.0), "Y": Dynamic("Add Float", { "A": Float(0.3), "B": Link(Float, "Particles.Age") }), "Z": Float(0.0) }),
+                    "Rotation Radius": Float(0.4), "Rotation Rate": Float(-200.0),
+                }),
+                (module: "Ribbon Twist Rate", inputs: { "Twist Rate": Float(180.0) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+        (
+            name: "Arc",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.6), "Position": Vec3((0.6, 0.2, 0.0)), "Color": Color((1.6, 0.6, 0.2, 1.0)) }),
+                (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.25) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.8, 5.5, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Ribbon Width by Speed", inputs: { "Velocity Threshold": Float(5.0), "Min Scale Factor": Float(1.5), "Max Scale Factor": Float(0.15) }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 4))],
+        ),
+    ],
+)

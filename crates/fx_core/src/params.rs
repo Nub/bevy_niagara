@@ -84,7 +84,20 @@ pub const EVENT: &[Builtin] = &[
     b("ParticleID", ValueType::Int, "the source particle's UniqueID"),
 ];
 pub const SYSTEM: &[Builtin] = &[b("Age", ValueType::Float, "seconds the system has run")];
-pub const EMITTER: &[Builtin] = &[b("Age", ValueType::Float, "seconds the emitter has run")];
+pub const EMITTER: &[Builtin] = &[
+    b("Age", ValueType::Float, "seconds the emitter has run"),
+    b(
+        "LoopedAge",
+        ValueType::Float,
+        "seconds since the current loop started (Emitter State); negative during its Loop Delay",
+    ),
+    b("LoopCount", ValueType::Int, "loops started before the current one (from 0)"),
+    b(
+        "NormalizedLoopAge",
+        ValueType::Float,
+        "LoopedAge / Loop Duration, 0..1 (0 for an endless loop)",
+    ),
+];
 
 /// Index of each particle attribute in [`PARTICLES`].
 pub mod attr {
@@ -114,6 +127,12 @@ pub mod attr {
     pub const INITIAL_SCALE: u16 = 23;
     pub const INITIAL_RIBBON_WIDTH: u16 = 24;
     pub const CAMERA_OFFSET: u16 = 25;
+    pub const SPRITE_FACING: u16 = 26;
+    pub const SPRITE_ALIGNMENT: u16 = 27;
+    pub const DYNAMIC_MATERIAL_PARAMETER_1: u16 = 28;
+    pub const ROTATIONAL_VELOCITY: u16 = 29;
+    pub const PHYSICS_ROTATIONAL_FORCE: u16 = 30;
+    pub const PHYSICS_ROTATIONAL_DRAG: u16 = 31;
     /// Attributes from here on are stored only by emitters that use them
     /// (see [`crate::cook::CookedEmitter::uses_extended_attributes`]).
     pub const FIRST_EXTENDED: u16 = SCALE;
@@ -206,6 +225,36 @@ pub const PARTICLES: &[Builtin] = &[
         "CameraOffset",
         ValueType::Float,
         "metres the sprite or mesh is drawn towards the camera (set by Camera Offset)",
+    ),
+    b(
+        "SpriteFacing",
+        ValueType::Vec3,
+        "direction the sprite faces when the renderer's facing_mode is CustomFacingVector (0 = use the renderer's vector)",
+    ),
+    b(
+        "SpriteAlignment",
+        ValueType::Vec3,
+        "the sprite's up when the renderer's alignment is CustomAlignment (0 = use the renderer's vector)",
+    ),
+    b(
+        "DynamicMaterialParameter1",
+        ValueType::Vec4,
+        "second set of free values passed to custom materials",
+    ),
+    b(
+        "RotationalVelocity",
+        ValueType::Vec3,
+        "mesh spin: degrees per second around each axis (a rotation vector)",
+    ),
+    b(
+        "Physics.RotationalForce",
+        ValueType::Vec3,
+        "torque accumulated this step (cleared by Solve Forces and Velocity)",
+    ),
+    b(
+        "Physics.RotationalDrag",
+        ValueType::Float,
+        "rotational drag accumulated this step (cleared by Solve Forces and Velocity)",
     ),
 ];
 

@@ -13,6 +13,7 @@ pub mod diag;
 pub mod docs;
 pub mod dynamic;
 pub mod events;
+pub mod lifecycle;
 pub mod model;
 pub mod modules;
 pub mod params;

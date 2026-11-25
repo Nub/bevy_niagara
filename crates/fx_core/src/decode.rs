@@ -19,11 +19,15 @@ pub const SYSTEM_FIELDS: &[&str] = &[
     "custom_modules",
     "duration",
     "scalability",
+    "warmup_time",
+    "warmup_tick_delta",
 ];
 pub const EMITTER_FIELDS: &[&str] = &[
     "name",
     "sim_target",
     "max_particles",
+    "deterministic",
+    "fixed_bounds",
     "emitter_spawn",
     "emitter_update",
     "particle_spawn",
@@ -68,11 +72,19 @@ pub fn decode_system(v: &SValue, d: &mut Diags) -> Option<SystemSource> {
     };
     let duration = f.take("duration").and_then(|v| decode_duration(v, d));
     let scalability = f.take("scalability").and_then(|v| decode_scalability(v, d));
+    let warmup_time = f.take("warmup_time").and_then(|v| {
+        bounded(v, "`warmup_time`", 0.0, false, "write e.g. `warmup_time: 1.0` (seconds simulated before the effect is first shown)", d)
+    });
+    let warmup_tick_delta = f.take("warmup_tick_delta").and_then(|v| {
+        bounded(v, "`warmup_tick_delta`", 0.0, true, "write e.g. `warmup_tick_delta: 0.0333` (seconds per warm-up step)", d)
+    });
     f.finish(d);
     Some(SystemSource {
         name,
         duration,
         scalability,
+        warmup_time,
+        warmup_tick_delta,
         user_parameters,
         system_spawn,
         system_update,
@@ -127,6 +139,11 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
             DEFAULT_MAX_PARTICLES
         }
     };
+    let deterministic = f
+        .take("deterministic")
+        .map(|v| boolean(v, "deterministic", d).unwrap_or(true))
+        .unwrap_or(true);
+    let fixed_bounds = f.take("fixed_bounds").and_then(|v| fixed_bounds(v, d));
     let mut stack =
         |name: &str, d: &mut Diags| f.take(name).map(|v| decode_stack(v, d)).unwrap_or_default();
     let emitter_spawn = stack("emitter_spawn", d);
@@ -166,6 +183,8 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
         name,
         sim_target,
         max_particles,
+        deterministic,
+        fixed_bounds,
         emitter_spawn,
         emitter_update,
         particle_spawn,
@@ -1653,6 +1672,31 @@ fn bounded(v: &SValue, field: &str, min: f64, strict: bool, help: &str, d: &mut 
             None
         }
     }
+}
+
+/// An emitter's `fixed_bounds: ((min x, y, z), (max x, y, z))`.
+fn fixed_bounds(v: &SValue, d: &mut Diags) -> Option<[[f32; 3]; 2]> {
+    let help = "write `fixed_bounds: ((-1.0, 0.0, -1.0), (1.0, 2.0, 1.0))` (min corner, max corner, metres)";
+    let example = "((-1.0, 0.0, -1.0), (1.0, 2.0, 1.0))";
+    let (SKind::Tuple(None, items) | SKind::List(items)) = &v.kind else {
+        d.error(
+            v.span,
+            format!("`fixed_bounds` must be a pair of corners, found {}", v.kind.describe()),
+            Some(help.into()),
+        );
+        return None;
+    };
+    if items.len() != 2 {
+        d.error(v.span, "`fixed_bounds` must be a pair of corners (min, max)", Some(help.into()));
+        return None;
+    }
+    let lo = floats::<3>(&items[0], "fixed_bounds", example, d)?;
+    let hi = floats::<3>(&items[1], "fixed_bounds", example, d)?;
+    if (0..3).any(|c| lo[c] > hi[c]) {
+        d.error(v.span, "`fixed_bounds`: each min must be at most the max", Some(help.into()));
+        return None;
+    }
+    Some([lo, hi])
 }
 
 /// The system's `duration: 0.6`.

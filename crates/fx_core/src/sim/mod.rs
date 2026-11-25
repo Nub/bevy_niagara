@@ -29,6 +29,7 @@ use bevy_math::{Quat, Vec2, Vec3, Vec4};
 use crate::cook::{CookedInput, CookedModule, CookedSystem};
 use crate::data::{self, CameraData, DiBinding, MeshData, MeshPose, NO_SCENE_DEPTH, TextureData};
 use crate::events::{self as fx_events, Event, EventKind};
+use crate::lifecycle::{Lifecycle, emitter_seed, random_nonce};
 use crate::modules::{self, ModuleKind};
 use crate::params::{Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
@@ -74,6 +75,18 @@ pub struct Particle {
     pub initial_ribbon_width: f32,
     /// `Particles.CameraOffset`, metres towards the camera (Camera Offset).
     pub camera_offset: f32,
+    /// `Particles.SpriteFacing` (zero: the renderer's own vector).
+    pub sprite_facing: Vec3,
+    /// `Particles.SpriteAlignment` (zero: the renderer's own vector).
+    pub sprite_alignment: Vec3,
+    /// `Particles.DynamicMaterialParameter1`.
+    pub dynamic_material_parameter_1: Vec4,
+    /// `Particles.RotationalVelocity`: degrees per second, a rotation vector.
+    pub rotational_velocity: Vec3,
+    /// `Particles.Physics.RotationalForce`.
+    pub rotational_force: Vec3,
+    /// `Particles.Physics.RotationalDrag`.
+    pub rotational_drag: f32,
     pub alive: bool,
 }
 
@@ -107,6 +120,12 @@ impl Particle {
             initial_scale: Vec3::ONE,
             initial_ribbon_width: 0.1,
             camera_offset: 0.0,
+            sprite_facing: Vec3::ZERO,
+            sprite_alignment: Vec3::ZERO,
+            dynamic_material_parameter_1: Vec4::ZERO,
+            rotational_velocity: Vec3::ZERO,
+            rotational_force: Vec3::ZERO,
+            rotational_drag: 0.0,
             alive: true,
         }
     }
@@ -142,13 +161,21 @@ impl Particle {
             attr::INITIAL_SCALE => Value::Vec3(self.initial_scale.to_array()),
             attr::INITIAL_RIBBON_WIDTH => Value::Float(self.initial_ribbon_width),
             attr::CAMERA_OFFSET => Value::Float(self.camera_offset),
+            attr::SPRITE_FACING => Value::Vec3(self.sprite_facing.to_array()),
+            attr::SPRITE_ALIGNMENT => Value::Vec3(self.sprite_alignment.to_array()),
+            attr::DYNAMIC_MATERIAL_PARAMETER_1 => {
+                Value::Vec4(self.dynamic_material_parameter_1.to_array())
+            }
+            attr::ROTATIONAL_VELOCITY => Value::Vec3(self.rotational_velocity.to_array()),
+            attr::PHYSICS_ROTATIONAL_FORCE => Value::Vec3(self.rotational_force.to_array()),
+            attr::PHYSICS_ROTATIONAL_DRAG => Value::Float(self.rotational_drag),
             _ => Value::Float(0.0),
         }
     }
 
     /// Bit pattern of every field, for exact comparisons and hashing.
     pub fn bits(&self) -> Vec<u32> {
-        let mut v = Vec::with_capacity(51);
+        let mut v = Vec::with_capacity(68);
         let mut f = |xs: &[f32]| v.extend(xs.iter().map(|x| x.to_bits()));
         f(&self.position.to_array());
         f(&self.velocity.to_array());
@@ -178,6 +205,12 @@ impl Particle {
         f(&[self.sub_image_index]);
         f(&self.initial_scale.to_array());
         f(&[self.initial_ribbon_width, self.camera_offset]);
+        f(&self.sprite_facing.to_array());
+        f(&self.sprite_alignment.to_array());
+        f(&self.dynamic_material_parameter_1.to_array());
+        f(&self.rotational_velocity.to_array());
+        f(&self.rotational_force.to_array());
+        f(&[self.rotational_drag]);
         v.push(self.unique_id);
         v.push(self.alive as u32);
         v
@@ -308,6 +341,10 @@ pub struct Simulation {
     /// What each data interface of `system.data_interfaces` is bound to.
     pub data: Vec<DiBinding>,
     pub emitters: Vec<EmitterState>,
+    /// Random value mixed into the seed of emitters with `deterministic: false`.
+    pub nonce: u32,
+    /// The warm-up ran (or there is none).
+    pub warmed: bool,
 }
 
 const STAGE_EMITTER_SPAWN: u32 = 2;
@@ -315,12 +352,44 @@ const STAGE_EMITTER_UPDATE: u32 = 3;
 const STAGE_PARTICLE_SPAWN: u32 = 4;
 const STAGE_PARTICLE_UPDATE: u32 = 5;
 
+/// The `Emitter.` parameters at the start of a step.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EmitterValues {
+    pub age: f32,
+    pub looped_age: f32,
+    pub loop_count: u32,
+    pub normalized_loop_age: f32,
+}
+
+impl EmitterValues {
+    /// The values of an emitter of age `age` with life cycle `lc`.
+    pub fn at(lc: &Lifecycle, age: f32) -> Self {
+        let ph = lc.phase(age);
+        EmitterValues {
+            age,
+            looped_age: ph.looped_age,
+            loop_count: ph.index,
+            normalized_loop_age: ph.normalized(lc),
+        }
+    }
+
+    /// `Emitter.` builtin `index` ([`crate::params::EMITTER`]).
+    pub fn param(&self, index: u16) -> Value {
+        match index {
+            0 => Value::Float(self.age),
+            1 => Value::Float(self.looped_age),
+            2 => Value::Int(self.loop_count as i32),
+            _ => Value::Float(self.normalized_loop_age),
+        }
+    }
+}
+
 /// Read-only state inputs are evaluated against.
 struct Env<'a> {
     user: &'a [Value],
     dt: f32,
     time: f32,
-    emitter_age: f32,
+    emitter: EmitterValues,
     owner_velocity: Vec3,
     /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
     sub_image_frames: u32,
@@ -379,6 +448,8 @@ impl Simulation {
             camera: None,
             data,
             emitters,
+            nonce: random_nonce(),
+            warmed: false,
         }
     }
 
@@ -470,7 +541,28 @@ impl Simulation {
         h
     }
 
+    /// Runs the system's warm-up (`warmup_time` in steps of
+    /// `warmup_tick_delta`) if it has not run; [`Self::step`] calls it before
+    /// the first step.
+    pub fn warm_up(&mut self) {
+        if self.warmed {
+            return;
+        }
+        self.warmed = true;
+        let delta = self.system.warmup_tick_delta;
+        for _ in 0..crate::lifecycle::warmup_steps(&self.system) {
+            self.step_once(delta);
+        }
+    }
+
     pub fn step(&mut self, dt: f32) {
+        if self.frame == 0 {
+            self.warm_up();
+        }
+        self.step_once(dt);
+    }
+
+    fn step_once(&mut self, dt: f32) {
         for ei in 0..self.emitters.len() {
             self.step_emitter(ei, dt);
         }
@@ -499,14 +591,15 @@ impl Simulation {
             user: &self.user,
             dt,
             time: self.time,
-            emitter_age: state.age,
+            emitter: EmitterValues::at(&emitter.lifecycle, state.age),
             owner_velocity: self.owner_velocity,
             sub_image_frames: emitter.sub_image_frames(),
             colliders: &self.colliders,
             camera: self.camera,
             data: &self.data,
         };
-        let (seed, frame) = (self.seed, self.frame);
+        let seed = emitter_seed(self.seed, self.nonce, emitter.deterministic);
+        let frame = self.frame;
         let key = |stage: u32, module: usize, particle: u32, frame: u32| RandKey {
             seed,
             emitter: ei as u32,
@@ -517,24 +610,35 @@ impl Simulation {
 
         // 1-2. Emitter stages.
         let mut spawn_count: u32 = 0;
-        if frame == 0 {
-            run_emitter_stack(
-                &emitter.emitter_spawn,
-                STAGE_EMITTER_SPAWN,
-                &env,
-                state,
-                &mut spawn_count,
-                &|m| key(STAGE_EMITTER_SPAWN, m, u32::MAX, frame),
-            );
+        {
+            let pe = ParticleEnv {
+                env: &env,
+                p: None,
+                event: None,
+            };
+            let step = EmitterStep {
+                age: state.age,
+                dt,
+                owner_velocity: self.owner_velocity,
+                lifecycle: &emitter.lifecycle,
+            };
+            if frame == 0 {
+                spawn_count = spawn_count.saturating_add(run_emitter_stack(
+                    &emitter.emitter_spawn,
+                    &pe,
+                    &step,
+                    &mut state.spawn_remainder,
+                    &|m| key(STAGE_EMITTER_SPAWN, m, u32::MAX, frame),
+                ));
+            }
+            spawn_count = spawn_count.saturating_add(run_emitter_stack(
+                &emitter.emitter_update,
+                &pe,
+                &step,
+                &mut state.spawn_remainder,
+                &|m| key(STAGE_EMITTER_UPDATE, m, u32::MAX, frame),
+            ));
         }
-        run_emitter_stack(
-            &emitter.emitter_update,
-            STAGE_EMITTER_UPDATE,
-            &env,
-            state,
-            &mut spawn_count,
-            &|m| key(STAGE_EMITTER_UPDATE, m, u32::MAX, frame),
-        );
 
         // 3. Particle Update and EveryParticle handlers, then remove the dead.
         let events = &mut state.events;
@@ -842,7 +946,7 @@ fn read_param(r: ParamRef, env: &Env, p: Option<&Particle>, event: Option<&Event
             _ => Value::Vec3(env.owner_velocity.to_array()),
         },
         Namespace::System => Value::Float(env.time),
-        Namespace::Emitter => Value::Float(env.emitter_age),
+        Namespace::Emitter => env.emitter.param(r.index),
         Namespace::Particles => p.map_or(Value::Float(0.0), |p| p.get(r.index)),
         Namespace::Event => {
             let e = event.copied().unwrap_or_default();
@@ -857,40 +961,82 @@ fn read_param(r: ParamRef, env: &Env, p: Option<&Particle>, event: Option<&Event
     }
 }
 
-fn run_emitter_stack(
+/// What the emitter stacks see of their emitter in a step.
+pub struct EmitterStep<'a> {
+    /// Emitter age at the start of the step.
+    pub age: f32,
+    pub dt: f32,
+    pub owner_velocity: Vec3,
+    pub lifecycle: &'a Lifecycle,
+}
+
+/// `whole` bursts of `count`, each kept with probability `p` (draws `salt + j`).
+fn bursts(whole: u32, count: u32, p: f32, salt: u32, key: &RandKey) -> u32 {
+    (0..whole)
+        .filter(|&j| p >= 1.0 || key.unit(salt + j) < p)
+        .fold(0u32, |n, _| n.saturating_add(count))
+}
+
+/// Adds `amount` particles to the carried-over fraction; returns the whole ones.
+fn carry(remainder: &mut f32, amount: f32) -> u32 {
+    *remainder += amount;
+    let whole = remainder.floor();
+    *remainder -= whole;
+    whole as u32
+}
+
+/// Runs an emitter stack (Emitter Spawn or Emitter Update) and returns the
+/// number of particles it asks to spawn. The emitter stacks read no particle,
+/// so the GPU host runs this same code on the CPU (fx_gpu's `emitter_cpu`).
+/// Continuous spawners share `spawn_remainder`, the fraction carried over.
+pub fn run_emitter_stack(
     stack: &[CookedModule],
-    _stage: u32,
-    env: &Env,
-    state: &mut EmitterState,
-    spawn_count: &mut u32,
+    env: &dyn InputEnv,
+    st: &EmitterStep,
+    spawn_remainder: &mut f32,
     key: &dyn Fn(usize) -> RandKey,
-) {
+) -> u32 {
+    let lc = st.lifecycle;
+    let active = lc.phase(st.age).active;
+    let mut n = 0u32;
     for (mi, m) in stack.iter().enumerate() {
         let k = key(mi);
-        let pe = ParticleEnv {
-            env,
-            p: None,
-            event: None,
-        };
-        let input = |slot: usize| eval_input(m, slot, &pe, &k);
-        match modules::from_id(m.module) {
-            Some(ModuleKind::SpawnRate) => {
-                let rate = input(0).as_f32().max(0.0);
-                state.spawn_remainder += rate * env.dt;
-                let whole = state.spawn_remainder.floor();
-                state.spawn_remainder -= whole;
-                *spawn_count = spawn_count.saturating_add(whole as u32);
+        let input = |slot: usize| eval_input(m, slot, env, &k);
+        let add = match modules::from_id(m.module) {
+            Some(ModuleKind::SpawnRate) if active => {
+                carry(spawn_remainder, input(0).as_f32().max(0.0) * st.dt)
             }
-            Some(ModuleKind::SpawnBurstInstantaneous) => {
-                let count = input(0).as_i32().max(0) as u32;
-                let t = input(1).as_f32();
-                if env.emitter_age <= t && t < env.emitter_age + env.dt {
-                    *spawn_count = spawn_count.saturating_add(count);
+            Some(ModuleKind::SpawnPerUnit) if active => {
+                let speed = st.owner_velocity.length();
+                let (tolerance, max) = (input(1).as_f32(), input(2).as_f32());
+                if speed > tolerance && (max <= 0.0 || speed <= max) {
+                    carry(spawn_remainder, input(0).as_f32().max(0.0) * speed * st.dt)
+                } else {
+                    0
                 }
             }
-            _ => {}
-        }
+            Some(ModuleKind::SpawnPerFrame) if active => input(0).as_i32().max(0) as u32,
+            Some(ModuleKind::SpawnBurstInstantaneous) => {
+                let count = input(0).as_i32().max(0) as u32;
+                let fires = lc.fires(st.age, st.dt, input(1).as_f32());
+                bursts(fires, count, input(2).as_f32(), 128, &k)
+            }
+            Some(ModuleKind::SpawnBurstInterval) => {
+                let count = input(0).as_i32().max(0) as u32;
+                let fires = lc.fires_every(
+                    st.age,
+                    st.dt,
+                    input(2).as_f32(),
+                    input(1).as_f32(),
+                    input(3).as_i32().max(0) as u32,
+                );
+                bursts(fires, count, input(4).as_f32(), 128, &k)
+            }
+            _ => 0,
+        };
+        n = n.saturating_add(add);
     }
+    n
 }
 
 /// Orthonormal basis around unit vector `n` (Duff et al. 2017), as `(t1, t2)`.
@@ -1129,6 +1275,78 @@ pub fn collide_plane(p: &mut Particle, n: Vec3, o: Vec3, radius: f32, c: &Collis
     impact
 }
 
+/// `v` turned by unit quaternion `q`. `quat_rotate` in `wgsl/lib.wgsl` is the same code.
+pub fn quat_rotate(q: Quat, v: Vec3) -> Vec3 {
+    let u = Vec3::new(q.x, q.y, q.z);
+    let t = u.cross(v) * 2.0;
+    v + t * q.w + u.cross(t)
+}
+
+/// The rotation by rotation vector `v` (axis times angle in degrees).
+pub fn rotation_vector_quat(v: Vec3) -> Quat {
+    let len = v.length();
+    if !(len > 0.0) {
+        return Quat::IDENTITY;
+    }
+    let half = len * HALF_RADIANS_PER_DEGREE;
+    let s = half.sin() / len;
+    Quat::from_xyzw(v.x * s, v.y * s, v.z * s, half.cos())
+}
+
+/// The shortest rotation taking direction `from` onto direction `to`
+/// (`from` defaults to +X when zero). `shortest_arc` in `wgsl/lib.wgsl` is the same code.
+pub fn shortest_arc(from: Vec3, to: Vec3) -> Quat {
+    let a = from.try_normalize().unwrap_or(Vec3::X);
+    let b = to.normalize_or_zero();
+    let d = a.dot(b);
+    if d < -0.999_999 {
+        let (t1, _) = basis(a);
+        return Quat::from_xyzw(t1.x, t1.y, t1.z, 0.0);
+    }
+    let c = a.cross(b);
+    quat_normalize(Quat::from_xyzw(c.x, c.y, c.z, 1.0 + d))
+}
+
+/// Grid Location's lattice point for particle `id` on an `n` grid, each
+/// coordinate in -0.5..0.5 (0 on an axis with one point). Counts are 1..=1024.
+pub fn grid_point(id: u32, n: [u32; 3]) -> Vec3 {
+    let total = (n[0] * n[1] * n[2]).max(1);
+    let i = id % total;
+    let c = [i % n[0], (i / n[0]) % n[1], i / (n[0] * n[1])];
+    let f = |k: usize| {
+        if n[k] > 1 {
+            c[k] as f32 / (n[k] - 1) as f32 - 0.5
+        } else {
+            0.0
+        }
+    };
+    Vec3::new(f(0), f(1), f(2))
+}
+
+/// `clamp((d - near) / (far - near), 0, 1)`; a step at `far` when far <= near.
+fn distance_fraction(d: f32, near: f32, far: f32) -> f32 {
+    if far > near {
+        ((d - near) / (far - near)).clamp(0.0, 1.0)
+    } else if d >= far {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Noise Force's field at `q`: the gradient of gradient noise, `octaves`
+/// layers each of twice the frequency and half the amplitude (channels 3..).
+pub fn noise_force(q: Vec3, octaves: u32) -> Vec3 {
+    let mut sum = Vec3::ZERO;
+    let (mut f, mut a) = (1.0f32, 1.0f32);
+    for o in 0..octaves {
+        sum += noise::gradient_noise(q * f, 3 + o).1 * a;
+        f *= 2.0;
+        a *= 0.5;
+    }
+    sum
+}
+
 /// Radians per degree.
 const DEGREES: f32 = std::f32::consts::PI / 180.0;
 
@@ -1201,6 +1419,20 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             p.position += p.velocity * env.dt;
             p.force = Vec3::ZERO;
             p.drag = 0.0;
+            // Rotation, only for particles that spin (others keep their bits).
+            if p.rotational_velocity != Vec3::ZERO
+                || p.rotational_force != Vec3::ZERO
+                || p.rotational_drag != 0.0
+            {
+                if p.mass > 0.0 {
+                    p.rotational_velocity += p.rotational_force / p.mass * env.dt;
+                }
+                p.rotational_velocity *= (-p.rotational_drag * env.dt).exp();
+                let step = rotation_vector_quat(p.rotational_velocity * env.dt);
+                p.mesh_orientation = quat_normalize(quat_mul(step, p.mesh_orientation));
+                p.rotational_force = Vec3::ZERO;
+                p.rotational_drag = 0.0;
+            }
         }
         ModuleKind::ParticleState => {
             p.age += env.dt;
@@ -1455,7 +1687,131 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
                 p.camera_offset = amount;
             }
         }
-        ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
+        ModuleKind::SetLifetime => p.lifetime = input(0, p).as_f32(),
+        ModuleKind::SetMass => p.mass = input(0, p).as_f32(),
+        ModuleKind::SetSpriteSize => {
+            p.sprite_size = input(0, p).as_vec2();
+            if input(1, p).as_bool() {
+                p.initial_sprite_size = p.sprite_size;
+            }
+        }
+        ModuleKind::SetSpriteRotation => p.sprite_rotation = input(0, p).as_f32(),
+        ModuleKind::SetVelocity => p.velocity = input(0, p).as_vec3(),
+        ModuleKind::SetPosition => p.position = input(0, p).as_vec3(),
+        ModuleKind::SetScale => {
+            p.scale = input(0, p).as_vec3();
+            if input(1, p).as_bool() {
+                p.initial_scale = p.scale;
+            }
+        }
+        ModuleKind::AddVelocityFromPoint => {
+            let strength = input(0, p).as_f32();
+            let origin = input(1, p).as_vec3();
+            let scale = input(2, p).as_vec3();
+            p.velocity += unit_or_y(p.position - origin) * strength * scale;
+        }
+        ModuleKind::GridLocation => {
+            let size = input(0, p).as_vec3();
+            let n = [input(1, p), input(2, p), input(3, p)].map(|v| v.as_i32().clamp(1, 1024) as u32);
+            let offset = input(4, p).as_vec3();
+            p.position = offset + size * grid_point(p.unique_id, n);
+        }
+        ModuleKind::AddRotationalVelocity => p.rotational_velocity += input(0, p).as_vec3(),
+        ModuleKind::MeshRotationForce => p.rotational_force += input(0, p).as_vec3(),
+        ModuleKind::RotationalDrag => p.rotational_drag += input(0, p).as_f32(),
+        ModuleKind::OrientMeshToVector => {
+            let v = input(0, p).as_vec3();
+            let axis = input(1, p).as_vec3();
+            if v.length() > 0.0 {
+                p.mesh_orientation = shortest_arc(axis, v);
+            }
+        }
+        ModuleKind::AlignSpriteToMeshOrientation => {
+            let q = p.mesh_orientation;
+            p.sprite_facing = quat_rotate(q, input(0, p).as_vec3());
+            p.sprite_alignment = quat_rotate(q, input(1, p).as_vec3());
+        }
+        ModuleKind::SetSpriteFacing => p.sprite_facing = input(0, p).as_vec3(),
+        ModuleKind::SetSpriteAlignment => p.sprite_alignment = input(0, p).as_vec3(),
+        ModuleKind::ScaleMeshSizeBySpeed => {
+            let t = speed_fraction(p.velocity, input(0, p).as_f32());
+            let (lo, hi) = (input(1, p).as_vec3(), input(2, p).as_vec3());
+            p.scale = p.initial_scale * (lo + (hi - lo) * t);
+        }
+        ModuleKind::ScaleColorByDistance => {
+            let d = (p.position - input(0, p).as_vec3()).length();
+            let t = distance_fraction(d, input(1, p).as_f32(), input(2, p).as_f32());
+            let (lo, hi) = (input(3, p).as_vec4(), input(4, p).as_vec4());
+            p.color = p.initial_color * (lo + (hi - lo) * t);
+        }
+        ModuleKind::ScaleSpriteSizeByDistance => {
+            let d = (p.position - input(0, p).as_vec3()).length();
+            let t = distance_fraction(d, input(1, p).as_f32(), input(2, p).as_f32());
+            let (lo, hi) = (input(3, p).as_vec2(), input(4, p).as_vec2());
+            p.sprite_size = p.initial_sprite_size * (lo + (hi - lo) * t);
+        }
+        ModuleKind::DynamicMaterialParameters2 => {
+            p.dynamic_material_parameter_1 = input(0, p).as_vec4();
+        }
+        ModuleKind::JitterPosition => {
+            let amount = input(0, p).as_vec3();
+            let delay = input(1, p).as_f32();
+            let fire = !(delay > 0.0) || (p.age / delay).floor() != ((p.age - env.dt) / delay).floor();
+            if fire {
+                let u = Vec3::new(key.unit(128), key.unit(129), key.unit(130));
+                p.position += (u * 2.0 - Vec3::ONE) * amount;
+            }
+        }
+        ModuleKind::KillParticlesBySpeed => {
+            let speed = p.velocity.length();
+            if speed < input(0, p).as_f32() || speed > input(1, p).as_f32() {
+                p.alive = false;
+            }
+        }
+        ModuleKind::KillParticlesByDistance => {
+            let d = (p.position - input(0, p).as_vec3()).length();
+            let r = input(1, p).as_f32();
+            if if input(2, p).as_bool() { d < r } else { d > r } {
+                p.alive = false;
+            }
+        }
+        ModuleKind::RotateAroundPoint => {
+            let center = input(0, p).as_vec3();
+            let axis = unit_or_y(input(1, p).as_vec3());
+            let radius = input(2, p).as_f32();
+            let rate = input(3, p).as_f32();
+            let phase = input(4, p).as_f32();
+            let theta = (phase + rate * p.age) * DEGREES;
+            let (t1, t2) = basis(axis);
+            p.position = center + (t1 * theta.cos() + t2 * theta.sin()) * radius;
+        }
+        ModuleKind::NoiseForce => {
+            let strength = input(0, p).as_f32();
+            let freq = input(1, p).as_f32();
+            let octaves = input(2, p).as_i32().clamp(1, 8) as u32;
+            let pan = input(3, p).as_vec3();
+            p.force += noise_force(p.position * freq + pan * env.time, octaves) * strength;
+        }
+        ModuleKind::LimitVelocity => {
+            let limit = input(0, p).as_f32().max(0.0);
+            let len = p.velocity.length();
+            if len > limit {
+                p.velocity *= limit / len;
+            }
+        }
+        ModuleKind::ScaleVelocity => p.velocity *= input(0, p).as_vec3(),
+        ModuleKind::RibbonTwistRate => p.ribbon_twist += input(0, p).as_f32() * env.dt,
+        ModuleKind::ScaleRibbonWidthBySpeed => {
+            let t = speed_fraction(p.velocity, input(0, p).as_f32());
+            let (lo, hi) = (input(1, p).as_f32(), input(2, p).as_f32());
+            p.ribbon_width = p.initial_ribbon_width * (lo + (hi - lo) * t);
+        }
+        ModuleKind::SpawnRate
+        | ModuleKind::SpawnBurstInstantaneous
+        | ModuleKind::EmitterState
+        | ModuleKind::SpawnPerUnit
+        | ModuleKind::SpawnPerFrame
+        | ModuleKind::SpawnBurstInterval => {}
     }
 }
 

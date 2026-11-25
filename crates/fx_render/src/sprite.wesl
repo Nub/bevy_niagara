@@ -5,7 +5,8 @@
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::prepass::utils;
 import fx_render::particle_io::{
-    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sprite_sub_uv,
+    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, particle_dynamic_param_1, set_sprite_sub_uv,
+    particle_custom_facing, particle_custom_alignment,
     sample_particle_texture, scene_light, finish_faded, camera_offset,
 };
 import fx_render::particle_surface::{sprite_corner, sprite_texel};
@@ -30,8 +31,8 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     // Facing and alignment (shared with fx_solari's ray-traced proxies).
     let corner = sprite_corner(
         pos, vel, size, rotation, uv, fx.pivot, fx.facing_mode, fx.alignment,
-        (m * vec4<f32>(fx.custom_facing.xyz, 0.0)).xyz,
-        (m * vec4<f32>(fx.custom_alignment.xyz, 0.0)).xyz,
+        (m * vec4<f32>(particle_custom_facing(i), 0.0)).xyz,
+        (m * vec4<f32>(particle_custom_alignment(i), 0.0)).xyz,
         view.world_position,
         view.world_from_view[0].xyz, view.world_from_view[1].xyz, view.world_from_view[2].xyz,
     );
@@ -42,6 +43,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     out.normal = corner.normal;
     out.world_position = corner.world;
     out.dynamic_param = particle_dynamic_param(i);
+    out.dynamic_param_1 = particle_dynamic_param_1(i);
     set_sprite_sub_uv(&out, i, nage, uv);
     return out;
 }

@@ -9,7 +9,12 @@
 //! fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.25,0.5,1,2] [--duration S]
 //!           [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey]
 //!           [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene]
+//!           [--orbit RADIUS,SECONDS]
 //! ```
+//!
+//! `--orbit` moves the effect on a horizontal circle around the origin (one
+//! turn per SECONDS of simulated time), so effects reading
+//! Engine.Owner.Velocity (Spawn Per Unit, Inherit Velocity) see it move.
 //!
 //! `--test-scene` adds an opaque pillar through the effect and a translucent
 //! glass pane in front of part of it, to check depth and ordering against
@@ -49,6 +54,8 @@ struct Options {
     target: Vec3,
     mp4: bool,
     test_scene: bool,
+    /// Moves the effect on a horizontal circle: (radius m, seconds per turn).
+    orbit: Option<(f32, f32)>,
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -78,6 +85,7 @@ fn parse_args() -> Result<Options, String> {
         target: Vec3::new(0.0, 1.3, 0.0),
         mp4: true,
         test_scene: false,
+        orbit: None,
     };
     let mut effect = None;
     while let Some(a) = args.next() {
@@ -104,6 +112,16 @@ fn parse_args() -> Result<Options, String> {
             "--target" => o.target = parse_vec3(&val()?)?,
             "--no-mp4" => o.mp4 = false,
             "--test-scene" => o.test_scene = true,
+            "--orbit" => {
+                let v = val()?;
+                let (r, t) = v.split_once(',').ok_or("--orbit is RADIUS,SECONDS")?;
+                let r: f32 = r.trim().parse().map_err(|e| format!("--orbit: {e}"))?;
+                let t: f32 = t.trim().parse().map_err(|e| format!("--orbit: {e}"))?;
+                if !(t > 0.0) {
+                    return Err("--orbit: SECONDS must be more than 0".into());
+                }
+                o.orbit = Some((r, t));
+            }
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ => effect = Some(PathBuf::from(a)),
@@ -121,7 +139,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene]";
+const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS]";
 
 fn main() -> ExitCode {
     let o = match parse_args() {
@@ -298,12 +316,28 @@ fn setup(
         ));
     }
     let effect = preview.effect.take().unwrap();
-    commands.spawn((effect, Transform::IDENTITY));
+    commands.spawn((effect, PreviewEffect, orbit_transform(o.orbit, 0.0)));
+}
+
+/// The effect fxpreview renders.
+#[derive(Component)]
+struct PreviewEffect;
+
+/// Where `--orbit` puts the effect at simulated time `t`.
+fn orbit_transform(orbit: Option<(f32, f32)>, t: f32) -> Transform {
+    match orbit {
+        Some((r, period)) => {
+            let a = std::f32::consts::TAU * t / period;
+            Transform::from_xyz(r * a.cos(), 0.0, r * a.sin())
+        }
+        None => Transform::IDENTITY,
+    }
 }
 
 fn drive(
     mut commands: Commands,
     mut preview: ResMut<Preview>,
+    mut effect: Query<&mut Transform, With<PreviewEffect>>,
     mut clock: ResMut<FxClock>,
     ready: Res<FxReady>,
     mut exit: MessageWriter<AppExit>,
@@ -329,6 +363,11 @@ fn drive(
         Phase::Capturing(k) => {
             if k < preview.n_frames {
                 clock.request_steps(steps_per_frame);
+                // The effect's position at the end of this frame's steps.
+                let t = (k * steps_per_frame as usize) as f32 / SIM_HZ as f32;
+                for mut tr in &mut effect {
+                    *tr = orbit_transform(preview.o.orbit, t);
+                }
                 preview.phase = Phase::Capturing(k + 1);
             } else {
                 preview.phase = Phase::Draining;

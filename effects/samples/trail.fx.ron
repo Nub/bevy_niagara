@@ -1,0 +1,31 @@
+// Spawn Per Unit: particles by distance the effect moves (Engine.Owner.Velocity,
+// measured from the entity's transform), so the trail stays evenly spaced
+// whatever the speed. Preview it moving: `fxpreview trail.fx.ron --orbit 1.5,3`.
+// Inherit Velocity carries a little of the motion into each particle.
+(
+    name: "Trail",
+    emitters: [(
+        name: "Trail",
+        max_particles: 1000,
+        emitter_update: [
+            (module: "Spawn Per Unit", inputs: { "Spawn Per Unit": Float(40.0), "Movement Tolerance": Float(0.05) }),
+        ],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": Float(1.2),
+                "Position": Vec3((0.0, 1.0, 0.0)),
+                "Color": Color((1.0, 0.6, 0.2, 1.0)),
+                "Sprite Size": Vec2((0.09, 0.09)),
+            }),
+            (module: "Inherit Velocity", inputs: { "Velocity Scale": Float(0.2) }),
+            (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(180.0), "Velocity Strength": Float(0.15) }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Solve Forces and Velocity"),
+            (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (1.0, 1.0)), (1.0, (0.2, 0.2))])) }),
+            (module: "Color", inputs: { "Color": CurveOverAge(Color([(0.0, (1.0, 0.7, 0.3, 1.0)), (1.0, (0.6, 0.1, 1.0, 0.0))])) }),
+        ],
+        renderers: [Sprite((blend_mode: Additive))],
+    )],
+)

@@ -8,7 +8,7 @@
 
 import bevy_pbr::render::mesh_view_bindings::view;
 import fx_render::particle_io::{
-    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sub_uv,
+    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, particle_dynamic_param_1, set_sub_uv,
     sample_particle_texture, scene_light, finish,
 };
 import fx_render::particle_surface::{ribbon_u, ribbon_point, ribbon_builtin_texel};
@@ -85,6 +85,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> Fx
     out.normal = normal;
     out.color = mix(particle_color(i1), particle_color(i2), t);
     out.dynamic_param = mix(particle_dynamic_param(i1), particle_dynamic_param(i2), t);
+    out.dynamic_param_1 = mix(particle_dynamic_param_1(i1), particle_dynamic_param_1(i2), t);
     let u = mix(u_at(k, s, e), u_at(k + 1u, s, e), t);
     let nage = mix(pw(16u, i1), pw(16u, i2), t);
     set_sub_uv(&out, nage, vec2<f32>(u, side_sign * 0.5 + 0.5));

@@ -12,6 +12,7 @@
 //     fn fragment(in: FxVertexOutput) -> @location(0) vec4<f32> {
 //         let tex = sample_particle_texture(in);   // flipbook-aware
 //         let heat = in.dynamic_param.x;           // Particles.DynamicMaterialParameter
+//         let glow = in.dynamic_param_1.x;         // Particles.DynamicMaterialParameter1
 //         return finish(in.color.rgb * tex.rgb * (1.0 + heat), in.color.a * tex.a);
 //     }
 
@@ -69,6 +70,8 @@ struct FxVertexOutput {
     // Flipbook frame (fractional when blending): over the particle's life, or
     // Particles.SubImageIndex for sprites with SubUV Animation.
     @location(9) sub_image_index: f32,
+    // Particles.DynamicMaterialParameter1 (Dynamic Material Parameters 2; 0 when never set).
+    @location(10) dynamic_param_1: vec4<f32>,
 }
 
 // Particle attributes for vertex shaders.
@@ -81,6 +84,36 @@ fn particle_dynamic_param(i: u32) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     return vec4<f32>(pw(40u, i), pw(41u, i), pw(42u, i), pw(43u, i));
+}
+
+fn particle_dynamic_param_1(i: u32) -> vec4<f32> {
+    if (fx.extended == 0u) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(pw(56u, i), pw(57u, i), pw(58u, i), pw(59u, i));
+}
+
+// Particles.SpriteFacing (words 50..52) when the emitter sets it, else the
+// renderer's custom facing vector; in effect space.
+fn particle_custom_facing(i: u32) -> vec3<f32> {
+    if (fx.extended != 0u) {
+        let v = vec3<f32>(pw(50u, i), pw(51u, i), pw(52u, i));
+        if (dot(v, v) > 0.0) {
+            return v;
+        }
+    }
+    return fx.custom_facing.xyz;
+}
+
+// Particles.SpriteAlignment (words 53..55) when set, else the renderer's custom alignment vector.
+fn particle_custom_alignment(i: u32) -> vec3<f32> {
+    if (fx.extended != 0u) {
+        let v = vec3<f32>(pw(53u, i), pw(54u, i), pw(55u, i));
+        if (dot(v, v) > 0.0) {
+            return v;
+        }
+    }
+    return fx.custom_alignment.xyz;
 }
 
 // Particles.CameraOffset (word 49; 0 when the emitter never sets it).

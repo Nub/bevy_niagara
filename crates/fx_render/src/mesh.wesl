@@ -4,7 +4,7 @@
 
 import bevy_pbr::render::mesh_view_bindings::view;
 import fx_render::particle_io::{
-    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sub_uv,
+    FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, particle_dynamic_param_1, set_sub_uv,
     safe_normalize, sample_particle_texture, scene_light, finish, camera_offset,
 };
 
@@ -70,6 +70,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     out.normal = safe_normalize(normal, vec3<f32>(0.0, 1.0, 0.0));
     out.color = particle_color(i);
     out.dynamic_param = particle_dynamic_param(i);
+    out.dynamic_param_1 = particle_dynamic_param_1(i);
     set_sub_uv(&out, pw(16u, i), uv);
     return out;
 }

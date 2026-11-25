@@ -1,0 +1,88 @@
+// Emitter options and spawn modules (batch 2): three emitters side by side.
+// Left: Emitter State loops a burst three times (Multiple, 1 s loops after a
+// 0.25 s delay), then stops. Middle: Spawn Burst Interval fires a ring every
+// 0.4 s (Burst Count 4 per 2 s loop, Infinite). Right: Spawn Per Frame, a
+// steady fountain. The system warms up 1 s, so the fountain is already full
+// in the first frame.
+(
+    name: "Loops",
+    warmup_time: 1.0,
+    warmup_tick_delta: 0.0333,
+    emitters: [
+        (
+            name: "Looped Burst",
+            max_particles: 400,
+            fixed_bounds: ((-2.5, -1.0, -1.5), (0.0, 3.0, 1.5)),
+            emitter_update: [
+                (module: "Emitter State", inputs: {
+                    "Loop Behavior": Multiple, "Loop Count": Int(3),
+                    "Loop Duration": Float(1.0), "Loop Delay": Float(0.25),
+                }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.7), Float(0.9)),
+                    "Position": Vec3((-1.4, 1.0, 0.0)),
+                    "Color": Color((1.0, 0.55, 0.15, 1.0)),
+                    "Sprite Size": Vec2((0.08, 0.08)),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(180.0), "Velocity Strength": Float(1.6) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(1.5) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Interval Rings",
+            max_particles: 600,
+            emitter_update: [
+                (module: "Emitter State", inputs: { "Loop Behavior": Infinite, "Loop Duration": Float(2.0) }),
+                (module: "Spawn Burst Interval", inputs: {
+                    "Spawn Count": Int(48), "Spawn Interval": Float(0.4), "Burst Count": Int(4),
+                }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.9),
+                    "Color": Color((0.3, 0.8, 1.0, 1.0)),
+                    "Sprite Size": Vec2((0.07, 0.07)),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Ring, "Ring Radius": Float(0.15), "Offset": Vec3((0.0, 0.4, 0.0)) }),
+                (module: "Add Velocity from Point", inputs: { "Velocity Origin": Vec3((0.0, 0.4, 0.0)), "Velocity Strength": Float(1.0) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 1.5, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Per Frame",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Per Frame", inputs: { "Spawn Count": Int(2) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(1.6),
+                    "Position": Vec3((1.4, 0.2, 0.0)),
+                    "Color": Color((0.5, 1.0, 0.4, 1.0)),
+                    "Sprite Size": Vec2((0.06, 0.06)),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(12.0), "Velocity Strength": RandomRange(Float(3.0), Float(3.6)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Limit Velocity", inputs: { "Velocity Limit": Float(3.0) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

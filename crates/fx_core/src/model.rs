@@ -97,6 +97,19 @@ pub struct SystemSource {
         serialize_with = "crate::scalability::serialize_plain"
     )]
     pub scalability: Option<crate::scalability::ScalabilitySource>,
+    /// Seconds simulated (in steps of `warmup_tick_delta`) before the first
+    /// visible step, as Niagara's Warmup Time.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalability::serialize_plain"
+    )]
+    pub warmup_time: Option<f32>,
+    /// Step length of the warm-up (Niagara's Warmup Tick Delta); default 1/15 s.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalability::serialize_plain"
+    )]
+    pub warmup_tick_delta: Option<f32>,
     /// Exposed `User.` parameters with their default values.
     pub user_parameters: ParamMap,
     pub system_spawn: Vec<ModuleCall>,
@@ -123,6 +136,17 @@ pub struct EmitterSource {
     pub sim_target: SimTarget,
     /// Capacity: spawns beyond it are dropped.
     pub max_particles: u32,
+    /// Niagara's Determinism: when false, each instance mixes a random value
+    /// into its seed, so copies of the effect differ.
+    #[serde(skip_serializing_if = "is_true")]
+    pub deterministic: bool,
+    /// Niagara's Fixed Bounds: `(min, max)` in effect space, used for
+    /// visibility culling instead of the system's `bounds_radius`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalability::serialize_plain"
+    )]
+    pub fixed_bounds: Option<[[f32; 3]; 2]>,
     pub emitter_spawn: Vec<ModuleCall>,
     pub emitter_update: Vec<ModuleCall>,
     pub particle_spawn: Vec<ModuleCall>,
@@ -520,4 +544,8 @@ impl Serialize for Input {
             Input::Curve(c) => c.serialize(s),
         }
     }
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }

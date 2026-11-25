@@ -1,11 +1,13 @@
 //! The emitter stacks run on the CPU: they only read user, engine and emitter
 //! values (never particles), so the CPU decides each step's spawn request
-//! exactly as `fx_core::sim` does and the GPU clamps it to the free room.
+//! with `fx_core::sim::run_emitter_stack`, the CPU simulation's own code, and
+//! the GPU clamps it to the free room.
 
 use fx_core::cook::CookedModule;
-use fx_core::modules::{self, ModuleKind};
+use fx_core::lifecycle::Lifecycle;
 use fx_core::params::{Namespace, ParamRef};
 use fx_core::sim::rng::RandKey;
+use fx_core::sim::{EmitterStep, EmitterValues};
 use fx_core::types::Value;
 
 pub(crate) const STAGE_EMITTER_SPAWN: u32 = 2;
@@ -15,8 +17,9 @@ pub(crate) struct Env<'a> {
     pub user: &'a [Value],
     pub dt: f32,
     pub time: f32,
-    pub emitter_age: f32,
+    pub emitter: EmitterValues,
     pub owner_velocity: [f32; 3],
+    pub lifecycle: &'a Lifecycle,
 }
 
 fn read_param(r: ParamRef, env: &Env) -> Value {
@@ -32,7 +35,7 @@ fn read_param(r: ParamRef, env: &Env) -> Value {
             _ => Value::Vec3(env.owner_velocity),
         },
         Namespace::System => Value::Float(env.time),
-        Namespace::Emitter => Value::Float(env.emitter_age),
+        Namespace::Emitter => env.emitter.param(r.index),
         Namespace::Particles | Namespace::Event => Value::Float(0.0),
     }
 }
@@ -56,33 +59,17 @@ pub(crate) fn run_stack(
     emitter: u32,
     frame: u32,
 ) -> u32 {
-    let mut spawn_count = 0u32;
-    for (mi, m) in stack.iter().enumerate() {
-        let k = RandKey {
-            seed,
-            emitter,
-            particle: u32::MAX,
-            frame,
-            module: stage * 256 + mi as u32,
-        };
-        let input = |slot: usize| fx_core::sim::eval_input(m, slot, env, &k);
-        match modules::from_id(m.module) {
-            Some(ModuleKind::SpawnRate) => {
-                let rate = input(0).as_f32().max(0.0);
-                *spawn_remainder += rate * env.dt;
-                let whole = spawn_remainder.floor();
-                *spawn_remainder -= whole;
-                spawn_count = spawn_count.saturating_add(whole as u32);
-            }
-            Some(ModuleKind::SpawnBurstInstantaneous) => {
-                let count = input(0).as_i32().max(0) as u32;
-                let t = input(1).as_f32();
-                if env.emitter_age <= t && t < env.emitter_age + env.dt {
-                    spawn_count = spawn_count.saturating_add(count);
-                }
-            }
-            _ => {}
-        }
-    }
-    spawn_count
+    let step = EmitterStep {
+        age: env.emitter.age,
+        dt: env.dt,
+        owner_velocity: bevy_math::Vec3::from_array(env.owner_velocity),
+        lifecycle: env.lifecycle,
+    };
+    fx_core::sim::run_emitter_stack(stack, env, &step, spawn_remainder, &|mi| RandKey {
+        seed,
+        emitter,
+        particle: u32::MAX,
+        frame,
+        module: stage * 256 + mi as u32,
+    })
 }

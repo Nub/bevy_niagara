@@ -238,3 +238,77 @@ fn shape_ring(radius: f32, coverage: f32, u: array<f32, 5>) -> vec3<f32> {
     return around(radius * sqrt(1.0 - clamp(coverage, 0.0, 1.0) * u[1]), TAU * u[0], 0.0);
 }
 
+
+// ---- batch 2 modules (fx_core::sim helpers of the same names) ----
+
+// v turned by unit quaternion q.
+fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let t = cross(q.xyz, v) * 2.0;
+    return v + t * q.w + cross(q.xyz, t);
+}
+
+// The rotation by rotation vector v (axis times angle in degrees).
+fn rotation_vector_quat(v: vec3<f32>) -> vec4<f32> {
+    let len = length(v);
+    if (!(len > 0.0)) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let half = len * HALF_RADIANS_PER_DEGREE;
+    let s = sin(half) / len;
+    return vec4<f32>(v * s, cos(half));
+}
+
+// v * (1 / length(v)) if that is finite and positive, else `fallback`.
+fn normalize_or(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let rl = 1.0 / length(v);
+    if (rl > 0.0 && rl <= 3.4028235e38) {
+        return v * rl;
+    }
+    return fallback;
+}
+
+// Shortest rotation taking direction `from` (+X when zero) onto `to`.
+fn shortest_arc(from_dir: vec3<f32>, to_dir: vec3<f32>) -> vec4<f32> {
+    let a = normalize_or(from_dir, vec3<f32>(1.0, 0.0, 0.0));
+    let b = normalize_or(to_dir, vec3<f32>(0.0));
+    let d = dot(a, b);
+    if (d < -0.999999) {
+        return vec4<f32>(basis_t1(a), 0.0);
+    }
+    return quat_normalize(vec4<f32>(cross(a, b), 1.0 + d));
+}
+
+// Grid Location's lattice point for particle `id` on an n grid, -0.5..0.5 per axis.
+fn grid_point(id: u32, n: vec3<u32>) -> vec3<f32> {
+    let total = max(n.x * n.y * n.z, 1u);
+    let i = id % total;
+    let c = vec3<u32>(i % n.x, (i / n.x) % n.y, i / (n.x * n.y));
+    var out = vec3<f32>(0.0);
+    for (var k = 0; k < 3; k++) {
+        if (n[k] > 1u) {
+            out[k] = f32(c[k]) / f32(n[k] - 1u) - 0.5;
+        }
+    }
+    return out;
+}
+
+// clamp((d - near) / (far - near), 0, 1); a step at far when far <= near.
+fn distance_fraction(d: f32, near: f32, far: f32) -> f32 {
+    if (far > near) {
+        return clamp((d - near) / (far - near), 0.0, 1.0);
+    }
+    return select(0.0, 1.0, d >= far);
+}
+
+// Noise Force's field: gradient noise, octaves of double frequency and half amplitude.
+fn noise_force(q: vec3<f32>, octaves: u32) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    var f = 1.0;
+    var a = 1.0;
+    for (var o = 0u; o < octaves; o++) {
+        sum += noise_grad(q * f, 3u + o) * a;
+        f *= 2.0;
+        a *= 0.5;
+    }
+    return sum;
+}

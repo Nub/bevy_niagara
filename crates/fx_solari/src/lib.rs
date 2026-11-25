@@ -702,6 +702,7 @@ fn write_proxies(
                 words[48] = normal_offset;
                 words[49] = tangent_offset;
                 words[50] = DATA_WIDTH;
+                words[51] = (em.words > fx_gpu::WORDS_PER_PARTICLE) as u32;
                 draw.record(&queue, encoder, fx.view_pipelines(), em, &NO_VIEW);
                 let bind_group = device.wgpu_device().create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("fx rt proxy"),

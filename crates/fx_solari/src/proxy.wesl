@@ -27,7 +27,7 @@ struct ProxyParams {
     normal_offset: u32,
     tangent_offset: u32,
     data_width: u32,
-    _pad: u32,
+    extended: u32,  // the emitter stores the extended words (SpriteFacing 50..52, SpriteAlignment 53..55)
 }
 
 const NONE = 0xFFFFFFFFu;
@@ -85,8 +85,17 @@ fn proxy(@builtin(global_invocation_id) id: vec3<u32>) {
     let vel = (m * vec4<f32>(pw(3u, i), pw(4u, i), pw(5u, i), 0.0)).xyz;
     let size = vec2<f32>(pw(10u, i), pw(11u, i));
     let rotation = radians(pw(12u, i));
-    let facing = (m * vec4<f32>(p.custom_facing.xyz, 0.0)).xyz;
-    let alignment = (m * vec4<f32>(p.custom_alignment.xyz, 0.0)).xyz;
+    // Particles.SpriteFacing / SpriteAlignment when set, else the renderer's vectors.
+    var local_facing = p.custom_facing.xyz;
+    var local_alignment = p.custom_alignment.xyz;
+    if p.extended != 0u {
+        let f = vec3<f32>(pw(50u, i), pw(51u, i), pw(52u, i));
+        let a = vec3<f32>(pw(53u, i), pw(54u, i), pw(55u, i));
+        if dot(f, f) > 0.0 { local_facing = f; }
+        if dot(a, a) > 0.0 { local_alignment = a; }
+    }
+    let facing = (m * vec4<f32>(local_facing, 0.0)).xyz;
+    let alignment = (m * vec4<f32>(local_alignment, 0.0)).xyz;
     // Corner UVs in the order of the proxy mesh's vertices.
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),

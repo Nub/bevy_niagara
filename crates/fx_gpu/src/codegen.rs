@@ -118,7 +118,13 @@ impl Gen<'_> {
             }
             .into(),
             Namespace::System => "fr.time".into(),
-            Namespace::Emitter => "fr.emitter_age".into(),
+            Namespace::Emitter => match r.index {
+                0 => "fr.emitter_age",
+                1 => "fr.looped_age",
+                2 => "bitcast<i32>(fr.loop_count)",
+                _ => "fr.normalized_loop_age",
+            }
+            .into(),
             Namespace::Event => match r.index {
                 0 => "cur_event.position",
                 1 => "cur_event.velocity",
@@ -154,6 +160,12 @@ impl Gen<'_> {
                 attr::INITIAL_SCALE => "(*p).initial_scale",
                 attr::INITIAL_RIBBON_WIDTH => "(*p).initial_ribbon_width",
                 attr::CAMERA_OFFSET => "(*p).camera_offset",
+                attr::SPRITE_FACING => "(*p).sprite_facing",
+                attr::SPRITE_ALIGNMENT => "(*p).sprite_alignment",
+                attr::DYNAMIC_MATERIAL_PARAMETER_1 => "(*p).dynamic_material_parameter_1",
+                attr::ROTATIONAL_VELOCITY => "(*p).rotational_velocity",
+                attr::PHYSICS_ROTATIONAL_FORCE => "(*p).rotational_force",
+                attr::PHYSICS_ROTATIONAL_DRAG => "(*p).rotational_drag",
                 _ => "0.0",
             }
             .into(),
@@ -549,6 +561,14 @@ impl Gen<'_> {
     (*p).position += (*p).velocity * fr.dt;
     (*p).force = vec3<f32>(0.0);
     (*p).drag = 0.0;
+    if (any((*p).rotational_velocity != vec3<f32>(0.0)) || any((*p).rotational_force != vec3<f32>(0.0)) || (*p).rotational_drag != 0.0) {
+        if ((*p).mass > 0.0) { (*p).rotational_velocity += (*p).rotational_force / (*p).mass * fr.dt; }
+        (*p).rotational_velocity *= exp(-(*p).rotational_drag * fr.dt);
+        let spin = rotation_vector_quat((*p).rotational_velocity * fr.dt);
+        (*p).mesh_orientation = quat_normalize(quat_mul(spin, (*p).mesh_orientation));
+        (*p).rotational_force = vec3<f32>(0.0);
+        (*p).rotational_drag = 0.0;
+    }
 ",
                 );
             }
@@ -916,7 +936,173 @@ impl Gen<'_> {
                 let op = if additive { "+=" } else { "=" };
                 writeln!(o, "    (*p).camera_offset {op} {amount};").unwrap();
             }
-            ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
+            ModuleKind::SetLifetime => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).lifetime = {e};").unwrap();
+            }
+            ModuleKind::SetMass => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).mass = {e};").unwrap();
+            }
+            ModuleKind::SetSpriteSize => {
+                let (e, init) = (inp(0, self), inp(1, self));
+                writeln!(o, "    (*p).sprite_size = {e};").unwrap();
+                writeln!(o, "    if ({init}) {{ (*p).initial_sprite_size = (*p).sprite_size; }}").unwrap();
+            }
+            ModuleKind::SetSpriteRotation => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).sprite_rotation = {e};").unwrap();
+            }
+            ModuleKind::SetVelocity => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).velocity = {e};").unwrap();
+            }
+            ModuleKind::SetPosition => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).position = {e};").unwrap();
+            }
+            ModuleKind::SetScale => {
+                let (e, init) = (inp(0, self), inp(1, self));
+                writeln!(o, "    (*p).scale = {e};").unwrap();
+                writeln!(o, "    if ({init}) {{ (*p).initial_scale = (*p).scale; }}").unwrap();
+            }
+            ModuleKind::AddVelocityFromPoint => {
+                let (s, c, sc) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let strength = {s};").unwrap();
+                writeln!(o, "    let origin = {c};").unwrap();
+                writeln!(o, "    let scale = {sc};").unwrap();
+                writeln!(o, "    (*p).velocity += unit_or_y((*p).position - origin) * strength * scale;").unwrap();
+            }
+            ModuleKind::GridLocation => {
+                let (size, x, y, z, off) = (inp(0, self), inp(1, self), inp(2, self), inp(3, self), inp(4, self));
+                writeln!(o, "    let size = {size};").unwrap();
+                writeln!(o, "    let n = vec3<u32>(u32(clamp({x}, 1, 1024)), u32(clamp({y}, 1, 1024)), u32(clamp({z}, 1, 1024)));").unwrap();
+                writeln!(o, "    let offset = {off};").unwrap();
+                writeln!(o, "    (*p).position = offset + size * grid_point((*p).id, n);").unwrap();
+            }
+            ModuleKind::AddRotationalVelocity => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).rotational_velocity += {e};").unwrap();
+            }
+            ModuleKind::MeshRotationForce => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).rotational_force += {e};").unwrap();
+            }
+            ModuleKind::RotationalDrag => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).rotational_drag += {e};").unwrap();
+            }
+            ModuleKind::OrientMeshToVector => {
+                let (v, a) = (inp(0, self), inp(1, self));
+                writeln!(o, "    let v = {v};").unwrap();
+                writeln!(o, "    let axis = {a};").unwrap();
+                writeln!(o, "    if (length(v) > 0.0) {{ (*p).mesh_orientation = shortest_arc(axis, v); }}").unwrap();
+            }
+            ModuleKind::AlignSpriteToMeshOrientation => {
+                let (f, a) = (inp(0, self), inp(1, self));
+                writeln!(o, "    let q = (*p).mesh_orientation;").unwrap();
+                writeln!(o, "    (*p).sprite_facing = quat_rotate(q, {f});").unwrap();
+                writeln!(o, "    (*p).sprite_alignment = quat_rotate(q, {a});").unwrap();
+            }
+            ModuleKind::SetSpriteFacing => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).sprite_facing = {e};").unwrap();
+            }
+            ModuleKind::SetSpriteAlignment => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).sprite_alignment = {e};").unwrap();
+            }
+            ModuleKind::ScaleMeshSizeBySpeed => {
+                let (t, lo, hi) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let t = speed_fraction((*p).velocity, {t});").unwrap();
+                writeln!(o, "    let lo = {lo};").unwrap();
+                writeln!(o, "    let hi = {hi};").unwrap();
+                writeln!(o, "    (*p).scale = (*p).initial_scale * (lo + (hi - lo) * t);").unwrap();
+            }
+            ModuleKind::ScaleColorByDistance | ModuleKind::ScaleSpriteSizeByDistance => {
+                let (r, n, fa, lo, hi) = (inp(0, self), inp(1, self), inp(2, self), inp(3, self), inp(4, self));
+                writeln!(o, "    let d = length((*p).position - {r});").unwrap();
+                writeln!(o, "    let near = {n};").unwrap();
+                writeln!(o, "    let far = {fa};").unwrap();
+                writeln!(o, "    let t = distance_fraction(d, near, far);").unwrap();
+                writeln!(o, "    let lo = {lo};").unwrap();
+                writeln!(o, "    let hi = {hi};").unwrap();
+                if kind == ModuleKind::ScaleColorByDistance {
+                    writeln!(o, "    (*p).color = (*p).initial_color * (lo + (hi - lo) * t);").unwrap();
+                } else {
+                    writeln!(o, "    (*p).sprite_size = (*p).initial_sprite_size * (lo + (hi - lo) * t);").unwrap();
+                }
+            }
+            ModuleKind::DynamicMaterialParameters2 => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).dynamic_material_parameter_1 = {e};").unwrap();
+            }
+            ModuleKind::JitterPosition => {
+                let (a, dl) = (inp(0, self), inp(1, self));
+                writeln!(o, "    let amount = {a};").unwrap();
+                writeln!(o, "    let delay = {dl};").unwrap();
+                writeln!(o, "    let fire = !(delay > 0.0) || floor((*p).age / delay) != floor(((*p).age - fr.dt) / delay);").unwrap();
+                writeln!(o, "    if (fire) {{").unwrap();
+                writeln!(o, "        let u = vec3<f32>(rand_unit(k, 128u), rand_unit(k, 129u), rand_unit(k, 130u));").unwrap();
+                writeln!(o, "        (*p).position += (u * 2.0 - vec3<f32>(1.0)) * amount;").unwrap();
+                writeln!(o, "    }}").unwrap();
+            }
+            ModuleKind::KillParticlesBySpeed => {
+                let (lo, hi) = (inp(0, self), inp(1, self));
+                writeln!(o, "    let speed = length((*p).velocity);").unwrap();
+                writeln!(o, "    if (speed < {lo} || speed > {hi}) {{ (*p).alive = false; }}").unwrap();
+            }
+            ModuleKind::KillParticlesByDistance => {
+                let (c, r, closer) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let d = length((*p).position - {c});").unwrap();
+                writeln!(o, "    let r = {r};").unwrap();
+                writeln!(o, "    if (select(d > r, d < r, {closer})) {{ (*p).alive = false; }}").unwrap();
+            }
+            ModuleKind::RotateAroundPoint => {
+                let (c, a, r, rate, ph) = (inp(0, self), inp(1, self), inp(2, self), inp(3, self), inp(4, self));
+                writeln!(o, "    let center = {c};").unwrap();
+                writeln!(o, "    let axis = unit_or_y({a});").unwrap();
+                writeln!(o, "    let radius = {r};").unwrap();
+                writeln!(o, "    let rate = {rate};").unwrap();
+                writeln!(o, "    let phase = {ph};").unwrap();
+                writeln!(o, "    let theta = (phase + rate * (*p).age) * DEGREES;").unwrap();
+                writeln!(o, "    (*p).position = center + (basis_t1(axis) * cos(theta) + basis_t2(axis) * sin(theta)) * radius;").unwrap();
+            }
+            ModuleKind::NoiseForce => {
+                let (s, fq, oc, pan) = (inp(0, self), inp(1, self), inp(2, self), inp(3, self));
+                writeln!(o, "    let strength = {s};").unwrap();
+                writeln!(o, "    let freq = {fq};").unwrap();
+                writeln!(o, "    let octaves = u32(clamp({oc}, 1, 8));").unwrap();
+                writeln!(o, "    let pan = {pan};").unwrap();
+                writeln!(o, "    (*p).force += noise_force((*p).position * freq + pan * fr.time, octaves) * strength;").unwrap();
+            }
+            ModuleKind::LimitVelocity => {
+                let e = inp(0, self);
+                writeln!(o, "    let limit = max({e}, 0.0);").unwrap();
+                writeln!(o, "    let len = length((*p).velocity);").unwrap();
+                writeln!(o, "    if (len > limit) {{ (*p).velocity *= limit / len; }}").unwrap();
+            }
+            ModuleKind::ScaleVelocity => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).velocity *= {e};").unwrap();
+            }
+            ModuleKind::RibbonTwistRate => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).ribbon_twist += {e} * fr.dt;").unwrap();
+            }
+            ModuleKind::ScaleRibbonWidthBySpeed => {
+                let (t, lo, hi) = (inp(0, self), inp(1, self), inp(2, self));
+                writeln!(o, "    let t = speed_fraction((*p).velocity, {t});").unwrap();
+                writeln!(o, "    let lo = {lo};").unwrap();
+                writeln!(o, "    let hi = {hi};").unwrap();
+                writeln!(o, "    (*p).ribbon_width = (*p).initial_ribbon_width * (lo + (hi - lo) * t);").unwrap();
+            }
+            ModuleKind::SpawnRate
+            | ModuleKind::SpawnBurstInstantaneous
+            | ModuleKind::EmitterState
+            | ModuleKind::SpawnPerUnit
+            | ModuleKind::SpawnPerFrame
+            | ModuleKind::SpawnBurstInterval => {}
         }
         writeln!(o, "    }}").unwrap();
         self.out.push_str(o);

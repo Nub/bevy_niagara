@@ -1,0 +1,77 @@
+// Particle motion and setter modules (batch 2), three emitters.
+// Left: Grid Location lays a 5 x 5 x 1 grid; Jitter Position shakes it every
+// 0.2 s and Scale Color by Distance fades the points far from its centre.
+// Middle: Rotate Around Point spins particles on a circle that rises (Set
+// Particle Position is not needed: the module sets it), with Set Particle
+// Sprite Size growing them. Right: Noise Force (3 octaves) stirs particles,
+// Scale Velocity damps sideways motion, Kill Particles by Distance removes
+// strays and Kill Particles by Speed removes the fastest.
+(
+    name: "Motion",
+    emitters: [
+        (
+            name: "Grid",
+            max_particles: 25,
+            emitter_update: [(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(25) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(100.0), "Color": Color((1.0, 0.8, 0.3, 1.0)), "Sprite Size": Vec2((0.12, 0.12)) }),
+                (module: "Grid Location", inputs: {
+                    "Grid Size": Vec3((1.2, 1.2, 0.0)), "X Count": Int(5), "Y Count": Int(5), "Z Count": Int(1),
+                    "Offset": Vec3((-1.6, 1.0, 0.0)),
+                }),
+                (module: "Set Particle Sprite Rotation", inputs: { "Sprite Rotation": Float(45.0) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Jitter Position", inputs: { "Jitter Amount": Vec3((0.03, 0.03, 0.0)), "Jitter Delay": Float(0.2) }),
+                (module: "Scale Color by Distance", inputs: {
+                    "Reference Position": Vec3((-1.6, 1.0, 0.0)), "Near Distance": Float(0.2), "Far Distance": Float(0.9),
+                    "Far Scale Factor": Color((0.2, 0.4, 1.0, 0.3)),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Orbit",
+            max_particles: 300,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(2.5), "Color": Color((0.4, 0.8, 1.0, 1.0)) }),
+                (module: "Set Particle Lifetime", inputs: { "Lifetime": RandomRange(Float(2.0), Float(3.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Rotate Around Point", inputs: {
+                    "Rotation Center": Dynamic("Make Vec3 from Floats", { "X": Float(0.0), "Y": Dynamic("Multiply Float", { "A": Link(Float, "Particles.Age"), "B": Float(0.8) }), "Z": Float(0.0) }),
+                    "Rotation Radius": Float(0.5), "Rotation Rate": Float(180.0),
+                }),
+                (module: "Set Particle Sprite Size", inputs: { "Sprite Size": CurveOverAge(Vec2([(0.0, (0.03, 0.03)), (1.0, (0.12, 0.12))])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Noise",
+            max_particles: 800,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(200.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.0), Float(3.0)),
+                    "Position": RandomRange(Vec3((1.3, 0.3, -0.2)), Vec3((1.9, 0.5, 0.2))),
+                    "Color": Color((1.0, 0.4, 0.8, 1.0)), "Sprite Size": Vec2((0.05, 0.05)),
+                }),
+                (module: "Set Particle Velocity", inputs: { "Velocity": Vec3((0.0, 0.7, 0.0)) }),
+                (module: "Set Particle Mass", inputs: { "Mass": RandomRange(Float(0.5), Float(1.5)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Noise Force", inputs: { "Noise Strength": Float(3.0), "Noise Frequency": Float(1.5), "Noise Octaves": Int(3), "Pan Noise Field": Vec3((0.0, -0.5, 0.0)) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Velocity", inputs: { "Velocity Scale": Vec3((0.98, 1.0, 0.98)) }),
+                (module: "Kill Particles by Distance", inputs: { "Reference Position": Vec3((1.6, 1.2, 0.0)), "Kill Distance": Float(1.4) }),
+                (module: "Kill Particles by Speed", inputs: { "Maximum Speed": Float(3.0) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.1, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

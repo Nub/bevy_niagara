@@ -1,0 +1,67 @@
+// Mesh rotation physics (batch 2). Left: cubes spun up by Add Rotational
+// Velocity and a Mesh Rotation Force, slowed by Rotational Drag (they tumble
+// fast, then settle). Middle: cones launched in a fountain, Orient Mesh to
+// Vector keeps their +Y along the velocity, and Scale Mesh Size by Speed
+// stretches them when fast. Right: Set Particle Scale pulses a column of cubes.
+(
+    name: "Mesh Spin",
+    emitters: [
+        (
+            name: "Tumble",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(12.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.5),
+                    "Position": RandomRange(Vec3((-1.9, 0.6, -0.3)), Vec3((-1.1, 1.8, 0.3))),
+                    "Color": Color((0.9, 0.55, 0.3, 1.0)),
+                }),
+                (module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((0.16, 0.16, 0.16)) }),
+                (module: "Add Rotational Velocity", inputs: { "Rotational Velocity": RandomRange(Vec3((-200.0, -200.0, -200.0)), Vec3((200.0, 200.0, 200.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Mesh Rotation Force", inputs: { "Rotation Force": Vec3((0.0, 360.0, 0.0)) }),
+                (module: "Rotational Drag", inputs: { "Rotational Drag": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+            renderers: [Mesh((mesh: "cube", blend_mode: Opaque, lit: true))],
+        ),
+        (
+            name: "Darts",
+            max_particles: 300,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(30.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.6), "Position": Vec3((0.0, 0.2, 0.0)), "Color": Color((0.4, 0.8, 1.0, 1.0)) }),
+                (module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((0.06, 0.12, 0.06)) }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(25.0), "Velocity Strength": RandomRange(Float(4.0), Float(5.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Orient Mesh to Vector", inputs: { "Orientation Vector": Link(Vec3, "Particles.Velocity"), "Mesh Axis": Vec3((0.0, 1.0, 0.0)) }),
+                (module: "Scale Mesh Size by Speed", inputs: { "Velocity Threshold": Float(5.0), "Min Scale Factor": Vec3((1.0, 0.6, 1.0)), "Max Scale Factor": Vec3((0.8, 2.0, 0.8)) }),
+            ],
+            renderers: [Mesh((mesh: "cone", blend_mode: Opaque, lit: true))],
+        ),
+        (
+            name: "Pulse",
+            max_particles: 6,
+            emitter_update: [(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(6) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(100.0), "Color": Color((0.5, 1.0, 0.5, 1.0)) }),
+                (module: "Grid Location", inputs: { "Grid Size": Vec3((0.0, 2.0, 0.0)), "X Count": Int(1), "Y Count": Int(6), "Z Count": Int(1), "Offset": Vec3((1.6, 1.3, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Set Particle Scale", inputs: { "Scale": Dynamic("Make Vec3 from Floats", {
+                    "X": Dynamic("Sine over Time", { "Time": Link(Float, "Particles.Age"), "Amplitude": Float(0.06), "Frequency": Float(0.8), "Offset": Float(0.14) }),
+                    "Y": Float(0.12),
+                    "Z": Dynamic("Sine over Time", { "Time": Link(Float, "Particles.Age"), "Amplitude": Float(0.06), "Frequency": Float(0.8), "Offset": Float(0.14) }),
+                }) }),
+            ],
+            renderers: [Mesh((mesh: "cube", blend_mode: Opaque, lit: true))],
+        ),
+    ],
+)

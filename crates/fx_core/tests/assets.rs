@@ -50,6 +50,8 @@ fn samples_validate_cleanly_and_cook() {
 
         // And it simulates: particles appear within a second.
         let mut sim = Simulation::new(sys, 1);
+        // A moving owner, for effects that spawn by distance (Spawn Per Unit).
+        sim.owner_velocity = bevy_math::Vec3::new(1.0, 0.0, 0.0);
         for _ in 0..60 {
             sim.step(1.0 / 60.0);
         }

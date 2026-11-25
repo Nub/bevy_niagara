@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 9;
+pub const COOKED_FORMAT_VERSION: u32 = 10;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -35,6 +35,29 @@ pub struct CookedSystem {
     pub duration: Option<f32>,
     /// Distance / visibility culling, instance budget and spawn scaling.
     pub scalability: crate::scalability::CookedScalability,
+    /// Seconds simulated before the first visible step (0 = none).
+    pub warmup_time: f32,
+    /// Step length of the warm-up.
+    pub warmup_tick_delta: f32,
+}
+
+impl CookedSystem {
+    /// The union of the emitters' `fixed_bounds` (effect space), if every
+    /// emitter has them: hosts cull with it instead of `bounds_radius`.
+    pub fn fixed_bounds(&self) -> Option<[[f32; 3]; 2]> {
+        let mut out: Option<[[f32; 3]; 2]> = None;
+        for e in &self.emitters {
+            let [lo, hi] = e.fixed_bounds?;
+            out = Some(match out {
+                None => [lo, hi],
+                Some([a, b]) => [
+                    std::array::from_fn(|c| a[c].min(lo[c])),
+                    std::array::from_fn(|c| b[c].max(hi[c])),
+                ],
+            });
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -66,6 +89,13 @@ pub struct CookedEmitter {
     /// again; `None` if they may spawn at any age (Spawn Rate, or a burst
     /// whose Spawn Time is not a constant).
     pub spawn_end: Option<f32>,
+    /// Loops, from the Emitter State module.
+    pub lifecycle: crate::lifecycle::Lifecycle,
+    /// Random draws depend only on the instance seed (else also on a
+    /// per-instance random value).
+    pub deterministic: bool,
+    /// `(min, max)` corners in effect space, for culling.
+    pub fixed_bounds: Option<[[f32; 3]; 2]>,
 }
 
 /// An event handler with its source resolved.
@@ -114,6 +144,18 @@ impl CookedEmitter {
                         | ModuleKind::ScaleMeshSize
                         | ModuleKind::ScaleRibbonWidth
                         | ModuleKind::CameraOffset
+                        | ModuleKind::SetScale
+                        | ModuleKind::AddRotationalVelocity
+                        | ModuleKind::MeshRotationForce
+                        | ModuleKind::RotationalDrag
+                        | ModuleKind::OrientMeshToVector
+                        | ModuleKind::AlignSpriteToMeshOrientation
+                        | ModuleKind::SetSpriteFacing
+                        | ModuleKind::SetSpriteAlignment
+                        | ModuleKind::ScaleMeshSizeBySpeed
+                        | ModuleKind::DynamicMaterialParameters2
+                        | ModuleKind::RibbonTwistRate
+                        | ModuleKind::ScaleRibbonWidthBySpeed
                 )
             ) || m.all_inputs().any(|i| {
                 matches!(i, CookedInput::Link(r)
@@ -593,7 +635,8 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             Stage::ParticleUpdate,
         ]
         .map(|s| cx.stack(s, e.stage(s), d));
-        let spawn_end = spawn_end(&es, &eu);
+        let lifecycle = cook_lifecycle(e, &eu, d);
+        let spawn_end = spawn_end(&es, &eu, &lifecycle);
         if !d.has_errors() {
             lint_emitter(e, d);
         }
@@ -611,6 +654,9 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             stages: Vec::new(),
             custom_extended: false,
             spawn_end,
+            lifecycle,
+            deterministic: e.deterministic,
+            fixed_bounds: e.fixed_bounds,
         });
     }
     for (e, ce) in src.emitters.iter().zip(emitters.iter_mut()) {
@@ -638,6 +684,8 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
     Some(CookedSystem {
         duration,
         scalability: crate::scalability::cook(src.scalability.as_ref()),
+        warmup_time: src.warmup_time.unwrap_or(0.0),
+        warmup_tick_delta: src.warmup_tick_delta.unwrap_or(DEFAULT_WARMUP_TICK_DELTA),
         format_version: COOKED_FORMAT_VERSION,
         name: src.name.clone(),
         user_params,
@@ -647,16 +695,120 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
     })
 }
 
+/// The emitter's life cycle from its Emitter State module (constants only).
+fn cook_lifecycle(e: &EmitterSource, eu: &[CookedModule], d: &mut Diags) -> crate::lifecycle::Lifecycle {
+    use crate::lifecycle::*;
+    let calls: Vec<&ModuleCall> = e
+        .emitter_update
+        .iter()
+        .filter(|c| c.enabled && c.module == "Emitter State")
+        .collect();
+    let Some(call) = calls.first() else {
+        return Lifecycle::default();
+    };
+    if let Some(second) = calls.get(1) {
+        d.error(
+            second.span,
+            "an emitter has one \"Emitter State\" module",
+            Some("remove the second `(module: \"Emitter State\")`".into()),
+        );
+    }
+    let Some(m) = eu
+        .iter()
+        .find(|m| modules::from_id(m.module) == Some(ModuleKind::EmitterState))
+    else {
+        return Lifecycle::default();
+    };
+    let def = modules::by_kind(ModuleKind::EmitterState);
+    let mut v = [Value::Float(0.0); 6];
+    for (slot, input) in m.inputs.iter().enumerate().take(6) {
+        match input {
+            CookedInput::Const(c) => v[slot] = *c,
+            _ => d.error(
+                call.span,
+                format!(
+                    "input \"{}\" of \"Emitter State\" must be a constant: the loops are fixed when the effect is written",
+                    def.inputs[slot].name
+                ),
+                Some(format!("write e.g. `\"{}\": {}`", def.inputs[slot].name, def.inputs[slot].ty.example())),
+            ),
+        }
+    }
+    let behavior = v[0].as_i32();
+    let count = v[1].as_i32();
+    let fixed = v[2].as_i32() == 0;
+    let duration = v[3].as_f32();
+    let delay = v[4].as_f32();
+    if behavior == LOOP_MULTIPLE && count < 1 {
+        d.error(call.span, "\"Loop Count\" must be at least 1", Some("write e.g. `\"Loop Count\": Int(3)`".into()));
+    }
+    if fixed && !(duration > 0.0 && duration.is_finite()) {
+        d.error(
+            call.span,
+            "\"Loop Duration\" must be more than 0",
+            Some("write e.g. `\"Loop Duration\": Float(2.0)`, or `\"Loop Duration Mode\": Infinite`".into()),
+        );
+    }
+    if !(delay >= 0.0 && delay.is_finite()) {
+        d.error(call.span, "\"Loop Delay\" must be 0 or more", Some("write e.g. `\"Loop Delay\": Float(0.5)`".into()));
+    }
+    Lifecycle {
+        loops: match behavior {
+            LOOP_ONCE => 1,
+            LOOP_MULTIPLE => count.max(1) as u32,
+            _ => 0,
+        },
+        duration: if fixed { duration.max(0.0) } else { f32::INFINITY },
+        delay: delay.max(0.0),
+        delay_first_only: v[5].as_bool(),
+        explicit: true,
+    }
+}
+
 /// The emitter age after which the emitter stacks never request spawns (see
 /// [`CookedEmitter::spawn_end`]). A burst fires in the step where the age
 /// reaches its Spawn Time, so the latest constant Spawn Time; Spawn Rate (or a
 /// Spawn Time that is not a constant) may spawn at any age. Only spawn modules
 /// count: no spawn modules gives 0.
-fn spawn_end(emitter_spawn: &[CookedModule], emitter_update: &[CookedModule]) -> Option<f32> {
+/// Default `warmup_tick_delta` (Niagara's): 1/15 s.
+pub const DEFAULT_WARMUP_TICK_DELTA: f32 = 1.0 / 15.0;
+
+fn spawn_end(
+    emitter_spawn: &[CookedModule],
+    emitter_update: &[CookedModule],
+    lc: &crate::lifecycle::Lifecycle,
+) -> Option<f32> {
+    let spawns = emitter_spawn.iter().chain(emitter_update).any(|m| {
+        matches!(
+            modules::from_id(m.module),
+            Some(
+                ModuleKind::SpawnRate
+                    | ModuleKind::SpawnPerUnit
+                    | ModuleKind::SpawnPerFrame
+                    | ModuleKind::SpawnBurstInstantaneous
+                    | ModuleKind::SpawnBurstInterval
+            )
+        )
+    });
+    if !spawns {
+        return Some(0.0);
+    }
+    if let Some(end) = lc.end() {
+        return Some(end);
+    }
+    if lc.duration.is_finite() {
+        // Endless loops.
+        return None;
+    }
     let mut end = 0.0f32;
     for m in emitter_spawn.iter().chain(emitter_update) {
         match modules::from_id(m.module) {
-            Some(ModuleKind::SpawnRate) => return None,
+            Some(
+                ModuleKind::SpawnRate
+                | ModuleKind::SpawnPerUnit
+                | ModuleKind::SpawnPerFrame
+                | ModuleKind::SpawnBurstInterval,
+            ) => return None,
             Some(ModuleKind::SpawnBurstInstantaneous) => match m.inputs.get(1) {
                 Some(CookedInput::Const(Value::Float(t))) => end = end.max(*t),
                 _ => return None,
@@ -664,7 +816,7 @@ fn spawn_end(emitter_spawn: &[CookedModule], emitter_update: &[CookedModule]) ->
             _ => {}
         }
     }
-    Some(end)
+    Some(end + lc.delay)
 }
 
 fn enabled_kinds(calls: &[ModuleCall]) -> impl Iterator<Item = ModuleKind> + '_ {
@@ -768,7 +920,11 @@ fn lint_emitter(e: &EmitterSource, d: &mut Diags) {
     let spawns = event_spawns || enabled_kinds(&e.emitter_update).any(|k| {
         matches!(
             k,
-            ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous
+            ModuleKind::SpawnRate
+                | ModuleKind::SpawnBurstInstantaneous
+                | ModuleKind::SpawnPerUnit
+                | ModuleKind::SpawnPerFrame
+                | ModuleKind::SpawnBurstInterval
         )
     });
     if !spawns {

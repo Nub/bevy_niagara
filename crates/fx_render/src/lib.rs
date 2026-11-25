@@ -308,7 +308,7 @@ impl Plugin for FxPlugin {
             .insert_resource(done.clone())
             .add_systems(
                 PostUpdate,
-                (game::finish_effects, game::update_effects)
+                (game::measure_owner_velocity, game::finish_effects, game::update_effects)
                     .chain()
                     .after(TransformSystems::Propagate)
                     .after(advance_clock),
@@ -491,6 +491,8 @@ struct ExtractedEffect {
     system: Arc<CookedSystem>,
     seed: u32,
     world_from_local: Mat4,
+    /// Engine.Owner.Velocity in effect space (m/s).
+    owner_velocity: Vec3,
     assets: Arc<Vec<RendererAssets>>,
     /// Bound data interfaces' data and poses this frame.
     data: Vec<(String, data::DiValue)>,
@@ -623,6 +625,10 @@ fn extract_effects(
             system: effect.system.clone(),
             seed: effect.seed,
             world_from_local: transform.to_matrix(),
+            owner_velocity: transform
+                .affine()
+                .inverse()
+                .transform_vector3(control.owner_velocity()),
             assets,
             data,
             data_pending,
@@ -1161,6 +1167,7 @@ fn prepare_effects(
         }
         inst.seen = frame;
         inst.world_from_local = ex.world_from_local;
+        inst.gpu.owner_velocity = ex.owner_velocity.to_array();
         inst.paused = ex.paused;
         inst.gpu.active = ex.spawning;
         inst.gpu.spawn_scale = ex.spawn_scale;
@@ -1670,6 +1677,10 @@ fn simulate(
         inst.gpu.submitted();
         if inst.paused {
             continue;
+        }
+        // The system's warm-up (Warmup Time) runs once, in its own submissions.
+        if inst.gpu.needs_warm_up() {
+            inst.gpu.warm_up(device.wgpu_device(), &queue);
         }
         let steps = extracted.steps.min(fx_gpu::MAX_STEPS_PER_SUBMIT);
         for _ in 0..steps {

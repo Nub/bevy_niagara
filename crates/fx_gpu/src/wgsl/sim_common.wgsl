@@ -24,6 +24,9 @@ struct Frame {
     capacity: u32,
     owner_velocity: vec3<f32>,  // Engine.Owner.Velocity; padded to 16 bytes
     user: array<vec4<f32>, 16>,
+    looped_age: f32,            // Emitter.LoopedAge
+    loop_count: u32,            // Emitter.LoopCount
+    normalized_loop_age: f32,   // Emitter.NormalizedLoopAge
 }
 
 @group(0) @binding(0) var<uniform> fr: Frame;
@@ -81,9 +84,11 @@ fn rand(slot: u32) -> f32 {
 }
 
 // ---- particles: structure of arrays, word w of particle i at w * capacity + i ----
-// Words 0..27 are the base attributes every emitter stores. Words 28..49 (Scale,
+// Words 0..27 are the base attributes every emitter stores. Words 28..66 (Scale,
 // MeshOrientation, the Ribbon attributes, LightRadius, DynamicMaterialParameter,
-// SubImageIndex, Initial.Scale, Initial.RibbonWidth, CameraOffset)
+// SubImageIndex, Initial.Scale, Initial.RibbonWidth, CameraOffset, SpriteFacing,
+// SpriteAlignment, DynamicMaterialParameter1, RotationalVelocity,
+// Physics.RotationalForce, Physics.RotationalDrag)
 // exist only when the generated `EXT` is true; otherwise they stay at their
 // defaults in registers and the buffers end at word 27.
 
@@ -113,6 +118,12 @@ struct Particle {
     initial_scale: vec3<f32>,
     initial_ribbon_width: f32,
     camera_offset: f32,
+    sprite_facing: vec3<f32>,
+    sprite_alignment: vec3<f32>,
+    dynamic_material_parameter_1: vec4<f32>,
+    rotational_velocity: vec3<f32>,
+    rotational_force: vec3<f32>,
+    rotational_drag: f32,
     id: u32,
     alive: bool,
 }
@@ -144,6 +155,12 @@ fn new_particle(id: u32) -> Particle {
     p.initial_scale = vec3<f32>(1.0);
     p.initial_ribbon_width = 0.1;
     p.camera_offset = 0.0;
+    p.sprite_facing = vec3<f32>(0.0);
+    p.sprite_alignment = vec3<f32>(0.0);
+    p.dynamic_material_parameter_1 = vec4<f32>(0.0);
+    p.rotational_velocity = vec3<f32>(0.0);
+    p.rotational_force = vec3<f32>(0.0);
+    p.rotational_drag = 0.0;
     p.id = id;
     p.alive = true;
     return p;
@@ -187,6 +204,12 @@ fn load_particle(i: u32) -> Particle {
         p.initial_scale = vec3<f32>(ld(45u, i), ld(46u, i), ld(47u, i));
         p.initial_ribbon_width = ld(48u, i);
         p.camera_offset = ld(49u, i);
+        p.sprite_facing = vec3<f32>(ld(50u, i), ld(51u, i), ld(52u, i));
+        p.sprite_alignment = vec3<f32>(ld(53u, i), ld(54u, i), ld(55u, i));
+        p.dynamic_material_parameter_1 = vec4<f32>(ld(56u, i), ld(57u, i), ld(58u, i), ld(59u, i));
+        p.rotational_velocity = vec3<f32>(ld(60u, i), ld(61u, i), ld(62u, i));
+        p.rotational_force = vec3<f32>(ld(63u, i), ld(64u, i), ld(65u, i));
+        p.rotational_drag = ld(66u, i);
     }
     return p;
 }
@@ -225,6 +248,13 @@ fn store_particle(i: u32, p: Particle) {
         st(45u, i, p.initial_scale.x); st(46u, i, p.initial_scale.y); st(47u, i, p.initial_scale.z);
         st(48u, i, p.initial_ribbon_width);
         st(49u, i, p.camera_offset);
+        st(50u, i, p.sprite_facing.x); st(51u, i, p.sprite_facing.y); st(52u, i, p.sprite_facing.z);
+        st(53u, i, p.sprite_alignment.x); st(54u, i, p.sprite_alignment.y); st(55u, i, p.sprite_alignment.z);
+        st(56u, i, p.dynamic_material_parameter_1.x); st(57u, i, p.dynamic_material_parameter_1.y);
+        st(58u, i, p.dynamic_material_parameter_1.z); st(59u, i, p.dynamic_material_parameter_1.w);
+        st(60u, i, p.rotational_velocity.x); st(61u, i, p.rotational_velocity.y); st(62u, i, p.rotational_velocity.z);
+        st(63u, i, p.rotational_force.x); st(64u, i, p.rotational_force.y); st(65u, i, p.rotational_force.z);
+        st(66u, i, p.rotational_drag);
     }
 }
 

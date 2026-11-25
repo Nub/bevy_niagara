@@ -21,13 +21,14 @@ use fx_render::{
 #[test]
 fn game_api() {
     let mut app = app();
-    let scenarios: [(&str, fn(&mut App)); 6] = [
+    let scenarios: [(&str, fn(&mut App)); 7] = [
         ("one-shot despawns, looping stays", one_shot_despawns_when_done_and_looping_stays),
         ("attached effect follows its parent", attached_effect_follows_its_parent),
         ("user parameters are typed", user_parameters_are_typed),
         ("pool reuse without new GPU instances", pool_reuses_instances_without_new_gpu_allocations),
         ("scalability culls by distance and budget", scalability_culls_by_distance_and_budget),
         ("deactivate, reset and fire", deactivate_reset_and_fire),
+        ("owner velocity drives Spawn Per Unit", owner_velocity_drives_spawn_per_unit),
     ];
     for (name, run) in scenarios {
         eprintln!("scenario: {name}");
@@ -396,4 +397,70 @@ fn deactivate_reset_and_fire(app: &mut App) {
     frames(app, 1);
     assert_eq!(render_effect(app, e, |g, _| g.frame).unwrap(), 1, "reset restarts at frame 0");
     assert!(next_id(app) < before);
+}
+
+/// Engine.Owner.Velocity follows the entity: zero on the first frame, the
+/// move per simulated second after, zero across a teleport, in effect space,
+/// and for an effect attached to a moving parent. Spawn Per Unit spawns by it.
+fn owner_velocity_drives_spawn_per_unit(app: &mut App) {
+    let sys = cook(
+        r#"(
+    name: "Trail",
+    emitters: [(
+        name: "T",
+        max_particles: 1000,
+        emitter_update: [(module: "Spawn Per Unit", inputs: { "Spawn Per Unit": Float(20.0) })],
+        particle_spawn: [(module: "Initialize Particle", inputs: { "Lifetime": Float(5.0) })],
+        particle_update: [(module: "Particle State")],
+        renderers: [Sprite(())],
+    )],
+)"#,
+    );
+    // Rotated 90° about Y: world +X is effect-space +Z.
+    let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    let e = spawn(
+        app,
+        (ParticleEffect::shared(sys.clone(), 5), Transform::from_rotation(rot)),
+    );
+    frames(app, 1);
+    let c = app.world().get::<EffectControl>(e).unwrap();
+    assert_eq!(c.owner_velocity(), Vec3::ZERO, "first frame");
+    // 0.05 m per 1/60 s step = 3 m/s; 20 per metre = 1 particle per step.
+    let step = 0.05f32;
+    for k in 1..=30 {
+        app.world_mut().get_mut::<Transform>(e).unwrap().translation.x = step * k as f32;
+        frames(app, 1);
+    }
+    let v = app.world().get::<EffectControl>(e).unwrap().owner_velocity();
+    assert!((v - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-3, "world velocity {v}");
+    let local = render_effect(app, e, |g, _| Vec3::from_array(g.owner_velocity)).unwrap();
+    assert!((local - Vec3::new(0.0, 0.0, 3.0)).length() < 1e-3, "effect-space velocity {local}");
+    frames(app, 3); // read-back lag
+    let (alive, next) = counts(app, e)[0];
+    eprintln!("spawn per unit: {alive} alive, next id {next}");
+    assert!((28..=34).contains(&next), "one particle per step of movement, got {next}");
+    // A teleport (100 m in a frame) measures nothing and spawns nothing.
+    app.world_mut().get_mut::<Transform>(e).unwrap().translation.x += 100.0;
+    frames(app, 1);
+    assert_eq!(app.world().get::<EffectControl>(e).unwrap().owner_velocity(), Vec3::ZERO, "teleport");
+    frames(app, 3);
+    assert_eq!(counts(app, e)[0].1, next, "teleport spawned particles");
+
+    // Attached to a moving parent: the child's world motion counts.
+    let parent = spawn(app, Transform::default());
+    let child = {
+        let mut commands = app.world_mut().commands();
+        let id = commands
+            .attach_effect(parent, ParticleEffect::shared(sys, 6), EffectMode::Looping, Transform::from_xyz(0.0, 1.0, 0.0))
+            .id();
+        app.world_mut().flush();
+        id
+    };
+    frames(app, 1);
+    for k in 1..=5 {
+        app.world_mut().get_mut::<Transform>(parent).unwrap().translation.z = -0.1 * k as f32;
+        frames(app, 1);
+    }
+    let v = app.world().get::<EffectControl>(child).unwrap().owner_velocity();
+    assert!((v - Vec3::new(0.0, 0.0, -6.0)).length() < 1e-3, "attached velocity {v}");
 }

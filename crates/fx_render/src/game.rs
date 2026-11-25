@@ -80,6 +80,11 @@ pub struct EffectControl {
     spawn_scale: f32,
     culled: Option<CullReason>,
     offscreen: f32,
+    /// World position when the owner velocity was last measured (`None`:
+    /// first frame, or after a teleport or reset).
+    last_position: Option<Vec3>,
+    /// `Engine.Owner.Velocity` in world space (m/s).
+    owner_velocity: Vec3,
 }
 
 impl Default for EffectControl {
@@ -96,6 +101,8 @@ impl Default for EffectControl {
             spawn_scale: 1.0,
             culled: None,
             offscreen: 0.0,
+            last_position: None,
+            owner_velocity: Vec3::ZERO,
         }
     }
 }
@@ -129,6 +136,22 @@ impl EffectControl {
         self.finished = false;
         self.active = true;
         self.spawning = true;
+        self.last_position = None;
+        self.owner_velocity = Vec3::ZERO;
+    }
+    /// The effect jumped (moved without travelling): the next frame measures
+    /// no owner velocity, so Spawn Per Unit does not fill the gap and new
+    /// particles inherit nothing from the jump.
+    pub fn teleported(&mut self) {
+        self.last_position = None;
+        self.owner_velocity = Vec3::ZERO;
+    }
+    /// `Engine.Owner.Velocity`: how fast the effect's entity moves in the
+    /// world (m/s), measured from its `GlobalTransform` each frame. Zero on
+    /// its first frame and after a teleport ([`Self::teleported`], or a jump
+    /// faster than [`TELEPORT_SPEED`]).
+    pub fn owner_velocity(&self) -> Vec3 {
+        self.owner_velocity
     }
     /// Plays the effect again from the start (a one-shot's replay): [`Self::reset`].
     pub fn fire(&mut self) {
@@ -371,6 +394,32 @@ pub fn find_joint(
 /// Main world, after transform propagation: scalability, then the lifecycle
 /// (one-shot duration, age).
 #[allow(clippy::type_complexity)]
+/// Moves faster than this (m/s) between two frames count as teleports:
+/// Engine.Owner.Velocity is zero for that frame.
+pub const TELEPORT_SPEED: f32 = 500.0;
+
+/// Measures each effect's `Engine.Owner.Velocity` from its world position:
+/// the move since the last measurement over the simulated time it covers.
+/// Frames without simulation steps keep the last value and measure across.
+pub(crate) fn measure_owner_velocity(
+    clock: Res<FxClock>,
+    mut effects: Query<(&mut EffectControl, &GlobalTransform), With<ParticleEffect>>,
+) {
+    let dt = clock.steps_this_frame() as f32 * clock.step;
+    if !(dt > 0.0) {
+        return;
+    }
+    for (mut c, gt) in &mut effects {
+        let pos = gt.translation();
+        let v = match c.last_position {
+            Some(last) => (pos - last) / dt,
+            None => Vec3::ZERO,
+        };
+        c.owner_velocity = if v.is_finite() && v.length() <= TELEPORT_SPEED { v } else { Vec3::ZERO };
+        c.last_position = Some(pos);
+    }
+}
+
 pub(crate) fn update_effects(
     mut effects: Query<(Entity, &ParticleEffect, &mut EffectControl, &GlobalTransform)>,
     cameras: Query<(&Camera, &GlobalTransform, &Frustum)>,
@@ -389,7 +438,15 @@ pub(crate) fn update_effects(
         let s = &effect.system.scalability;
         let r = s.resolve(quality.0);
         let pos = gt.translation();
-        let radius = s.bounds_radius * gt.scale().abs().max_element();
+        // Visibility sphere: around the emitters' fixed bounds when they all have them.
+        let (center, radius) = match effect.system.fixed_bounds() {
+            Some([lo, hi]) => {
+                let (lo, hi) = (Vec3::from_array(lo), Vec3::from_array(hi));
+                let r = ((hi - lo) * 0.5).length() * gt.scale().abs().max_element();
+                (gt.transform_point((lo + hi) * 0.5), r)
+            }
+            None => (pos, s.bounds_radius * gt.scale().abs().max_element()),
+        };
         let mut distance = f32::INFINITY;
         let mut visible = false;
         let mut any_camera = false;
@@ -401,7 +458,7 @@ pub(crate) fn update_effects(
             distance = distance.min(cgt.translation().distance(pos));
             visible |= frustum.intersects_sphere(
                 &Sphere {
-                    center: pos.into(),
+                    center: center.into(),
                     radius,
                 },
                 true,

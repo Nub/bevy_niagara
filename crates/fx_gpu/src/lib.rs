@@ -47,8 +47,16 @@ pub const WORDS_PER_PARTICLE: u32 = 28;
 /// then Scale, MeshOrientation, RibbonID, RibbonWidth, RibbonTwist,
 /// RibbonLinkOrder, LightRadius, DynamicMaterialParameter (words 28..43),
 /// SubImageIndex (44), Initial.Scale (45..47), Initial.RibbonWidth (48) and
-/// CameraOffset (49).
-pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 50;
+/// CameraOffset (49), SpriteFacing (50..52), SpriteAlignment (53..55),
+/// DynamicMaterialParameter1 (56..59), RotationalVelocity (60..62),
+/// Physics.RotationalForce (63..65) and Physics.RotationalDrag (66).
+pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 67;
+/// Word of `Particles.SpriteFacing` (3 words) in the extended layout.
+pub const WORD_SPRITE_FACING: u32 = 50;
+/// Word of `Particles.SpriteAlignment` (3 words) in the extended layout.
+pub const WORD_SPRITE_ALIGNMENT: u32 = 53;
+/// Word of `Particles.DynamicMaterialParameter1` (4 words) in the extended layout.
+pub const WORD_DYNAMIC_MATERIAL_PARAMETER_1: u32 = 56;
 /// Word of `Particles.CameraOffset` in the extended layout.
 pub const WORD_CAMERA_OFFSET: u32 = 49;
 /// Word of `Particles.SubImageIndex` in the extended layout.
@@ -62,7 +70,9 @@ pub const WORKGROUP: u32 = 256;
 /// Event handlers an emitter may have on the GPU.
 pub const MAX_EVENT_HANDLERS: usize = 16;
 
-const FRAME_BYTES: usize = 48 + MAX_USER_PARAMS * 16;
+/// First word of the frame uniform's loop values (after the user parameters).
+const FRAME_LOOP_WORD: usize = 12 + MAX_USER_PARAMS * 4;
+const FRAME_BYTES: usize = 48 + MAX_USER_PARAMS * 16 + 16;
 const FRAME_SLOT: u64 = 512;
 /// Words of the emitter state buffer.
 pub const STATE_WORDS: u64 = 32;
@@ -163,6 +173,10 @@ pub struct GpuEffect {
     /// Set by [`GpuEffect::reset`]: the next step clears the GPU counts first.
     clear_pending: bool,
     pub seed: u32,
+    /// Random value mixed into the seed of emitters with `deterministic: false`.
+    pub nonce: u32,
+    /// The warm-up ran (or there is none); see [`GpuEffect::warm_up`].
+    pub warmed: bool,
     /// Steps taken so far.
     pub frame: u32,
     /// Simulated seconds (`Engine.Time`).
@@ -751,6 +765,8 @@ impl GpuEffect {
             spawn_scale: 1.0,
             clear_pending: false,
             seed,
+            nonce: fx_core::lifecycle::random_nonce(),
+            warmed: false,
             frame: 0,
             time: 0.0,
             user: system.user_params.iter().map(|p| p.value).collect(),
@@ -767,6 +783,38 @@ impl GpuEffect {
         }
     }
 
+    /// Whether [`GpuEffect::warm_up`] still has steps to run.
+    pub fn needs_warm_up(&self) -> bool {
+        !self.warmed && self.frame == 0 && fx_core::lifecycle::warmup_steps(&self.system) > 0
+    }
+
+    /// Runs the system's warm-up (`warmup_time` in steps of
+    /// `warmup_tick_delta`, as the CPU simulation does before its first
+    /// step), submitting its own command buffers. Call it before the first
+    /// [`GpuEffect::step`] (and after a [`GpuEffect::reset`]), with no steps
+    /// recorded since the last [`GpuEffect::submitted`]. Does nothing if it ran.
+    pub fn warm_up(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if !self.needs_warm_up() {
+            self.warmed = true;
+            return;
+        }
+        self.warmed = true;
+        let delta = self.system.warmup_tick_delta;
+        let mut left = fx_core::lifecycle::warmup_steps(&self.system);
+        while left > 0 {
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fx warm-up"),
+            });
+            let n = left.min(self.steps_left_in_submit());
+            for _ in 0..n {
+                self.step(queue, &mut enc, delta);
+            }
+            queue.submit([enc.finish()]);
+            self.submitted();
+            left -= n;
+        }
+    }
+
     /// Restarts the effect as if just created with `seed` (pooling: reuse an
     /// instance instead of building a new one). No allocation: the next
     /// [`GpuEffect::step`] clears the GPU counts, events and grids with
@@ -774,6 +822,8 @@ impl GpuEffect {
     /// defaults; data interface bindings are kept.
     pub fn reset(&mut self, seed: u32) {
         self.seed = seed;
+        self.nonce = fx_core::lifecycle::random_nonce();
+        self.warmed = false;
         self.frame = 0;
         self.time = 0.0;
         self.active = true;
@@ -996,12 +1046,15 @@ impl GpuEffect {
         for ei in 0..self.emitters.len() {
             let ce = &self.system.emitters[ei];
             let em = &mut self.emitters[ei];
+            let seed = fx_core::lifecycle::emitter_seed(self.seed, self.nonce, ce.deterministic);
+            let values = fx_core::sim::EmitterValues::at(&ce.lifecycle, em.age);
             let env = emitter_cpu::Env {
                 user: &self.user,
                 dt,
                 time: self.time,
-                emitter_age: em.age,
+                emitter: values,
                 owner_velocity: self.owner_velocity,
+                lifecycle: &ce.lifecycle,
             };
             let mut request = 0u32;
             if self.frame == 0 {
@@ -1010,7 +1063,7 @@ impl GpuEffect {
                     emitter_cpu::STAGE_EMITTER_SPAWN,
                     &env,
                     &mut em.spawn_remainder,
-                    self.seed,
+                    seed,
                     ei as u32,
                     self.frame,
                 ));
@@ -1020,7 +1073,7 @@ impl GpuEffect {
                 emitter_cpu::STAGE_EMITTER_UPDATE,
                 &env,
                 &mut em.spawn_remainder,
-                self.seed,
+                seed,
                 ei as u32,
                 self.frame,
             ));
@@ -1041,7 +1094,7 @@ impl GpuEffect {
             put(2, em.age.to_bits());
             put(3, self.frame);
             put(4, request);
-            put(5, self.seed);
+            put(5, seed);
             put(6, ei as u32);
             put(7, em.capacity);
             for (c, v) in self.owner_velocity.iter().enumerate() {
@@ -1058,6 +1111,11 @@ impl GpuEffect {
                     put(12 + i * 4 + c, x.to_bits());
                 }
             }
+            // Emitter State: Emitter.LoopedAge, LoopCount, NormalizedLoopAge.
+            put(FRAME_LOOP_WORD, values.looped_age.to_bits());
+            put(FRAME_LOOP_WORD + 1, values.loop_count);
+            put(FRAME_LOOP_WORD + 2, values.normalized_loop_age.to_bits());
+            put(FRAME_LOOP_WORD + 3, 0);
             queue.write_buffer(&em.frame_ubo, offset, &self.scratch);
 
             let p = &em.pipelines;
@@ -1203,6 +1261,12 @@ impl GpuEffect {
                     p.initial_scale = [w(45, i), w(46, i), w(47, i)].into();
                     p.initial_ribbon_width = w(48, i);
                     p.camera_offset = w(49, i);
+                    p.sprite_facing = [w(50, i), w(51, i), w(52, i)].into();
+                    p.sprite_alignment = [w(53, i), w(54, i), w(55, i)].into();
+                    p.dynamic_material_parameter_1 = [w(56, i), w(57, i), w(58, i), w(59, i)].into();
+                    p.rotational_velocity = [w(60, i), w(61, i), w(62, i)].into();
+                    p.rotational_force = [w(63, i), w(64, i), w(65, i)].into();
+                    p.rotational_drag = w(66, i);
                 }
                 ps.push(p);
             }

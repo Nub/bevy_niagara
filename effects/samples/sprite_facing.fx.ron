@@ -1,0 +1,67 @@
+// Per-particle sprite facing and the second material parameter (batch 2).
+// Left: cards that tumble: Add Rotational Velocity spins MeshOrientation and
+// Align Sprite to Mesh Orientation turns each sprite with it (renderer:
+// facing_mode CustomFacingVector, alignment CustomAlignment). Middle: Set
+// Sprite Facing / Set Sprite Alignment give each card its own fixed
+// direction. Right: Dynamic Material Parameters 2 drives a custom material
+// (materials/glow_param1.wesl: brightness and hue), and Scale Sprite Size by
+// Distance grows sprites as they rise away from the emitter.
+(
+    name: "Sprite Facing",
+    emitters: [
+        (
+            name: "Tumbling Cards",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(20.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(3.0),
+                    "Position": RandomRange(Vec3((-2.0, 0.8, -0.3)), Vec3((-1.0, 2.0, 0.3))),
+                    "Color": Color((1.0, 0.8, 0.4, 1.0)),
+                    "Sprite Size": Vec2((0.3, 0.2)),
+                }),
+                (module: "Initial Mesh Orientation", inputs: { "Rotation": RandomRange(Vec3((-180.0, -180.0, -180.0)), Vec3((180.0, 180.0, 180.0))) }),
+                (module: "Add Rotational Velocity", inputs: { "Rotational Velocity": RandomRange(Vec3((-180.0, -180.0, -180.0)), Vec3((180.0, 180.0, 180.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Align Sprite to Mesh Orientation"),
+            ],
+            renderers: [Sprite((facing_mode: CustomFacingVector, alignment: CustomAlignment, lit: true))],
+        ),
+        (
+            name: "Fixed Cards",
+            max_particles: 40,
+            emitter_update: [(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(16) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(100.0), "Color": Color((0.5, 0.9, 1.0, 1.0)), "Sprite Size": Vec2((0.3, 0.3)) }),
+                (module: "Grid Location", inputs: { "Grid Size": Vec3((1.0, 1.0, 0.0)), "X Count": Int(4), "Y Count": Int(4), "Z Count": Int(1), "Offset": Vec3((0.0, 1.3, 0.0)) }),
+                (module: "Set Sprite Facing", inputs: { "Sprite Facing": RandomRange(Vec3((-1.0, -0.3, 0.3)), Vec3((1.0, 0.3, 1.0))) }),
+                (module: "Set Sprite Alignment", inputs: { "Sprite Alignment": Vec3((0.3, 1.0, 0.0)) }),
+            ],
+            particle_update: [(module: "Particle State")],
+            renderers: [Sprite((facing_mode: CustomFacingVector, alignment: CustomAlignment, lit: true))],
+        ),
+        (
+            name: "Glow",
+            max_particles: 400,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(50.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(2.0),
+                    "Position": RandomRange(Vec3((1.3, 0.3, -0.2)), Vec3((1.9, 0.4, 0.2))),
+                    "Sprite Size": Vec2((0.12, 0.12)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 1.0, 0.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Dynamic Material Parameters 2", inputs: { "Dynamic Material Parameter 1": CurveOverAge(Vec4([(0.0, (0.5, 0.0, 0.0, 0.0)), (0.5, (2.0, 0.5, 0.0, 0.0)), (1.0, (0.2, 1.0, 0.0, 0.0))])) }),
+                (module: "Scale Sprite Size by Distance", inputs: { "Reference Position": Vec3((1.6, 0.3, 0.0)), "Near Distance": Float(0.0), "Far Distance": Float(2.0), "Far Scale Factor": Vec2((3.0, 3.0)) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, material: "materials/glow_param1.wesl"))],
+        ),
+    ],
+)

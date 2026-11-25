@@ -68,6 +68,12 @@ fn fields(p: &Particle) -> Vec<(&'static str, f32)> {
     put("initial_scale", &p.initial_scale.to_array());
     put("initial_ribbon_width", &[p.initial_ribbon_width]);
     put("camera_offset", &[p.camera_offset]);
+    put("sprite_facing", &p.sprite_facing.to_array());
+    put("sprite_alignment", &p.sprite_alignment.to_array());
+    put("dynamic_material_parameter_1", &p.dynamic_material_parameter_1.to_array());
+    put("rotational_velocity", &p.rotational_velocity.to_array());
+    put("rotational_force", &p.rotational_force.to_array());
+    put("rotational_drag", &[p.rotational_drag]);
     v
 }
 
@@ -266,6 +272,53 @@ const DYNAMIC_TYPES: &str = r#"(
     )],
 )"#;
 
+/// What the samples leave out: Set Particle Position, burst probability, a
+/// non-deterministic emitter (CPU and GPU given the same nonce), Emitter State
+/// with a delay only before the first loop, loop values read by modules.
+const BATCH2: &str = r#"(
+    name: "Batch 2",
+    warmup_time: 0.5,
+    emitters: [(
+        name: "E",
+        max_particles: 2000,
+        deterministic: false,
+        emitter_update: [
+            (module: "Emitter State", inputs: { "Loop Duration": Float(0.7), "Loop Delay": Float(0.2), "Delay First Loop Only": Bool(true) }),
+            (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(40), "Spawn Time": Float(0.1), "Spawn Probability": Float(0.6) }),
+            (module: "Spawn Burst Interval", inputs: { "Spawn Count": Int(5), "Spawn Interval": Float(0.05), "Spawn Probability": Float(0.5) }),
+            (module: "Spawn Rate", inputs: { "Spawn Rate": Dynamic("Multiply Float", { "A": Float(200.0), "B": Link(Float, "Emitter.NormalizedLoopAge") }) }),
+        ],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.4), Float(1.2)) }),
+            (module: "Set Particle Position", inputs: { "Position": RandomRange(Vec3((-1.0, 0.0, -1.0)), Vec3((1.0, 2.0, 1.0))) }),
+            (module: "Set Particle Velocity", inputs: { "Velocity": RandomRange(Vec3((-2.0, -2.0, -2.0)), Vec3((2.0, 2.0, 2.0))) }),
+            (module: "Initialize Mesh", inputs: { "Mesh Scale": Vec3((0.5, 0.5, 0.5)) }),
+            (module: "Set Particle Sprite Size", inputs: { "Sprite Size": Vec2((0.2, 0.3)), "Set Initial": Bool(true) }),
+            (module: "Set Particle Scale", inputs: { "Scale": RandomRange(Vec3((0.5, 0.5, 0.5)), Vec3((1.0, 2.0, 1.0))), "Set Initial": Bool(true) }),
+            (module: "Add Velocity from Point", inputs: { "Velocity Strength": Float(1.5), "Velocity Scale": Vec3((1.0, 0.5, 1.0)) }),
+            (module: "Initialize Ribbon", inputs: { "Ribbon Width": Float(0.2) }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Mesh Rotation Force", inputs: { "Rotation Force": Vec3((30.0, 90.0, -45.0)) }),
+            (module: "Rotational Drag", inputs: { "Rotational Drag": Float(0.5) }),
+            (module: "Noise Force", inputs: { "Noise Strength": Float(2.0), "Noise Octaves": Int(4), "Pan Noise Field": Vec3((0.3, 0.0, 0.1)) }),
+            (module: "Solve Forces and Velocity"),
+            (module: "Limit Velocity", inputs: { "Velocity Limit": Float(2.5) }),
+            (module: "Orient Mesh to Vector", inputs: { "Orientation Vector": Link(Vec3, "Particles.Velocity") }),
+            (module: "Align Sprite to Mesh Orientation"),
+            (module: "Scale Color by Distance", inputs: { "Reference Position": Vec3((0.0, 1.0, 0.0)), "Far Distance": Float(2.0) }),
+            (module: "Scale Sprite Size by Distance", inputs: { "Near Distance": Float(0.5), "Far Distance": Float(1.5) }),
+            (module: "Scale Mesh Size by Speed", inputs: { "Velocity Threshold": Float(2.0) }),
+            (module: "Scale Ribbon Width by Speed", inputs: { "Velocity Threshold": Float(2.0) }),
+            (module: "Ribbon Twist Rate", inputs: { "Twist Rate": Link(Float, "Emitter.LoopedAge") }),
+            (module: "Dynamic Material Parameters 2", inputs: { "Dynamic Material Parameter 1": Dynamic("Make Vec4 from Floats", { "X": Link(Float, "Emitter.LoopedAge"), "Y": Dynamic("Multiply Float", { "A": Float(1.0), "B": Link(Float, "Emitter.Age") }) }) }),
+            (module: "Jitter Position", inputs: { "Jitter Amount": Vec3((0.01, 0.02, 0.01)), "Jitter Delay": Float(0.1) }),
+            (module: "Kill Particles by Speed", inputs: { "Minimum Speed": Float(0.05) }),
+        ],
+    )],
+)"#;
+
 #[test]
 fn gpu_matches_cpu_reference() {
     let (device, queue, info) = match fx_gpu::headless_device() {
@@ -285,6 +338,20 @@ fn gpu_matches_cpu_reference() {
     for n in ["forces.fx.ron", "shapes.fx.ron", "rotation.fx.ron", "subuv.fx.ron", "dynamic_inputs.fx.ron"] {
         systems.push((n, sample(n), 0));
     }
+    // Batch 2: emitter options, spawn modules and the further particle modules.
+    for n in [
+        "loops.fx.ron",
+        "motion.fx.ron",
+        "trail.fx.ron",
+        "mesh_spin.fx.ron",
+        "sprite_facing.fx.ron",
+        "ribbon_motion.fx.ron",
+    ] {
+        systems.push((n, sample(n), 0));
+    }
+    let c = fx_core::check_source("batch2.fx.ron", BATCH2);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    systems.push(("batch 2 extras", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), WORDS_PER_PARTICLE_EXTENDED));
     // Nested dynamic inputs of every type.
     let c = fx_core::check_source("dynamic_types.fx.ron", DYNAMIC_TYPES);
     let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
@@ -299,6 +366,10 @@ fn gpu_matches_cpu_reference() {
         // A moving owner, for Inherit Velocity.
         cpu.owner_velocity = bevy_math::Vec3::new(0.5, 0.25, -1.0);
         gpu.owner_velocity = cpu.owner_velocity.to_array();
+        // Same per-instance value for `deterministic: false` emitters.
+        gpu.nonce = cpu.nonce;
+        // The CPU warms up inside its first step; the GPU before it.
+        gpu.warm_up(&device, &queue);
         assert!(
             words == 0 || gpu.emitters.iter().all(|e| e.words == words),
             "{name}: words per particle"
