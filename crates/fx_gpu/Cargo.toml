@@ -1,0 +1,13 @@
+[package]
+name = "fx_gpu"
+description = "GPU compute simulation of cooked effects: WGSL codegen, pooled SoA buffers, indirect dispatch, culling and sorting"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx_core = { path = "../fx_core" }
+bevy_math.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+

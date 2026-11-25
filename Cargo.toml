@@ -14,3 +14,11 @@ bevy_math = { path = "/home/zach/helm-projects/bevy-solari-opt/crates/bevy_math"
 rkyv = "0.8"
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+# Same wgpu as the fork's bevy_render, so fx_gpu's types are Bevy's.
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "fragile-send-sync-non-atomic-wasm"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+
+# Mirror the fork's patch: its Solari partitioned TLAS needs the vendored
+# wgpu-hal, and a [patch] only applies from the root workspace.
+[patch.crates-io]
+wgpu-hal = { path = "/home/zach/helm-projects/bevy-solari-opt/vendor/wgpu-hal" }
