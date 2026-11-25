@@ -1214,6 +1214,26 @@ pub fn emitter_shader(
         g.module(m, STAGE_PARTICLE_UPDATE, i, "fr.frame + 1u");
     }
     g.out.push_str("}\n");
+    // Interpolated spawning (fx_core::sim::spawn_step_dt): the k-th of the n
+    // regular spawns runs Particle Update over (n - k) / n of the step; the
+    // events it writes are dropped, as on the CPU.
+    g.out.push_str("\nfn spawn_update(k: u32, p: ptr<function, Particle>) {\n");
+    if emitter.interpolated_spawning {
+        g.out.push_str(
+            "    let n = atomicLoad(&state[S_REGULAR_N]);
+    if (k >= n || !(*p).alive) {
+        return;
+    }
+    let full = fr.dt;
+    fr.dt = full * (f32(n - k) / f32(n));
+    ev_reset();
+    update_particle(p);
+    ev_reset();
+    fr.dt = full;
+",
+        );
+    }
+    g.out.push_str("}\n");
     for (h, handler) in emitter.event_handlers.iter().enumerate() {
         writeln!(g.out, "\nfn handler_{h}(p: ptr<function, Particle>) {{").unwrap();
         for (i, m) in handler.modules.iter().enumerate() {

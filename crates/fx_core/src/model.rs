@@ -140,6 +140,12 @@ pub struct EmitterSource {
     /// into its seed, so copies of the effect differ.
     #[serde(skip_serializing_if = "is_true")]
     pub deterministic: bool,
+    /// Niagara's Interpolated Spawning: particles spawned in a step also run
+    /// the Particle Update stack in that step, over the part of the step after
+    /// their spawn time (spread evenly over the step), so none is drawn with
+    /// its spawn values only and a stream does not clump per frame.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interpolated_spawning: bool,
     /// Niagara's Fixed Bounds: `(min, max)` in effect space, used for
     /// visibility culling instead of the system's `bounds_radius`.
     #[serde(

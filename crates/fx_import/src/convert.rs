@@ -440,6 +440,7 @@ struct FxEmitter {
     gpu: bool,
     max_particles: u32,
     deterministic: bool,
+    interpolated_spawning: bool,
     fixed_bounds: Option<([f32; 3], [f32; 3])>,
     stacks: Vec<(String, Vec<FxModule>)>,
     events: Vec<(String, Vec<FxModule>)>,
@@ -531,6 +532,7 @@ impl<'a> Cx<'a> {
             gpu: e.gpu,
             max_particles: 0,
             deterministic: e.deterministic,
+            interpolated_spawning: e.interpolated_spawning,
             fixed_bounds: e.fixed_bounds.map(|(a, b)| {
                 let a = swap(a).map(|v| v * CM);
                 let b = swap(b).map(|v| v * CM);
@@ -1448,6 +1450,9 @@ impl<'a> Cx<'a> {
             let _ = writeln!(o, "            max_particles: {},", e.max_particles);
             if !e.deterministic {
                 let _ = writeln!(o, "            deterministic: false,");
+            }
+            if e.interpolated_spawning {
+                let _ = writeln!(o, "            interpolated_spawning: true,");
             }
             if let Some((a, b)) = e.fixed_bounds {
                 let _ = writeln!(

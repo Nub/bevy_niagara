@@ -8,7 +8,7 @@ cargo run -p fx_core --bin fxc -- cook  effects/samples/fountain.fx.ron   # writ
 cargo run -p fx_core --bin fxc -- modules                                  # modules, stages, inputs
 ```
 
-Shape: `( name, duration, warmup_time, warmup_tick_delta, scalability: ( ... ), user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, deterministic, fixed_bounds, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
+Shape: `( name, duration, warmup_time, warmup_tick_delta, scalability: ( ... ), user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, deterministic, interpolated_spawning, fixed_bounds, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
 Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: { "Input Name": <input> })`.
 
 **Renderers** (Niagara's emitter renderers) say how particles are drawn. `renderers` is a list of `Sprite(( ... ))`, `Ribbon(( ... ))`, `Mesh(( ... ))` and `Light(( ... ))`; an emitter without it draws nothing. Every field is optional and defaults to Niagara's value. `Sprite`:
@@ -172,6 +172,7 @@ warmup_tick_delta: 0.0333,     // system: step length of the warm-up (default 1/
 emitters: [(
     name: "E",
     deterministic: false,      // default true: random draws depend only on the instance seed; false mixes in a per-instance random value
+    interpolated_spawning: true,  // default false: particles spawned in a step also run particle_update in it, over the part of the step after their (evenly spread) spawn times, so none is drawn with spawn-only values
     fixed_bounds: ((-1.0, 0.0, -1.0), (1.0, 2.0, 1.0)),  // (min, max) metres, effect space; when every emitter has them, culling uses them instead of bounds_radius
     emitter_update: [
         (module: "Emitter State", inputs: { "Loop Behavior": Multiple, "Loop Count": Int(3), "Loop Duration": Float(1.0), "Loop Delay": Float(0.25) }),
@@ -181,7 +182,7 @@ emitters: [(
 )],
 ```
 
-`Emitter State` (constant inputs only): Loop Behavior `Once` / `Multiple` (Loop Count loops) / `Infinite`; Loop Duration Mode `Fixed` / `Infinite`; Loop Delay before each loop (or only the first, with Delay First Loop Only). Spawn modules spawn only while a loop is active; burst Spawn Times count from the loop's start, so bursts repeat each loop. Modules can read `Emitter.LoopedAge`, `Emitter.LoopCount` and `Emitter.NormalizedLoopAge`. With an Emitter State that ends, the derived `duration` is the end of its last loop. Without one the emitter has one endless loop (the old behaviour). The warm-up runs once before the first step (CPU: inside `Simulation::step`; GPU: `GpuEffect::warm_up`, which fx_render calls).
+`Emitter State` (constant inputs only): Loop Behavior `Once` / `Multiple` (Loop Count loops) / `Infinite`; Loop Duration Mode `Fixed` / `Infinite`; Loop Delay before each loop (or only the first, with Delay First Loop Only). Spawn modules spawn only while a loop is active; burst Spawn Times count from the loop's start, so bursts repeat each loop. Modules can read `Emitter.LoopedAge`, `Emitter.LoopCount` and `Emitter.NormalizedLoopAge`. With an Emitter State that ends, the derived `duration` is the end of its last loop. Without one the emitter has one endless loop (the old behaviour). With `interpolated_spawning` (Niagara's Interpolated Spawning, which `fximport convert` carries over) the k-th of n particles the emitter stack spawns in a step runs the Particle Update stack over (n - k) / n of the step (its events of that step are dropped; particles spawned by event handlers are not interpolated); without it a new particle first updates in the next step, so for one frame it shows its spawn colour and size before update curves apply. The warm-up runs once before the first step (CPU: inside `Simulation::step`; GPU: `GpuEffect::warm_up`, which fx_render calls).
 
 **Engine.Owner.Velocity** is measured by fx_render from the effect entity's `GlobalTransform` each frame (the move over the simulated time, in effect space): zero on the first frame, after `EffectControl::teleported()` and for jumps faster than `TELEPORT_SPEED` (500 m/s). Spawn Per Unit and Inherit Velocity read it. `fxpreview --orbit RADIUS,SECONDS` moves the effect on a circle to preview them (`samples/trail.fx.ron`).
 

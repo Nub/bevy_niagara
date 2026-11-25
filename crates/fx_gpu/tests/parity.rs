@@ -336,6 +336,58 @@ const BATCH2: &str = r#"(
 /// random input past slot 16), Scale RGBA, wind turbulence, the attracted
 /// position offset, and Dynamic Material Parameters 3 and 4 (which store 8
 /// more words per particle). A second emitter keeps the base layout.
+// Interpolated spawning: spawned particles run Particle Update in their spawn
+// step over part of it (random draws in update, curves, forces, deaths on the
+// spawn step), next to an emitter without it.
+const INTERPOLATED: &str = r#"(
+    name: "Interpolated spawning",
+    emitters: [
+        (
+            name: "Stream",
+            max_particles: 2000,
+            interpolated_spawning: true,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(137.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.5), Float(1.5)), "Sprite Size": Vec2((0.2, 0.2)) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-1.0, 2.0, -1.0)), Vec3((1.0, 4.0, 1.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": RandomRange(Float(0.0), Float(2.0)) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (1.0, 0.0)])) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.0, 0.0)), (1.0, (2.0, 2.0))])) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+        ),
+        (
+            name: "Burst",
+            max_particles: 500,
+            interpolated_spawning: true,
+            emitter_update: [(module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(200) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.001), Float(1.0)) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-2.0, -2.0, -2.0)), Vec3((2.0, 2.0, 2.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale RGB": CurveOverAge(Vec3([(0.0, (4.0, 2.0, 1.0)), (1.0, (0.0, 0.0, 0.0))])) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+        ),
+        (
+            name: "Plain",
+            max_particles: 500,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(90.0) })],
+            particle_spawn: [(module: "Initialize Particle", inputs: { "Lifetime": Float(1.0) })],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (1.0, 1.0)])) }),
+            ],
+        ),
+    ],
+)"#;
+
 const GAPS: &str = r#"(
     name: "Import gaps",
     emitters: [(
@@ -440,6 +492,9 @@ fn gpu_matches_cpu_reference() {
     let c = fx_core::check_source("gaps.fx.ron", GAPS);
     let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
     systems.push(("import gaps", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), 0));
+    let c = fx_core::check_source("interpolated.fx.ron", INTERPOLATED);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    systems.push(("interpolated spawning", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), 0));
     let c = fx_core::check_source("batch2.fx.ron", BATCH2);
     let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
     systems.push(("batch 2 extras", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), WORDS_PER_PARTICLE_EXTENDED));

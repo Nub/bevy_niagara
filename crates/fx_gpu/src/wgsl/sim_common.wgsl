@@ -373,6 +373,7 @@ fn spawn(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) w
     var p = new_particle(atomicLoad(&state[S_BASE_ID]) + k);
     spawn_particle(&p);
     spawn_event(k, &p);
+    spawn_update(k, &p);
     if (p.alive) {
         store_particle(atomicAdd(&state[S_NEW], 1u), p);
     }

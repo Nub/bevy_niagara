@@ -427,6 +427,7 @@ mod gaps {
                 gpu: true,
                 local_space: true,
                 deterministic: true,
+                interpolated_spawning: false,
                 fixed_bounds: None,
                 stacks: vec![
                     NStack { usage: Usage::EmitterUpdate, modules: vec![module("/Niagara/Modules/Emitter/SpawnRate", vec![("SpawnRate", val(NValue::Float(10.0)))], &[])] },

@@ -28,6 +28,7 @@ pub const EMITTER_FIELDS: &[&str] = &[
     "sim_target",
     "max_particles",
     "deterministic",
+    "interpolated_spawning",
     "fixed_bounds",
     "emitter_spawn",
     "emitter_update",
@@ -144,6 +145,10 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
         .take("deterministic")
         .map(|v| boolean(v, "deterministic", d).unwrap_or(true))
         .unwrap_or(true);
+    let interpolated_spawning = f
+        .take("interpolated_spawning")
+        .map(|v| boolean(v, "interpolated_spawning", d).unwrap_or(false))
+        .unwrap_or(false);
     let fixed_bounds = f.take("fixed_bounds").and_then(|v| fixed_bounds(v, d));
     let mut stack =
         |name: &str, d: &mut Diags| f.take(name).map(|v| decode_stack(v, d)).unwrap_or_default();
@@ -185,6 +190,7 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
         sim_target,
         max_particles,
         deterministic,
+        interpolated_spawning,
         fixed_bounds,
         emitter_spawn,
         emitter_update,

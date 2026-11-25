@@ -225,6 +225,8 @@ pub struct NEmitter {
     pub gpu: bool,
     pub local_space: bool,
     pub deterministic: bool,
+    /// Interpolated Spawning (spawned particles run Particle Update in their spawn tick).
+    pub interpolated_spawning: bool,
     /// Min/max in centimetres, when the bounds are fixed.
     pub fixed_bounds: Option<([f32; 3], [f32; 3])>,
     pub stacks: Vec<NStack>,
@@ -475,6 +477,7 @@ impl<'a> Interp<'a> {
             gpu: find(vd, "SimTarget").and_then(Value::as_str).is_some_and(|s| s.contains("GPU")),
             local_space: matches!(find(vd, "bLocalSpace"), Some(Value::Bool(true))),
             deterministic: matches!(find(vd, "bDeterminism"), Some(Value::Bool(true))),
+            interpolated_spawning: matches!(find(vd, "bInterpolatedSpawning"), Some(Value::Bool(true))),
             fixed_bounds: None,
             stacks: Vec::new(),
             renderers: Vec::new(),

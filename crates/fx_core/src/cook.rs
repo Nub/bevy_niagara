@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 11;
+pub const COOKED_FORMAT_VERSION: u32 = 12;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -97,6 +97,9 @@ pub struct CookedEmitter {
     /// Random draws depend only on the instance seed (else also on a
     /// per-instance random value).
     pub deterministic: bool,
+    /// Spawned particles run Particle Update in their spawn step (see
+    /// [`crate::model::EmitterSource::interpolated_spawning`]).
+    pub interpolated_spawning: bool,
     /// `(min, max)` corners in effect space, for culling.
     pub fixed_bounds: Option<[[f32; 3]; 2]>,
 }
@@ -832,6 +835,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             spawn_end,
             lifecycle,
             deterministic: e.deterministic,
+            interpolated_spawning: e.interpolated_spawning,
             fixed_bounds: e.fixed_bounds,
         });
     }

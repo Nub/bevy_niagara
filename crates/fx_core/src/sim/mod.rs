@@ -395,6 +395,7 @@ impl EmitterValues {
 }
 
 /// Read-only state inputs are evaluated against.
+#[derive(Clone, Copy)]
 struct Env<'a> {
     user: &'a [Value],
     dt: f32,
@@ -691,7 +692,10 @@ impl Simulation {
         let n = spawn_count.min(room);
         room -= n;
         let mut spawned = n;
-        let spawn_one = |state: &mut EmitterState, h: Option<(usize, &Event)>| {
+        // Interpolated spawning: the k-th of the n regular spawns was born
+        // (n - k) / n of the way back through the step and runs Particle
+        // Update over that part of it (events it writes are dropped).
+        let spawn_one = |state: &mut EmitterState, h: Option<(usize, &Event)>, k: u32| {
             let mut p = Particle::new(state.next_id);
             state.next_id = state.next_id.wrapping_add(1);
             let mut cx = ParticleCx::default();
@@ -709,12 +713,23 @@ impl Simulation {
                     run_particle_module(m, &env, &mut p, k, &mut cx);
                 }
             }
+            if emitter.interpolated_spawning && h.is_none() && p.alive {
+                let env = Env {
+                    dt: spawn_step_dt(dt, k, n),
+                    ..env
+                };
+                let mut cx = ParticleCx::default();
+                for (mi, m) in emitter.particle_update.iter().enumerate() {
+                    let ku = key(STAGE_PARTICLE_UPDATE, mi, p.unique_id, frame + 1);
+                    run_particle_module(m, &env, &mut p, ku, &mut cx);
+                }
+            }
             if p.alive {
                 state.particles.push(p);
             }
         };
-        for _ in 0..n {
-            spawn_one(state, None);
+        for k in 0..n {
+            spawn_one(state, None, k);
         }
         for (hi, h) in emitter.event_handlers.iter().enumerate() {
             if h.every_particle || h.spawn_number == 0 {
@@ -727,7 +742,7 @@ impl Simulation {
             room -= count;
             spawned += count;
             for k in 0..count {
-                spawn_one(state, Some((hi, &src[(k / h.spawn_number) as usize])));
+                spawn_one(state, Some((hi, &src[(k / h.spawn_number) as usize])), k);
             }
         }
         let state = &mut self.emitters[ei];
@@ -1944,4 +1959,12 @@ pub fn param_type(r: ParamRef, sys: &CookedSystem) -> ValueType {
         Namespace::User => sys.user_params[r.index as usize].value.ty(),
         ns => crate::params::builtins(ns)[r.index as usize].ty,
     }
+}
+
+/// The part of a step of length `dt` that the `k`-th of `n` particles spawned
+/// in it lives through, with interpolated spawning: the first is born at the
+/// start of the step, the last `dt / n` before its end. fx_gpu computes the
+/// same expression.
+pub fn spawn_step_dt(dt: f32, k: u32, n: u32) -> f32 {
+    dt * ((n - k) as f32 / n as f32)
 }
