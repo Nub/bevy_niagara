@@ -394,3 +394,349 @@ fn custom_hlsl_translates_where_feasible() {
     custom.outputs[0].2 = Some("Particles._Force".into());
     assert!(fx_import::hlsl::translate("X", &[custom], &inputs, &sys).unwrap_err().contains("Particles._Force"));
 }
+
+// ---- inputs carried over from the Niagara reports (built in memory) ----
+
+mod gaps {
+    use fx_import::convert::{convert, Status};
+    use fx_import::niagara::{ModuleKind, NEmitter, NInput, NModule, NStack, NSystem, NValue, Usage};
+
+    fn val(v: NValue) -> NInput {
+        NInput::Value(v)
+    }
+
+    fn module(script: &str, inputs: Vec<(&str, NInput)>, switches: &[(&str, &str)]) -> NModule {
+        let short = script.rsplit('/').next().unwrap();
+        NModule {
+            name: short.to_string(),
+            script: format!("{script}.{short}"),
+            kind: ModuleKind::Function,
+            enabled: true,
+            inputs: inputs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            switches: switches.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        }
+    }
+
+    fn system(spawn: Vec<NModule>, update: Vec<NModule>, system_stacks: Vec<NStack>, user: Vec<(&str, NValue)>) -> NSystem {
+        NSystem {
+            name: "NS_Gaps".into(),
+            user_parameters: user.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            emitters: vec![NEmitter {
+                name: "E".into(),
+                enabled: true,
+                gpu: true,
+                local_space: true,
+                deterministic: true,
+                fixed_bounds: None,
+                stacks: vec![
+                    NStack { usage: Usage::EmitterUpdate, modules: vec![module("/Niagara/Modules/Emitter/SpawnRate", vec![("SpawnRate", val(NValue::Float(10.0)))], &[])] },
+                    NStack { usage: Usage::ParticleSpawn, modules: spawn },
+                    NStack { usage: Usage::ParticleUpdate, modules: update },
+                ],
+                renderers: vec![],
+                notes: vec![],
+            }],
+            stacks: system_stacks,
+            warmup_time: 0.0,
+            notes: vec![],
+        }
+    }
+
+    /// Converts; the effect must validate. Returns the RON and the report's markdown.
+    fn run(sys: &NSystem) -> (String, String, fx_import::convert::Report) {
+        let c = convert(sys, "NS_Gaps.uasset");
+        assert!(c.report.validation.is_empty(), "{:?}\n{}", c.report.validation, c.ron);
+        let md = c.report.markdown();
+        (c.ron, md, c.report)
+    }
+
+    fn has(ron: &str, want: &str) {
+        assert!(ron.contains(want), "missing {want}\n{ron}");
+    }
+
+    const INIT: &str = "/Niagara/Modules/Spawn/Initialization/V2/InitializeParticle";
+
+    #[test]
+    fn scale_rgba_mode() {
+        let rgba = module(
+            "/Niagara/Modules/Update/Color/ScaleColor",
+            vec![("Scale RGBA", val(NValue::Vec4([0.5, 0.25, 1.0, 0.5]))), ("Scale RGB", val(NValue::Vec3([1.0; 3])))],
+            &[("Scale Mode", "NewEnumerator1")],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[])], vec![rgba], vec![], vec![]));
+        has(&ron, "\"Scale RGBA\": Vec4((0.5, 0.25, 1.0, 0.5))");
+        assert!(!ron.contains("\"Scale RGB\":"), "{ron}");
+        assert!(!md.contains("Scale RGBA"), "{md}");
+        // Mode 0: RGB and alpha; the RGBA constant is stale.
+        let sep = module(
+            "/Niagara/Modules/Update/Color/ScaleColor",
+            vec![("Scale RGBA", val(NValue::Vec4([1.0; 4]))), ("Scale RGB", val(NValue::Vec3([0.5; 3])))],
+            &[("Scale Mode", "NewEnumerator0")],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[])], vec![sep], vec![], vec![]));
+        has(&ron, "\"Scale RGB\": Vec3((0.5, 0.5, 0.5))");
+        assert!(!ron.contains("Scale RGBA") && !md.contains("Scale RGBA"), "{ron}\n{md}");
+    }
+
+    #[test]
+    fn add_velocity_cone_and_origin_offset() {
+        let cone = module(
+            "/Niagara/Modules/Spawn/Velocity/AddVelocity",
+            vec![
+                ("Cone Angle", val(NValue::Float(60.0))),
+                ("Cone Axis", val(NValue::Vec3([0.0, 0.0, 1.0]))),
+                ("Inner Cone Angle", val(NValue::Float(20.0))),
+                ("Distribution Along Cone Axis", val(NValue::Float(0.6))),
+                ("Speed Falloff From Cone Axis", val(NValue::Float(0.3))),
+                ("Origin Offset", val(NValue::Vec3([0.0; 3]))),
+                ("Velocity Speed", val(NValue::Float(100.0))),
+                ("UseConeFalloff", val(NValue::Bool(true))),
+                ("UseVelDistribution", val(NValue::Bool(true))),
+            ],
+            &[("Velocity Mode", "NewEnumerator2")],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[]), cone], vec![], vec![], vec![]));
+        for want in [
+            "\"Cone Angle\": Float(30.0)",
+            "\"Inner Cone Angle\": Float(10.0)",
+            "\"Distribution Along Cone Axis\": Float(0.6)",
+            "\"Speed Falloff\": Float(0.3)",
+        ] {
+            has(&ron, want);
+        }
+        assert!(!md.contains("cone falloffs") && !md.contains("Origin Offset"), "{md}");
+        // Point mode: Origin Offset moves the origin (cm, Z up -> m, Y up).
+        let point = module(
+            "/Niagara/Modules/Spawn/Velocity/AddVelocity",
+            vec![
+                ("Velocity Speed", val(NValue::Float(100.0))),
+                ("Velocity Origin", val(NValue::Position([100.0, 0.0, 0.0]))),
+                ("Origin Offset", val(NValue::Vec3([0.0, 0.0, -15.0]))),
+            ],
+            &[("Velocity Mode", "NewEnumerator1")],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[]), point], vec![], vec![], vec![]));
+        has(&ron, "\"Velocity Origin\": Vec3((1.0, -0.15, 0.0))");
+        assert!(!md.contains("Origin Offset"), "{md}");
+    }
+
+    #[test]
+    fn initialize_particle_hsv() {
+        let init = module(
+            INIT,
+            vec![
+                ("Color", val(NValue::Color([1.0, 0.5, 0.25, 1.0]))),
+                ("Hue Shift Range", val(NValue::Vec2([-0.1, 0.1]))),
+                ("Saturation Range", val(NValue::Vec2([0.8, 1.0]))),
+                ("Value Range", val(NValue::Vec2([0.5, 1.0]))),
+                ("Alpha Scale Range", val(NValue::Vec2([0.25, 0.75]))),
+            ],
+            &[
+                ("Color Mode", "NewEnumerator3"),
+                ("AdjustHue", "true"),
+                ("AdjustSaturation", "false"),
+                ("AdjustValue", "true"),
+                ("AdjustAlpha", "true"),
+            ],
+        );
+        let (ron, md, _) = run(&system(vec![init], vec![], vec![], vec![]));
+        has(&ron, "\"Hue Shift\": RandomRange(Float(-36.0), Float(36.0))");
+        has(&ron, "\"Value Scale\": RandomRange(Float(0.5), Float(1.0))");
+        has(&ron, "\"Alpha Scale\": RandomRange(Float(0.25), Float(0.75))");
+        assert!(!ron.contains("Saturation Scale"), "{ron}");
+        assert!(!md.contains("hue / saturation"), "{md}");
+    }
+
+    #[test]
+    fn shape_location_distributions() {
+        let shape = |prim: &str, inputs: Vec<(&str, NInput)>, extra: &[(&str, &str)]| {
+            let mut sw = vec![("Shape Primitive", prim)];
+            sw.extend_from_slice(extra);
+            module("/Niagara/Modules/Spawn/Location/V2/ShapeLocation", inputs, &sw)
+        };
+        let cone = shape(
+            "NewEnumerator5",
+            vec![
+                ("Cone Angle", val(NValue::Float(130.0))),
+                ("Cone Inner Angle", val(NValue::Float(10.0))),
+                ("Cone Length", val(NValue::Float(10.0))),
+                ("Cone Radial Angle", val(NValue::Float(180.0))),
+                ("Cone Surface Distribution", val(NValue::Float(0.25))),
+                ("Surface Distribution", val(NValue::Float(0.0))),
+                ("U Distribution", val(NValue::Float(0.0))),
+                ("V Distribution", val(NValue::Float(0.0))),
+                ("Knot Helix Loops", val(NValue::Int(2))),
+            ],
+            &[],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[]), cone], vec![], vec![], vec![]));
+        for want in [
+            "\"Cone Angle\": Float(65.0)",
+            "\"Cone Inner Angle\": Float(5.0)",
+            "\"Cone Radial Angle\": Float(180.0)",
+            "\"Cone Surface Distribution\": Float(0.25)",
+        ] {
+            has(&ron, want);
+        }
+        assert!(!md.contains("not carried over"), "{md}");
+        // Box Midpoint, also random.
+        let bx = shape(
+            "NewEnumerator2",
+            vec![
+                ("Box Size", val(NValue::Vec3([100.0, 200.0, 300.0]))),
+                (
+                    "Box Midpoint",
+                    NInput::Dynamic(Box::new(module(
+                        "/Niagara/DynamicInputs/UniformRange/V2/RandomRangeVector",
+                        vec![("Minimum", val(NValue::Vec3([0.0; 3]))), ("Maximum", val(NValue::Vec3([1.0; 3])))],
+                        &[],
+                    ))),
+                ),
+            ],
+            &[],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[]), bx], vec![], vec![], vec![]));
+        has(&ron, "\"Box Midpoint\": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((1.0, 1.0, 1.0)))");
+        assert!(!md.contains("Box Midpoint"), "{md}");
+        // A Direct cylinder distribution is not carried over: still listed.
+        let direct = shape("NewEnumerator3", vec![("Cylinder Height", val(NValue::Float(10.0))), ("U Distribution", val(NValue::Float(0.5)))], &[("Cylinder Distribution", "NewEnumerator1")]);
+        let (_, md, _) = run(&system(vec![module(INIT, vec![], &[]), direct], vec![], vec![], vec![]));
+        assert!(md.contains("U Distribution: not carried over"), "{md}");
+    }
+
+    #[test]
+    fn wind_force_turbulence() {
+        let wind = module(
+            "/Niagara/Modules/Update/Forces/WindForce",
+            vec![
+                ("Wind Speed", val(NValue::Vec3([600.0, 0.0, 0.0]))),
+                ("Scale", val(NValue::Float(0.5))),
+                ("Frequency", val(NValue::Float(2.0))),
+                ("Offset By Time", val(NValue::Vec3([0.0, 0.0, -100.0]))),
+                ("Position", NInput::Link("Particles.Position".into())),
+                ("Friction", val(NValue::Float(1.0))),
+                ("Alignment Falloff Start / End", val(NValue::Vec2([0.0, 100.0]))),
+                ("Turbulence Flow Loop Duration", val(NValue::Float(3.0))),
+                ("Landscape Sample", val(NValue::DataInterface("NiagaraDataInterfaceLandscape".into()))),
+            ],
+            &[("Turbulence Mode", "NewEnumerator1")],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[])], vec![wind], vec![], vec![]));
+        for want in [
+            "\"Turbulence Scale\": Float(0.5)",
+            "\"Turbulence Frequency\": Float(0.8)",
+            "\"Turbulence Offset By Time\": Vec3((0.0, -1.0, 0.0))",
+            "\"Turbulence Position\": Link(Vec3, \"Particles.Position\")",
+        ] {
+            has(&ron, want);
+        }
+        for gone in ["Frequency: not", "Friction: not", "Alignment Falloff", "Offset By Time: not", "Position: not"] {
+            assert!(!md.contains(gone), "{gone}\n{md}");
+        }
+        // The landscape stays listed.
+        assert!(md.contains("Landscape Sample: not carried over"), "{md}");
+    }
+
+    #[test]
+    fn dynamic_material_parameters_2_and_3() {
+        let dmp = module(
+            "/Niagara/Modules/Update/Material/DynamicMaterialParameters",
+            vec![
+                ("Index 0 Param 1", val(NValue::Float(1.0))),
+                ("Index 2 Param 1", val(NValue::Float(2.0))),
+                ("Index 2 Param 4", val(NValue::Float(3.0))),
+                ("Index 3 Param 2", val(NValue::Float(4.0))),
+                ("Index 1 Param 1", val(NValue::Float(9.0))),
+                ("Index2Param0Write", val(NValue::Bool(true))),
+                ("Index3Param3Write", val(NValue::Bool(true))),
+            ],
+            &[
+                ("Write Parameter Index 0", "true"),
+                ("Write Parameter Index 1", "false"),
+                ("Write Parameter Index 2", "true"),
+                ("Write Parameter Index 3", "true"),
+            ],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[])], vec![dmp], vec![], vec![]));
+        has(&ron, "(module: \"Dynamic Material Parameters\", inputs: { \"Dynamic Material Parameter\": Vec4((1.0, 0.0, 0.0, 0.0)) })");
+        has(&ron, "\"Dynamic Material Parameter 2\": Vec4((2.0, 0.0, 0.0, 3.0))");
+        has(&ron, "\"Dynamic Material Parameter 3\": Vec4((0.0, 4.0, 0.0, 0.0))");
+        assert!(!ron.contains("Dynamic Material Parameter 1"), "{ron}");
+        assert!(!md.contains("Write: not carried"), "{md}");
+        // The effect stores parameters 2 and 3.
+        let c = fx_core::check_source("t.fx.ron", &ron);
+        assert!(c.cooked.unwrap().emitters[0].uses_material_parameters_2_3());
+    }
+
+    #[test]
+    fn point_attraction_position_to_attract() {
+        let add = module(
+            "/Niagara/DynamicInputs/Vectors/Position/AddVectorToPosition",
+            vec![("Position", NInput::Link("Particles.Position".into())), ("Vector", val(NValue::Vec3([0.0, 0.0, 200.0])))],
+            &[],
+        );
+        let pa = module(
+            "/Niagara/Modules/Update/Forces/V2/PointAttractionForce",
+            vec![
+                ("Position To Attract", NInput::Dynamic(Box::new(add))),
+                ("Attraction Strength", val(NValue::Float(100.0))),
+                ("Debug Every N Particles", val(NValue::Int(8))),
+                ("Debug Force Line Length", val(NValue::Float(0.1))),
+            ],
+            &[],
+        );
+        let (ron, md, _) = run(&system(vec![module(INIT, vec![], &[])], vec![pa], vec![], vec![]));
+        has(&ron, "\"Attracted Position Offset\": Vec3((0.0, 2.0, 0.0))");
+        assert!(!md.contains("Position To Attract") && !md.contains("Debug"), "{md}");
+        // Particles.Position itself: no offset.
+        let plain = module(
+            "/Niagara/Modules/Update/Forces/V2/PointAttractionForce",
+            vec![("Position To Attract", NInput::Link("Particles.Position".into()))],
+            &[],
+        );
+        let (ron, _, _) = run(&system(vec![module(INIT, vec![], &[])], vec![plain], vec![], vec![]));
+        assert!(!ron.contains("Attracted Position Offset"), "{ron}");
+    }
+
+    #[test]
+    fn system_set_variables_become_constants() {
+        let set = NModule {
+            name: "SetVariables_1".into(),
+            script: "SetVariables".into(),
+            kind: ModuleKind::Assignment {
+                targets: vec![
+                    ("User.Rate".into(), String::new()),
+                    ("System.Lift".into(), String::new()),
+                    ("System.Size".into(), String::new()),
+                    ("System.Target".into(), String::new()),
+                ],
+            },
+            enabled: true,
+            inputs: vec![
+                ("User.Rate".into(), val(NValue::Float(40.0))),
+                ("System.Lift".into(), val(NValue::Vec3([0.0, 0.0, 300.0]))),
+                ("System.Size".into(), NInput::Link("User.Size".into())),
+                ("System.Target".into(), val(NValue::DataInterface("NiagaraDataInterfaceRenderTarget2D".into()))),
+            ],
+            switches: vec![],
+        };
+        let stacks = vec![NStack { usage: Usage::SystemSpawn, modules: vec![set] }];
+        let init = module(INIT, vec![("Lifetime", NInput::Link("User.Rate".into())), ("Mass", NInput::Link("System.Size".into()))], &[("Lifetime Mode", "NewEnumerator0")]);
+        let vel = module(
+            "/Niagara/Modules/Spawn/Velocity/AddVelocity",
+            vec![("Velocity", NInput::Link("System.Lift".into()))],
+            &[("Velocity Mode", "NewEnumerator0")],
+        );
+        let sys = system(vec![init, vel], vec![], stacks, vec![("User.Rate", NValue::Float(5.0)), ("User.Size", NValue::Float(2.0))]);
+        let (ron, md, r) = run(&sys);
+        // User.Rate's default is the value the system spawn sets.
+        has(&ron, "\"User.Rate\": Float(40.0)");
+        has(&ron, "\"Lifetime\": Link(Float, \"User.Rate\")");
+        // System.Lift is a constant; System.Size reads User.Size.
+        has(&ron, "\"Velocity\": Vec3((0.0, 3.0, 0.0))");
+        has(&ron, "\"Mass\": Link(Float, \"User.Size\")");
+        assert!(!md.contains("system stacks are not converted"), "{md}");
+        let m = r.modules.iter().find(|m| m.module == "SetVariables_1").unwrap();
+        assert!(matches!(&m.status, Status::Partial(w) if w.len() == 1 && w[0].contains("System.Target")), "{:?}", m.status);
+    }
+}

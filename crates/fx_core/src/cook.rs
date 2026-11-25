@@ -85,6 +85,9 @@ pub struct CookedEmitter {
     pub stages: Vec<crate::custom::CookedSimStage>,
     /// A custom module writes an extended attribute (see [`Self::uses_extended_attributes`]).
     pub custom_extended: bool,
+    /// A custom module writes DynamicMaterialParameter2 or 3 (see
+    /// [`Self::uses_material_parameters_2_3`]).
+    pub custom_extended_2: bool,
     /// Emitter age (s) after which its emitter stacks never request spawns
     /// again; `None` if they may spawn at any age (Spawn Rate, or a burst
     /// whose Spawn Time is not a constant).
@@ -156,6 +159,8 @@ impl CookedEmitter {
                         | ModuleKind::DynamicMaterialParameters2
                         | ModuleKind::RibbonTwistRate
                         | ModuleKind::ScaleRibbonWidthBySpeed
+                        | ModuleKind::DynamicMaterialParameters3
+                        | ModuleKind::DynamicMaterialParameters4
                 )
             ) || m.all_inputs().any(|i| {
                 matches!(i, CookedInput::Link(r)
@@ -163,6 +168,23 @@ impl CookedEmitter {
             })
         };
         renders || self.custom_extended || self.particle_modules().any(module)
+    }
+
+    /// Whether the emitter reads or writes Particles.DynamicMaterialParameter2
+    /// or 3 (attributes from [`attr::FIRST_EXTENDED_2`] on): such emitters
+    /// store 8 words per particle more than the other extended ones. Implies
+    /// [`Self::uses_extended_attributes`].
+    pub fn uses_material_parameters_2_3(&self) -> bool {
+        let module = |m: &CookedModule| {
+            matches!(
+                modules::from_id(m.module),
+                Some(ModuleKind::DynamicMaterialParameters3 | ModuleKind::DynamicMaterialParameters4)
+            ) || m.all_inputs().any(|i| {
+                matches!(i, CookedInput::Link(r)
+                    if r.ns == Namespace::Particles && r.index >= attr::FIRST_EXTENDED_2)
+            })
+        };
+        self.custom_extended_2 || self.particle_modules().any(module)
     }
 
     /// Every particle-stage module: spawn, update and the event handlers'.
@@ -806,6 +828,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             grids: Vec::new(),
             stages: Vec::new(),
             custom_extended: false,
+            custom_extended_2: false,
             spawn_end,
             lifecycle,
             deterministic: e.deterministic,

@@ -543,7 +543,7 @@ pub fn from_id(id: u16) -> Option<&'static DynamicDef> {
 
 /// The random-draw salt of the dynamic input at `index` in its module's
 /// list; its own draws use salt + component, input `i` gets salt + 8 + 8 * i.
-/// Module inputs use 0..128 (slot * 8) and modules' own draws 128..256.
+/// Module inputs use 0..128 and 256.. ([`crate::sim::input_salt`]), modules' own draws 128..256.
 pub fn node_salt(index: usize) -> u32 {
     4096 * (index as u32 + 1)
 }

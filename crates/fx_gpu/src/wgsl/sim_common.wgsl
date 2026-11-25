@@ -108,6 +108,8 @@ fn rand(slot: u32) -> f32 {
 // Physics.RotationalForce, Physics.RotationalDrag)
 // exist only when the generated `EXT` is true; otherwise they stay at their
 // defaults in registers and the buffers end at word 27.
+// Words 67..74 (DynamicMaterialParameter2 and 3) exist only when `EXT2` is
+// true (and then EXT is too); otherwise the buffers end at word 66 or 27.
 
 struct Particle {
     position: vec3<f32>,
@@ -141,6 +143,8 @@ struct Particle {
     rotational_velocity: vec3<f32>,
     rotational_force: vec3<f32>,
     rotational_drag: f32,
+    dynamic_material_parameter_2: vec4<f32>,
+    dynamic_material_parameter_3: vec4<f32>,
     id: u32,
     alive: bool,
 }
@@ -178,6 +182,8 @@ fn new_particle(id: u32) -> Particle {
     p.rotational_velocity = vec3<f32>(0.0);
     p.rotational_force = vec3<f32>(0.0);
     p.rotational_drag = 0.0;
+    p.dynamic_material_parameter_2 = vec4<f32>(0.0);
+    p.dynamic_material_parameter_3 = vec4<f32>(0.0);
     p.id = id;
     p.alive = true;
     return p;
@@ -228,6 +234,10 @@ fn load_particle(i: u32) -> Particle {
         p.rotational_force = vec3<f32>(ld(63u, i), ld(64u, i), ld(65u, i));
         p.rotational_drag = ld(66u, i);
     }
+    if (EXT2) {
+        p.dynamic_material_parameter_2 = vec4<f32>(ld(67u, i), ld(68u, i), ld(69u, i), ld(70u, i));
+        p.dynamic_material_parameter_3 = vec4<f32>(ld(71u, i), ld(72u, i), ld(73u, i), ld(74u, i));
+    }
     return p;
 }
 
@@ -272,6 +282,12 @@ fn store_particle(i: u32, p: Particle) {
         st(60u, i, p.rotational_velocity.x); st(61u, i, p.rotational_velocity.y); st(62u, i, p.rotational_velocity.z);
         st(63u, i, p.rotational_force.x); st(64u, i, p.rotational_force.y); st(65u, i, p.rotational_force.z);
         st(66u, i, p.rotational_drag);
+    }
+    if (EXT2) {
+        st(67u, i, p.dynamic_material_parameter_2.x); st(68u, i, p.dynamic_material_parameter_2.y);
+        st(69u, i, p.dynamic_material_parameter_2.z); st(70u, i, p.dynamic_material_parameter_2.w);
+        st(71u, i, p.dynamic_material_parameter_3.x); st(72u, i, p.dynamic_material_parameter_3.y);
+        st(73u, i, p.dynamic_material_parameter_3.z); st(74u, i, p.dynamic_material_parameter_3.w);
     }
 }
 

@@ -852,6 +852,9 @@ pub(crate) fn check_emitter(
     ce.custom_extended = particle
         .iter()
         .any(|&c| custom[c].outputs.iter().any(|&a| a >= params::attr::FIRST_EXTENDED));
+    ce.custom_extended_2 = particle
+        .iter()
+        .any(|&c| custom[c].outputs.iter().any(|&a| a >= params::attr::FIRST_EXTENDED_2));
     let mut seen: Vec<(usize, Option<usize>)> = Vec::new();
     let sites = particle.iter().map(|&c| (c, None)).chain(grid.iter().map(|&(c, g)| (c, Some(g))));
     for (c, g) in sites {

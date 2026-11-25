@@ -13,6 +13,7 @@
 //         let tex = sample_particle_texture(in);   // flipbook-aware
 //         let heat = in.dynamic_param.x;           // Particles.DynamicMaterialParameter
 //         let glow = in.dynamic_param_1.x;         // Particles.DynamicMaterialParameter1
+//         let mask = in.dynamic_param_2.x;         // Particles.DynamicMaterialParameter2 (and dynamic_param_3)
 //         return finish(in.color.rgb * tex.rgb * (1.0 + heat), in.color.a * tex.a);
 //     }
 
@@ -30,7 +31,7 @@ struct FxRenderer {
     alignment: u32,
     sub_uv_blending: u32,
     fade_distance: f32,
-    extended: u32,              // the emitter stores Scale, MeshOrientation, Ribbon*, LightRadius, DynamicMaterialParameter
+    extended: u32,              // 1: the emitter stores Scale, MeshOrientation, Ribbon*, LightRadius, DynamicMaterialParameter(1); 2: also DynamicMaterialParameter2 and 3
     uv_mode: u32,               // ribbon: 0 scaled uniformly, 1 by segment length, 2 tiled over length
     tessellation: u32,          // ribbon: subdivisions per segment
     tiling_length: f32,         // ribbon: metres per U for uv_mode 2
@@ -91,6 +92,9 @@ struct FxVertexOutput {
     @location(9) sub_image_index: f32,
     // Particles.DynamicMaterialParameter1 (Dynamic Material Parameters 2; 0 when never set).
     @location(10) dynamic_param_1: vec4<f32>,
+    // Particles.DynamicMaterialParameter2 and 3 (Dynamic Material Parameters 3 and 4; 0 when never set).
+    @location(11) dynamic_param_2: vec4<f32>,
+    @location(12) dynamic_param_3: vec4<f32>,
 }
 
 // Particle attributes for vertex shaders.
@@ -110,6 +114,20 @@ fn particle_dynamic_param_1(i: u32) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     return vec4<f32>(pw(56u, i), pw(57u, i), pw(58u, i), pw(59u, i));
+}
+
+fn particle_dynamic_param_2(i: u32) -> vec4<f32> {
+    if (fx.extended < 2u) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(pw(67u, i), pw(68u, i), pw(69u, i), pw(70u, i));
+}
+
+fn particle_dynamic_param_3(i: u32) -> vec4<f32> {
+    if (fx.extended < 2u) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(pw(71u, i), pw(72u, i), pw(73u, i), pw(74u, i));
 }
 
 // Particles.SpriteFacing (words 50..52) when the emitter sets it, else the
