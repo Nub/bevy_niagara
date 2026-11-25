@@ -8,10 +8,12 @@ version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+# bevy_winit is on for every crate (the viewer needs it) so features never
+# differ between builds; headless tools disable WinitPlugin.
 # The user's Bevy fork (Bevy 0.20.0-dev), wired by absolute path so every
 # worktree of this repo resolves the same checkout.
 bevy_math = { path = "/home/zach/helm-projects/bevy-solari-opt/crates/bevy_math", default-features = false, features = ["std"] }
-bevy = { path = "/home/zach/helm-projects/bevy-solari-opt", default-features = false, features = ["default_app", "std", "multi_threaded", "3d_bevy_render", "bevy_window", "png"] }
+bevy = { path = "/home/zach/helm-projects/bevy-solari-opt", default-features = false, features = ["default_app", "std", "multi_threaded", "3d_bevy_render", "bevy_window", "bevy_winit", "x11", "wayland", "png"] }
 rkyv = "0.8"
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"

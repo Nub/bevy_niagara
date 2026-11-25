@@ -92,7 +92,8 @@ pub fn run(def: &SceneDef, frames: u32, warm_frames: u32, (w, h): (u32, u32)) ->
                 exit_condition: ExitCondition::DontExit,
                 ..default()
             })
-            .disable::<PipelinedRenderingPlugin>(),
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<bevy::winit::WinitPlugin>(),
         ScheduleRunnerPlugin::run_loop(Duration::ZERO),
         RenderDiagnosticsPlugin,
         FxPlugin::default(),

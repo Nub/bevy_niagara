@@ -168,7 +168,8 @@ fn main() -> ExitCode {
                 file_path: asset_root(&o.effect),
                 ..default()
             })
-            .disable::<PipelinedRenderingPlugin>(),
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<bevy::winit::WinitPlugin>(),
         ScheduleRunnerPlugin::run_loop(Duration::ZERO),
         FxPlugin {
             deterministic: true,

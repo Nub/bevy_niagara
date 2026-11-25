@@ -160,7 +160,8 @@ fn main() {
                 exit_condition: ExitCondition::DontExit,
                 ..default()
             })
-            .disable::<PipelinedRenderingPlugin>(),
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<bevy::winit::WinitPlugin>(),
         ScheduleRunnerPlugin::run_loop(Duration::ZERO),
         RenderDiagnosticsPlugin,
         FxPlugin::default(),
