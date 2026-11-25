@@ -286,10 +286,23 @@ fn batch_prep(@builtin(local_invocation_index) t: u32) {
     workgroupBarrier();
     if (t == 0u) {
         let at = arrayLength(&args) - 4u;
-        args[at] = (atomicLoad(&most) + WG - 1u) / WG;
+        if (single_sorted()) {
+            // The sort length of the living particles, all keyed by the cull.
+            let p = sort_len_of(atomicLoad(&most));
+            args[at] = p / WG;
+            set_sort_args(p);
+        } else {
+            args[at] = (atomicLoad(&most) + WG - 1u) / WG;
+        }
         args[at + 1u] = vp.entry_count;
         args[at + 2u] = 1u;
     }
+}
+
+// One instance sorted (the common single effect): every position below the
+// sort length gets a key, as `cull` does; no compaction, no pad pass.
+fn single_sorted() -> bool {
+    return vp.entry_count == 1u && vp.sort_mode != 0u;
 }
 
 @compute @workgroup_size(WG)
@@ -297,13 +310,19 @@ fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_
     let r = entries[wid.y];
     let slot = r / 2u;
     let i = gid.x;
+    let single = single_sorted();
     if (i >= state[slot * 64u]) {
+        if (single) {
+            keys[i] = NONE;
+            vals[i] = 0u;
+        }
         return;
     }
     let base = r * vp.region_words;
     let cap = vp.capacity;
     let m = transforms[slot];
     let pos = (m * vec4<f32>(particles[base + i], particles[base + cap + i], particles[base + 2u * cap + i], 1.0)).xyz;
+    var shown = true;
     if (vp.cull_mode != 3u) {
         var radius = 0.0;
         switch vp.cull_mode {
@@ -320,22 +339,36 @@ fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_
         for (var k = 0u; k < 6u; k++) {
             let pl = vp.planes[k];
             if (dot(pl.xyz, pos) + pl.w < -radius) {
-                return;
+                shown = false;
             }
         }
     }
-    let at = atomicAdd(&draw[1], 1u);
-    vals[at] = r * cap + i;
+    var key = NONE;
     if (vp.sort_mode != 0u) {
         let d = pos - vp.camera_position.xyz;
         var dist = dot(d, vp.camera_forward.xyz);
         if (vp.sort_mode == 2u) {
             dist = length(d);
         }
-        var key = 0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0));
+        key = 0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0));
         if (vp.sort_mode == 3u) {
             key = min(bitcast<u32>(particles[base + 27u * cap + i]), 0xFFFFFFFEu);
         }
+    }
+    if (single) {
+        keys[i] = select(NONE, key, shown);
+        vals[i] = r * cap + i;
+        if (shown) {
+            atomicAdd(&draw[1], 1u);
+        }
+        return;
+    }
+    if (!shown) {
+        return;
+    }
+    let at = atomicAdd(&draw[1], 1u);
+    vals[at] = r * cap + i;
+    if (vp.sort_mode != 0u) {
         keys[at] = key;
     }
 }

@@ -18,6 +18,8 @@ const PARAMS_BYTES: usize = 6 * 16 + 16 + 16 + 16 + 16 + 16;
 /// Bytes of `draw_args`: room for `draw_indexed_indirect`'s five words.
 pub const DRAW_ARGS_BYTES: u64 = 20;
 const PASS_STRIDE: u64 = 256;
+/// Batch draws of emitters up to this capacity cull with a direct dispatch.
+const DIRECT_CULL_MAX: u32 = 4096;
 
 /// Niagara's sprite sort modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -656,6 +658,10 @@ impl BatchDraw {
         if !copies.is_empty() {
             queue.write_buffer(&self.entries, 0, &self.entry_bytes);
         }
+        let sorted = !self.passes.is_empty();
+        let single_sorted = sorted && copies.len() == 1;
+        // Small emitters: the cull over the whole capacity, in the prep's pass.
+        let direct = !single_sorted && self.capacity <= DIRECT_CULL_MAX;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("fx batch cull prep"),
             timestamp_writes: None,
@@ -664,37 +670,46 @@ impl BatchDraw {
         pass.set_bind_group(1, &self.args_bind_group, &[]);
         pass.set_pipeline(&pipelines.batch_prep);
         pass.dispatch_workgroups(1, 1, 1);
-        drop(pass);
         if copies.is_empty() {
             return;
         }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("fx batch cull"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        if !direct {
+            drop(pass);
+            pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx batch cull"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, &self.bind_group, &[]);
+        }
         pass.set_pipeline(&pipelines.cull_batch);
-        pass.dispatch_workgroups_indirect(&self.args, 16 * (1 + self.passes.len() as u64));
-        if self.passes.is_empty() {
+        if direct {
+            pass.dispatch_workgroups(self.capacity.div_ceil(BLOCK / 2), copies.len() as u32, 1);
+        } else {
+            pass.dispatch_workgroups_indirect(&self.args, 16 * (1 + self.passes.len() as u64));
+        }
+        if !sorted {
             return;
         }
-        drop(pass);
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("fx batch sort prep"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_bind_group(1, &self.args_bind_group, &[]);
-        pass.set_pipeline(&pipelines.sort_prep);
-        pass.dispatch_workgroups(1, 1, 1);
-        drop(pass);
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("fx batch sort"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_pipeline(&pipelines.pad);
-        pass.dispatch_workgroups_indirect(&self.args, 0);
+        if !single_sorted {
+            // Several instances: sort length from the visible count, tail padded.
+            drop(pass);
+            let mut prep = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx batch sort prep"),
+                timestamp_writes: None,
+            });
+            prep.set_bind_group(0, &self.bind_group, &[]);
+            prep.set_bind_group(1, &self.args_bind_group, &[]);
+            prep.set_pipeline(&pipelines.sort_prep);
+            prep.dispatch_workgroups(1, 1, 1);
+            drop(prep);
+            pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx batch sort"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_pipeline(&pipelines.pad);
+            pass.dispatch_workgroups_indirect(&self.args, 0);
+        }
         for (i, p) in self.passes.iter().enumerate() {
             let args_offset = 16 * (1 + i as u64);
             match p {
