@@ -54,6 +54,8 @@ impl Loaded {
 #[derive(Default)]
 pub struct Store {
     pub roots: Vec<PathBuf>,
+    /// A project's `Content` folders: `/Game/A/B` is `<content>/A/B.uasset`.
+    pub content_roots: Vec<PathBuf>,
     cache: HashMap<PathBuf, Option<Rc<Loaded>>>,
 }
 
@@ -74,11 +76,13 @@ pub fn split_object_path(path: &str) -> (String, String) {
 
 impl Store {
     pub fn new(roots: Vec<PathBuf>) -> Self {
-        Store { roots, cache: HashMap::new() }
+        Store { roots, content_roots: Vec::new(), cache: HashMap::new() }
     }
 
     /// Package roots for a system file: `packages/` beside it, then each
-    /// folder of `FX_IMPORT_PACKAGES` (colon-separated).
+    /// folder of `FX_IMPORT_PACKAGES` (colon-separated), then the nearest
+    /// enclosing `Content` folder as `/Game` (a Fab or Unreal project
+    /// download: `Content/Pack/FX/NS_X.uasset`).
     pub fn for_system(file: &Path) -> Self {
         let mut roots = Vec::new();
         if let Some(dir) = file.parent() {
@@ -87,7 +91,11 @@ impl Store {
         if let Ok(extra) = std::env::var("FX_IMPORT_PACKAGES") {
             roots.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
         }
-        Store::new(roots)
+        let mut store = Store::new(roots);
+        if let Some(content) = file.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "Content")) {
+            store.content_roots.push(content.to_path_buf());
+        }
+        store
     }
 
     /// The file of an object's package, if present under a root.
@@ -97,7 +105,12 @@ impl Store {
         if rel.is_empty() || rel.starts_with("Script/") {
             return None;
         }
-        self.roots.iter().map(|r| r.join(format!("{rel}.uasset"))).find(|f| f.is_file())
+        let game = rel.strip_prefix("Game/").map(|r| (r, &self.content_roots));
+        self.roots
+            .iter()
+            .map(|r| r.join(format!("{rel}.uasset")))
+            .chain(game.into_iter().flat_map(|(r, cs)| cs.iter().map(move |c| c.join(format!("{r}.uasset")))))
+            .find(|f| f.is_file())
     }
 
     /// The object's package, read once.
@@ -142,11 +155,18 @@ pub fn read_texture(store: &mut Store, object_path: &str) -> Result<Image, Strin
     let get_i = |n: &str| src.field(n).and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
     let (w, h) = (get_i("SizeX"), get_i("SizeY"));
     let format = enum_tail(src.field("Format")).unwrap_or_default();
-    let compression = enum_tail(src.field("CompressionFormat")).unwrap_or_else(|| "TSCF_None".into());
+    // UE4 (and early UE5) saves say bPNGCompressed instead of CompressionFormat.
+    let png = matches!(src.field("bPNGCompressed"), Some(Value::Bool(true)));
+    let compression = enum_tail(src.field("CompressionFormat"))
+        .unwrap_or_else(|| if png { "TSCF_PNG" } else { "TSCF_None" }.into());
     let obj = &l.pkg.exports[i].object;
-    let payloads = crate::bulk::payloads_of(&l.pkg, &l.bytes, obj).map_err(|e| e.to_string())?;
-    let p = payloads.first().ok_or("texture source payload not in the package")?;
-    let data = crate::bulk::read_payload(&l.bytes, p).map_err(|e| e.to_string())?;
+    let data = if l.pkg.summary.ue5_version == 0 {
+        crate::bulk::ue4_texture_source(&l.pkg, &l.bytes, obj).map_err(|e| e.to_string())?
+    } else {
+        let payloads = crate::bulk::payloads_of(&l.pkg, &l.bytes, obj).map_err(|e| e.to_string())?;
+        let p = payloads.first().ok_or("texture source payload not in the package")?;
+        crate::bulk::read_payload(&l.bytes, p).map_err(|e| e.to_string())?
+    };
     let rgba = match compression.as_str() {
         "TSCF_PNG" => decode_png(&data)?.rgba,
         "TSCF_None" => raw_to_rgba(&data, w, h, &format)?,

@@ -1,6 +1,6 @@
 [package]
 name = "fx_import"
-description = "Reader for Unreal Engine 5 editor packages (.uasset): summary, names, imports, exports and tagged properties"
+description = "Reader for Unreal Engine 4.26+/5 editor packages (.uasset): summary, names, imports, exports and tagged properties"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -9,6 +9,8 @@ license.workspace = true
 fx_core = { path = "../fx_core" }
 oozextract = { version = "0.5", default-features = false }
 png = "0.17"
+# zlib, for UE4 packages' compressed bulk data (already in the tree via png).
+miniz_oxide = "0.8"
 
 [[bin]]
 name = "fximport"

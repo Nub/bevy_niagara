@@ -1301,11 +1301,20 @@ impl<'a> Cx<'a> {
                 mesh,
             };
             let c = mt::compile(&m, &needs)?;
-            let refraction = m.base.as_ref().is_some_and(|(l, ed)| {
-                crate::property::find(l.props(*ed), "Refraction")
-                    .and_then(|i| i.field("Expression"))
-                    .is_some_and(|x| matches!(x, crate::property::Value::Object(o) if !o.is_null()))
-            }) && matches!(m.blend, mt::Blend::Translucent);
+            // A pure distortion material: Refraction wired and no colour
+            // output. Translucent materials that also wire Emissive or Base
+            // Color (a visible trail with a little haze) are drawn; only
+            // their refraction is lost.
+            let wired = |input: &str| {
+                m.base.as_ref().is_some_and(|(l, ed)| {
+                    crate::property::find(l.props(*ed), input)
+                        .and_then(|i| i.field("Expression"))
+                        .is_some_and(|x| matches!(x, crate::property::Value::Object(o) if !o.is_null()))
+                })
+            };
+            let translucent = matches!(m.blend, mt::Blend::Translucent);
+            let refraction = translucent && wired("Refraction") && !wired("EmissiveColor") && !wired("BaseColor");
+            let refraction_lost = translucent && wired("Refraction") && !refraction;
             let mut imgs = Vec::new();
             let mut missing = Vec::new();
             for t in &c.textures {
@@ -1342,7 +1351,13 @@ impl<'a> Cx<'a> {
                 refraction,
                 textures: c.textures.iter().map(|t| mt::split_object_path(t).1).collect(),
                 missing_textures: missing,
-                notes: c.notes.clone(),
+                notes: {
+                    let mut notes = c.notes.clone();
+                    if refraction_lost {
+                        notes.push("Refraction: the distortion offset is not drawn (colour kept)".into());
+                    }
+                    notes
+                },
             })
         })();
         a.mats.insert(key, res.clone());

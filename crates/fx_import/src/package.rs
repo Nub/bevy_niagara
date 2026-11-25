@@ -239,6 +239,18 @@ impl Package {
         let (tag_start, tag_end) = match e.script_range {
             Some((s, t)) => (start + s, Some(start + t)),
             None if NATIVE_FIRST_CLASSES.contains(&class.as_str()) => return (obj, Vec::new()),
+            // UAssetImportData saves its source-file JSON (an FString) before
+            // the tagged properties; without the export's script range (UE4
+            // packages) skip it here.
+            None if class == "AssetImportData" && !versions.filter_editor_only => {
+                match root.window(start, end).and_then(|mut r| r.fstring().map(|_| r.pos())) {
+                    Ok(p) => (p, None),
+                    Err(err) => {
+                        obj.error = Some(err.to_string());
+                        return (obj, Vec::new());
+                    }
+                }
+            }
             None => (start, None),
         };
         let mut ctx = Ctx::new(&self.names, &self.soft_object_paths, versions);

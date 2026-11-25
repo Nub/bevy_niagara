@@ -7,6 +7,11 @@ pub const PACKAGE_FILE_TAG: u32 = 0x9E2A_83C1;
 /// UE4 object version every UE5 package carries (the last UE4 version).
 pub const UE4_VERSION_UE5: i32 = 522;
 
+/// Oldest UE4 object version read (VER_UE4_NON_OUTER_PACKAGE_IMPORT, UE 4.26):
+/// UE4 packages (legacy file version -7) from 4.26 and 4.27, as many Fab
+/// listings still ship.
+pub const UE4_VERSION_MIN: i32 = 520;
+
 /// EUnrealEngineObjectUE5Version values this reader branches on.
 pub mod ue5 {
     pub const INITIAL_VERSION: i32 = 1000;
@@ -143,18 +148,19 @@ impl Summary {
             return Err(Error::new(0, format!("not an Unreal package (tag {tag:#010x})")));
         }
         s.legacy_file_version = r.i32()?;
-        if !(-9..=-8).contains(&s.legacy_file_version) {
+        if !(-9..=-7).contains(&s.legacy_file_version) {
             return Err(Error::new(
                 4,
                 format!(
-                    "legacy file version {} is not a UE5 package (expected -8 or -9)",
+                    "legacy file version {} is not a UE 4.26+ or UE5 package (expected -7, -8 or -9)",
                     s.legacy_file_version
                 ),
             ));
         }
         let _ue3 = r.i32()?;
         s.ue4_version = r.i32()?;
-        s.ue5_version = r.i32()?;
+        // -7 is a UE4 package: no UE5 version (every UE5 gate below is off).
+        s.ue5_version = if s.legacy_file_version <= -8 { r.i32()? } else { 0 };
         s.licensee_version = r.i32()?;
         if s.ue4_version == 0 && s.ue5_version == 0 {
             return Err(Error::new(
@@ -162,13 +168,19 @@ impl Summary {
                 "unversioned package (cooked); only editor saves are supported",
             ));
         }
-        if s.ue4_version != UE4_VERSION_UE5 || !(ue5::INITIAL_VERSION..=ue5::LATEST).contains(&s.ue5_version) {
+        let supported = if s.legacy_file_version == -7 {
+            (UE4_VERSION_MIN..=UE4_VERSION_UE5).contains(&s.ue4_version)
+        } else {
+            s.ue4_version == UE4_VERSION_UE5 && (ue5::INITIAL_VERSION..=ue5::LATEST).contains(&s.ue5_version)
+        };
+        if !supported {
             return Err(Error::new(
                 12,
                 format!(
-                    "unsupported package version UE4 {} / UE5 {} (supported: UE4 522, UE5 1000..={})",
+                    "unsupported package version UE4 {} / UE5 {} (supported: UE4 {}..=522 without UE5, or UE4 522 with UE5 1000..={})",
                     s.ue4_version,
                     s.ue5_version,
+                    UE4_VERSION_MIN,
                     ue5::LATEST
                 ),
             ));

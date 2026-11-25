@@ -2559,6 +2559,7 @@ name = "fx_import"
 version = "0.1.0"
 dependencies = [
  "fx_core",
+ "miniz_oxide 0.8.9",
  "oozextract",
  "png 0.17.16",
 ]
