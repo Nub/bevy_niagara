@@ -113,10 +113,10 @@ fn list_modules() {
         println!("\"{}\" [{}]\n  {}", m.name, stages.join(", "), m.doc);
         for i in m.inputs {
             println!(
-                "  - \"{}\": {} = {:?}  ({})",
+                "  - \"{}\": {} = {}  ({})",
                 i.name,
-                i.ty.name(),
-                i.default,
+                fx_core::docs::input_type(i),
+                fx_core::docs::input_default(i),
                 i.doc
             );
         }

@@ -29,6 +29,25 @@ pub enum ModuleKind {
     UpdateMeshOrientation = 15,
     InitializeLight = 16,
     DynamicMaterialParameters = 17,
+    PointAttractionForce = 18,
+    VortexVelocity = 19,
+    VortexForce = 20,
+    WindForce = 21,
+    LinearForce = 22,
+    LimitForce = 23,
+    AccelerationForce = 24,
+    PointForce = 25,
+    InheritVelocity = 26,
+    ShapeLocation = 27,
+    InitialMeshOrientation = 28,
+    SpriteRotationRate = 29,
+    SubUvAnimation = 30,
+    ScaleMeshSize = 31,
+    ScaleRibbonWidth = 32,
+    Color = 33,
+    ScaleColorBySpeed = 34,
+    ScaleSpriteSizeBySpeed = 35,
+    KillParticlesInVolume = 36,
 }
 
 pub struct InputDef {
@@ -36,6 +55,10 @@ pub struct InputDef {
     pub ty: ValueType,
     pub default: Value,
     pub doc: &'static str,
+    /// For an Int input that is a Niagara static switch (an enum chosen when
+    /// the effect is written): the names of its values, written bare in
+    /// source (`"Shape Primitive": Box`) and cooked to their index.
+    pub choices: &'static [&'static str],
 }
 
 pub struct ModuleDef {
@@ -72,6 +95,23 @@ const fn i(name: &'static str, ty: ValueType, default: Value, doc: &'static str)
         ty,
         default,
         doc,
+        choices: &[],
+    }
+}
+
+/// A static-switch input: one of `choices`, cooked to its index (an Int).
+const fn e(
+    name: &'static str,
+    choices: &'static [&'static str],
+    default: i32,
+    doc: &'static str,
+) -> InputDef {
+    InputDef {
+        name,
+        ty: ValueType::Int,
+        default: Value::Int(default),
+        doc,
+        choices,
     }
 }
 
@@ -367,10 +407,475 @@ pub static MODULES: &[ModuleDef] = &[
         )],
         doc: "Sets Particles.DynamicMaterialParameter, which custom materials can read.",
     },
+    ModuleDef {
+        kind: ModuleKind::PointAttractionForce,
+        name: "Point Attraction Force",
+        stages: &[ParticleUpdate],
+        inputs: &[
+            i(
+                "Attractor Position",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "point the particles are pulled towards (metres, emitter space)",
+            ),
+            i(
+                "Attraction Strength",
+                T::Float,
+                Value::Float(1.0),
+                "force at the attractor (newtons)",
+            ),
+            i(
+                "Attraction Radius",
+                T::Float,
+                Value::Float(1.0),
+                "no pull at or beyond this distance (metres)",
+            ),
+            i(
+                "Falloff Exponent",
+                T::Float,
+                Value::Float(1.0),
+                "shape of the falloff: (1 - distance / radius) ^ exponent",
+            ),
+            i(
+                "Kill Radius",
+                T::Float,
+                Value::Float(0.0),
+                "particles closer than this are killed; 0 = never",
+            ),
+        ],
+        doc: "Pulls particles towards Attractor Position: Physics.Force += direction * Attraction Strength * (1 - distance / Attraction Radius) ^ Falloff Exponent, within the radius. Kills particles inside Kill Radius.",
+    },
+    ModuleDef {
+        kind: ModuleKind::VortexVelocity,
+        name: "Vortex Velocity",
+        stages: PARTICLE,
+        inputs: &[
+            i(
+                "Vortex Axis",
+                T::Vec3,
+                Value::Vec3([0.0, 1.0, 0.0]),
+                "axis to swirl around (normalised for you; Y is up)",
+            ),
+            i(
+                "Vortex Origin",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "a point on the axis (metres)",
+            ),
+            i(
+                "Velocity Amount",
+                T::Float,
+                Value::Float(1.0),
+                "metres per second, counter-clockwise seen from the axis tip",
+            ),
+        ],
+        doc: "Adds Velocity Amount of velocity around the vortex axis, tangent to the circle through the particle (none on the axis itself).",
+    },
+    ModuleDef {
+        kind: ModuleKind::VortexForce,
+        name: "Vortex Force",
+        stages: &[ParticleUpdate],
+        inputs: &[
+            i(
+                "Vortex Axis",
+                T::Vec3,
+                Value::Vec3([0.0, 1.0, 0.0]),
+                "axis to swirl around (normalised for you; Y is up)",
+            ),
+            i(
+                "Vortex Origin",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "a point on the axis (metres)",
+            ),
+            i(
+                "Vortex Force Amount",
+                T::Float,
+                Value::Float(1.0),
+                "tangential force (newtons), counter-clockwise seen from the axis tip",
+            ),
+            i(
+                "Origin Pull Amount",
+                T::Float,
+                Value::Float(0.0),
+                "force towards the axis (newtons); negative pushes out",
+            ),
+        ],
+        doc: "Adds a force around the vortex axis (Vortex Force Amount, tangent) and towards it (Origin Pull Amount) to Physics.Force.",
+    },
+    ModuleDef {
+        kind: ModuleKind::WindForce,
+        name: "Wind Force",
+        stages: &[ParticleUpdate],
+        inputs: &[
+            i(
+                "Wind Velocity",
+                T::Vec3,
+                Value::Vec3([1.0, 0.0, 0.0]),
+                "wind direction and speed (metres per second)",
+            ),
+            i(
+                "Wind Speed",
+                T::Float,
+                Value::Float(1.0),
+                "multiplies Wind Velocity",
+            ),
+            i(
+                "Air Resistance",
+                T::Float,
+                Value::Float(1.0),
+                "how strongly particles are pulled to the wind's velocity (per second, per kg)",
+            ),
+        ],
+        doc: "Physics.Force += (Wind Velocity * Wind Speed - Velocity) * Air Resistance: particles approach the wind's velocity.",
+    },
+    ModuleDef {
+        kind: ModuleKind::LinearForce,
+        name: "Linear Force",
+        stages: &[ParticleUpdate],
+        inputs: &[i(
+            "Linear Force",
+            T::Vec3,
+            Value::Vec3([0.0, 1.0, 0.0]),
+            "force in newtons",
+        )],
+        doc: "Adds a constant force to Physics.Force (heavier particles accelerate less).",
+    },
+    ModuleDef {
+        kind: ModuleKind::LimitForce,
+        name: "Limit Force",
+        stages: &[ParticleUpdate],
+        inputs: &[i(
+            "Force Limit",
+            T::Float,
+            Value::Float(1.0),
+            "largest force length (newtons)",
+        )],
+        doc: "Scales Physics.Force down to Force Limit if it is longer. Place after the forces it limits.",
+    },
+    ModuleDef {
+        kind: ModuleKind::AccelerationForce,
+        name: "Acceleration Force",
+        stages: &[ParticleUpdate],
+        inputs: &[i(
+            "Acceleration",
+            T::Vec3,
+            Value::Vec3([0.0, 1.0, 0.0]),
+            "metres per second squared",
+        )],
+        doc: "Physics.Force += Acceleration * Mass: the same acceleration whatever the mass.",
+    },
+    ModuleDef {
+        kind: ModuleKind::PointForce,
+        name: "Point Force",
+        stages: &[ParticleUpdate],
+        inputs: &[
+            i(
+                "Point Position",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "centre of the force (metres, emitter space)",
+            ),
+            i(
+                "Point Force Strength",
+                T::Float,
+                Value::Float(1.0),
+                "force at the centre (newtons); positive pushes away, negative pulls in",
+            ),
+            i(
+                "Falloff Radius",
+                T::Float,
+                Value::Float(1.0),
+                "no force at or beyond this distance (metres)",
+            ),
+            i(
+                "Falloff Exponent",
+                T::Float,
+                Value::Float(1.0),
+                "shape of the falloff: (1 - distance / radius) ^ exponent",
+            ),
+        ],
+        doc: "Pushes particles away from Point Position: Physics.Force += direction * Point Force Strength * (1 - distance / Falloff Radius) ^ Falloff Exponent, within the radius.",
+    },
+    ModuleDef {
+        kind: ModuleKind::InheritVelocity,
+        name: "Inherit Velocity",
+        stages: &[ParticleSpawn],
+        inputs: &[i(
+            "Velocity Scale",
+            T::Float,
+            Value::Float(1.0),
+            "fraction of the owner's velocity to inherit",
+        )],
+        doc: "Velocity += Engine.Owner.Velocity * Velocity Scale: new particles carry the owning entity's motion (the host sets the owner velocity; 0 until it does).",
+    },
+    ModuleDef {
+        kind: ModuleKind::ShapeLocation,
+        name: "Shape Location",
+        stages: &[ParticleSpawn],
+        inputs: &[
+            e(
+                "Shape Primitive",
+                &["Sphere", "Box", "Cylinder", "Torus", "Cone", "Ring"],
+                0,
+                "the shape: Sphere, Box, Cylinder, Torus, Cone or Ring (Y is the shape's axis)",
+            ),
+            i(
+                "Surface Only",
+                T::Bool,
+                Value::Bool(false),
+                "on the surface instead of inside (Sphere, Box, Cylinder side, Torus, Cone side)",
+            ),
+            i(
+                "Offset",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "moves the shape (metres)",
+            ),
+            i("Sphere Radius", T::Float, Value::Float(0.5), "metres"),
+            i(
+                "Box Size",
+                T::Vec3,
+                Value::Vec3([1.0; 3]),
+                "full size per axis (metres), centred",
+            ),
+            i(
+                "Cylinder Height",
+                T::Float,
+                Value::Float(1.0),
+                "metres along Y, centred",
+            ),
+            i("Cylinder Radius", T::Float, Value::Float(0.5), "metres"),
+            i(
+                "Large Radius",
+                T::Float,
+                Value::Float(0.5),
+                "torus: centre of the ring to the centre of the tube (metres)",
+            ),
+            i(
+                "Handle Radius",
+                T::Float,
+                Value::Float(0.1),
+                "torus: tube radius (metres)",
+            ),
+            i(
+                "Cone Length",
+                T::Float,
+                Value::Float(1.0),
+                "metres from the apex (at Offset) along +Y",
+            ),
+            i(
+                "Cone Angle",
+                T::Float,
+                Value::Float(30.0),
+                "half-angle in degrees",
+            ),
+            i(
+                "Ring Radius",
+                T::Float,
+                Value::Float(0.5),
+                "metres, in the XZ plane",
+            ),
+            i(
+                "Disc Coverage",
+                T::Float,
+                Value::Float(0.0),
+                "ring: 0 = on the circle, 1 = anywhere on the disc",
+            ),
+        ],
+        doc: "Sets Particles.Position to a uniformly random point in (or on) a shape centred at Offset. Place it after Initialize Particle, which also sets Position.",
+    },
+    ModuleDef {
+        kind: ModuleKind::InitialMeshOrientation,
+        name: "Initial Mesh Orientation",
+        stages: &[ParticleSpawn],
+        inputs: &[i(
+            "Rotation",
+            T::Vec3,
+            Value::Vec3([0.0; 3]),
+            "Euler angles in degrees, applied X, then Y, then Z (RandomRange for random orientations)",
+        )],
+        doc: "Sets Particles.MeshOrientation from Euler angles.",
+    },
+    ModuleDef {
+        kind: ModuleKind::SpriteRotationRate,
+        name: "Sprite Rotation Rate",
+        stages: &[ParticleUpdate],
+        inputs: &[i(
+            "Rotation Rate",
+            T::Float,
+            Value::Float(90.0),
+            "degrees per second",
+        )],
+        doc: "Particles.SpriteRotation += Rotation Rate * DeltaTime.",
+    },
+    ModuleDef {
+        kind: ModuleKind::SubUvAnimation,
+        name: "SubUV Animation",
+        stages: PARTICLE,
+        inputs: &[
+            e(
+                "SubUV Animation Mode",
+                &["Linear", "Random", "InfiniteLoop"],
+                0,
+                "Linear: first to last frame over the particle's life; Random: one random frame per particle; InfiniteLoop: Frames Per Second, wrapping",
+            ),
+            i(
+                "Number of Frames",
+                T::Int,
+                Value::Int(0),
+                "frames to play; 0 = every cell of the sprite renderer's sub_image_size",
+            ),
+            i(
+                "Start Frame",
+                T::Int,
+                Value::Int(0),
+                "first frame (cells count left to right, top to bottom from 0)",
+            ),
+            i(
+                "Frames Per Second",
+                T::Float,
+                Value::Float(30.0),
+                "InfiniteLoop playback rate",
+            ),
+        ],
+        doc: "Sets Particles.SubImageIndex, the flipbook frame the sprite renderer shows (fractional when the renderer blends frames). Without it the renderer plays the flipbook over the particle's life.",
+    },
+    ModuleDef {
+        kind: ModuleKind::ScaleMeshSize,
+        name: "Scale Mesh Size",
+        stages: PARTICLE,
+        inputs: &[i(
+            "Scale Factor",
+            T::Vec3,
+            Value::Vec3([1.0; 3]),
+            "multiplies the initial mesh scale",
+        )],
+        doc: "Particles.Scale = Particles.Initial.Scale * Scale Factor (Initial.Scale is set by Initialize Mesh).",
+    },
+    ModuleDef {
+        kind: ModuleKind::ScaleRibbonWidth,
+        name: "Scale Ribbon Width",
+        stages: PARTICLE,
+        inputs: &[i(
+            "Ribbon Width Scale",
+            T::Float,
+            Value::Float(1.0),
+            "multiplies the initial ribbon width",
+        )],
+        doc: "Particles.RibbonWidth = Particles.Initial.RibbonWidth * Ribbon Width Scale (Initial.RibbonWidth is set by Initialize Ribbon).",
+    },
+    ModuleDef {
+        kind: ModuleKind::Color,
+        name: "Color",
+        stages: PARTICLE,
+        inputs: &[i(
+            "Color",
+            T::Color,
+            Value::Color([1.0; 4]),
+            "linear RGBA; usually CurveOverAge",
+        )],
+        doc: "Sets Particles.Color (Initial.Color is left as Initialize Particle set it).",
+    },
+    ModuleDef {
+        kind: ModuleKind::ScaleColorBySpeed,
+        name: "Scale Color by Speed",
+        stages: PARTICLE,
+        inputs: &[
+            i(
+                "Velocity Threshold",
+                T::Float,
+                Value::Float(1.0),
+                "speed (m/s) at which Max Scale Factor is reached",
+            ),
+            i(
+                "Min Scale Factor",
+                T::Color,
+                Value::Color([0.5, 0.5, 0.5, 1.0]),
+                "scale at rest",
+            ),
+            i(
+                "Max Scale Factor",
+                T::Color,
+                Value::Color([1.0; 4]),
+                "scale at Velocity Threshold and above",
+            ),
+        ],
+        doc: "Particles.Color = Particles.Initial.Color * lerp(Min Scale Factor, Max Scale Factor, clamp(speed / Velocity Threshold, 0, 1)).",
+    },
+    ModuleDef {
+        kind: ModuleKind::ScaleSpriteSizeBySpeed,
+        name: "Scale Sprite Size by Speed",
+        stages: PARTICLE,
+        inputs: &[
+            i(
+                "Velocity Threshold",
+                T::Float,
+                Value::Float(1.0),
+                "speed (m/s) at which Max Scale Factor is reached",
+            ),
+            i(
+                "Min Scale Factor",
+                T::Vec2,
+                Value::Vec2([1.0, 1.0]),
+                "scale at rest",
+            ),
+            i(
+                "Max Scale Factor",
+                T::Vec2,
+                Value::Vec2([1.0, 2.0]),
+                "scale at Velocity Threshold and above",
+            ),
+        ],
+        doc: "Particles.SpriteSize = Particles.Initial.SpriteSize * lerp(Min Scale Factor, Max Scale Factor, clamp(speed / Velocity Threshold, 0, 1)).",
+    },
+    ModuleDef {
+        kind: ModuleKind::KillParticlesInVolume,
+        name: "Kill Particles in Volume",
+        stages: PARTICLE,
+        inputs: &[
+            e(
+                "Volume Shape",
+                &["Sphere", "Box"],
+                0,
+                "Sphere or Box",
+            ),
+            i(
+                "Volume Center",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "metres, emitter space",
+            ),
+            i("Sphere Radius", T::Float, Value::Float(1.0), "metres"),
+            i(
+                "Box Size",
+                T::Vec3,
+                Value::Vec3([1.0; 3]),
+                "full size per axis (metres), centred",
+            ),
+            i(
+                "Invert Volume",
+                T::Bool,
+                Value::Bool(false),
+                "kill particles outside the volume instead",
+            ),
+        ],
+        doc: "Kills particles strictly inside the volume (or outside it, with Invert Volume).",
+    },
 ];
 
 pub fn by_name(name: &str) -> Option<&'static ModuleDef> {
     MODULES.iter().find(|m| m.name == name)
+}
+
+/// The table's own copy of static-switch value `name`, if any module has it.
+pub fn static_choice(name: &str) -> Option<&'static str> {
+    MODULES
+        .iter()
+        .flat_map(|m| m.inputs)
+        .flat_map(|i| i.choices)
+        .find(|c| **c == name)
+        .copied()
 }
 
 pub fn by_kind(kind: ModuleKind) -> &'static ModuleDef {

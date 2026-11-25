@@ -62,6 +62,10 @@ impl CookedEmitter {
                         | ModuleKind::UpdateMeshOrientation
                         | ModuleKind::InitializeLight
                         | ModuleKind::DynamicMaterialParameters
+                        | ModuleKind::InitialMeshOrientation
+                        | ModuleKind::SubUvAnimation
+                        | ModuleKind::ScaleMeshSize
+                        | ModuleKind::ScaleRibbonWidth
                 )
             ) || m.inputs.iter().any(|i| {
                 matches!(i, CookedInput::Link(r)
@@ -74,6 +78,30 @@ impl CookedEmitter {
                 .iter()
                 .chain(&self.particle_update)
                 .any(module)
+    }
+
+    /// Whether a module sets Particles.SubImageIndex (SubUV Animation): the
+    /// sprite renderer then shows that frame instead of playing the flipbook
+    /// over the particle's life.
+    pub fn sets_sub_image_index(&self) -> bool {
+        self.particle_spawn
+            .iter()
+            .chain(&self.particle_update)
+            .any(|m| modules::from_id(m.module) == Some(ModuleKind::SubUvAnimation))
+    }
+
+    /// Flipbook frames of the first Sprite renderer (columns * rows), 1 without one:
+    /// what SubUV Animation plays when its Number of Frames is 0.
+    pub fn sub_image_frames(&self) -> u32 {
+        self.renderers
+            .iter()
+            .find_map(|r| match r {
+                CookedRenderer::Sprite(s) => {
+                    Some(s.sub_image_size[0].max(1) * s.sub_image_size[1].max(1))
+                }
+                _ => None,
+            })
+            .unwrap_or(1)
     }
 }
 
@@ -525,18 +553,110 @@ fn lint_emitter(e: &EmitterSource, d: &mut Diags) {
     let forces = update.iter().any(|k| {
         matches!(
             k,
-            ModuleKind::GravityForce | ModuleKind::Drag | ModuleKind::CurlNoiseForce
+            ModuleKind::GravityForce
+                | ModuleKind::Drag
+                | ModuleKind::CurlNoiseForce
+                | ModuleKind::PointAttractionForce
+                | ModuleKind::VortexForce
+                | ModuleKind::WindForce
+                | ModuleKind::LinearForce
+                | ModuleKind::AccelerationForce
+                | ModuleKind::PointForce
         )
     });
     let moves = enabled_kinds(&e.particle_spawn)
         .chain(update.iter().copied())
-        .any(|k| matches!(k, ModuleKind::AddVelocity | ModuleKind::AddVelocityInCone));
+        .any(|k| {
+            matches!(
+                k,
+                ModuleKind::AddVelocity
+                    | ModuleKind::AddVelocityInCone
+                    | ModuleKind::VortexVelocity
+                    | ModuleKind::InheritVelocity
+            )
+        });
     if (forces || moves) && !update.contains(&ModuleKind::SolveForcesAndVelocity) {
         d.warning(
             e.span,
             format!("emitter \"{}\" sets velocity or forces but has no \"Solve Forces and Velocity\", so particles never move", e.name),
             Some("add `(module: \"Solve Forces and Velocity\")` at the end of `particle_update`".into()),
         );
+    }
+}
+
+/// A static-switch input (`"Shape Primitive": Box`), or a bare name given to an
+/// input that is not one. Static switches are fixed when the effect is
+/// written, so they take a name (or its index as `Int`), never a link,
+/// random range or curve.
+fn choice_input(
+    def: &ModuleDef,
+    idef: &modules::InputDef,
+    e: &InputEntry,
+    d: &mut Diags,
+) -> Option<CookedInput> {
+    let names = || {
+        idef.choices
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match &e.input {
+        Input::Choice(name) if idef.choices.is_empty() => {
+            d.error(
+                e.span,
+                format!(
+                    "input \"{}\" of \"{}\" is {}, but the value given is the bare name `{name}`",
+                    idef.name,
+                    def.name,
+                    idef.ty.name()
+                ),
+                Some(format!(
+                    "give a {} value, e.g. `\"{}\": {}`",
+                    idef.ty.name(),
+                    idef.name,
+                    idef.ty.example()
+                )),
+            );
+            None
+        }
+        Input::Choice(name) => match idef.choices.iter().position(|c| c == name) {
+            Some(i) => Some(CookedInput::Const(Value::Int(i as i32))),
+            None => {
+                let help = match suggest(name, idef.choices.iter().copied()) {
+                    Some(s) => format!("did you mean `{s}`? Choices: {}", names()),
+                    None => format!("choices: {}", names()),
+                };
+                d.error(
+                    e.span,
+                    format!(
+                        "\"{}\" of \"{}\" has no choice `{name}`",
+                        idef.name, def.name
+                    ),
+                    Some(help),
+                );
+                None
+            }
+        },
+        Input::Literal(Value::Int(i)) if (0..idef.choices.len() as i32).contains(i) => {
+            Some(CookedInput::Const(Value::Int(*i)))
+        }
+        _ => {
+            d.error(
+                e.span,
+                format!(
+                    "\"{}\" of \"{}\" is a static switch: give one of its names",
+                    idef.name, def.name
+                ),
+                Some(format!(
+                    "e.g. `\"{}\": {}`; choices: {}",
+                    idef.name,
+                    idef.choices[0],
+                    names()
+                )),
+            );
+            None
+        }
     }
 }
 
@@ -574,6 +694,12 @@ impl Ctx<'_> {
                     );
                     continue;
                 };
+                if !idef.choices.is_empty() || matches!(entry.input, Input::Choice(_)) {
+                    if let Some(c) = choice_input(def, idef, entry, d) {
+                        inputs[slot] = c;
+                    }
+                    continue;
+                }
                 if let Some(c) = self.input(stage, def, idef.name, idef.ty, entry, d) {
                     inputs[slot] = c;
                 }
@@ -663,6 +789,8 @@ impl Ctx<'_> {
             return None;
         }
         match &e.input {
+            // Handled by `choice_input` before this is called.
+            Input::Choice(_) => None,
             Input::Literal(v) => Some(CookedInput::Const(*v)),
             Input::Link(ty, target) => self
                 .link(stage, *ty, target, e.span, d)

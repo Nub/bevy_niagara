@@ -60,6 +60,11 @@ pub const ENGINE: &[Builtin] = &[
         ValueType::Float,
         "seconds since the system started, at the start of this step",
     ),
+    b(
+        "Owner.Velocity",
+        ValueType::Vec3,
+        "velocity of the entity that owns the effect (m/s; set by the host, 0 by default)",
+    ),
 ];
 pub const SYSTEM: &[Builtin] = &[b("Age", ValueType::Float, "seconds the system has run")];
 pub const EMITTER: &[Builtin] = &[b("Age", ValueType::Float, "seconds the emitter has run")];
@@ -88,6 +93,9 @@ pub mod attr {
     pub const RIBBON_LINK_ORDER: u16 = 19;
     pub const LIGHT_RADIUS: u16 = 20;
     pub const DYNAMIC_MATERIAL_PARAMETER: u16 = 21;
+    pub const SUB_IMAGE_INDEX: u16 = 22;
+    pub const INITIAL_SCALE: u16 = 23;
+    pub const INITIAL_RIBBON_WIDTH: u16 = 24;
     /// Attributes from here on are stored only by emitters that use them
     /// (see [`crate::cook::CookedEmitter::uses_extended_attributes`]).
     pub const FIRST_EXTENDED: u16 = SCALE;
@@ -160,6 +168,21 @@ pub const PARTICLES: &[Builtin] = &[
         "DynamicMaterialParameter",
         ValueType::Vec4,
         "free values passed to custom materials",
+    ),
+    b(
+        "SubImageIndex",
+        ValueType::Float,
+        "flipbook frame the sprite renderer shows (set by SubUV Animation)",
+    ),
+    b(
+        "Initial.Scale",
+        ValueType::Vec3,
+        "Scale as set by Initialize Mesh",
+    ),
+    b(
+        "Initial.RibbonWidth",
+        ValueType::Float,
+        "RibbonWidth as set by Initialize Ribbon",
     ),
 ];
 

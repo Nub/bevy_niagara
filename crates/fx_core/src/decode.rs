@@ -790,6 +790,7 @@ fn decode_input(v: &SValue, name: &str, d: &mut Diags) -> Option<Input> {
                 _ => decode_literal(v, d).map(Input::Literal),
             }
         }
+        SKind::Ident(choice) => Some(Input::Choice(choice.clone())),
         SKind::Number(..) => {
             d.error(
                 v.span,

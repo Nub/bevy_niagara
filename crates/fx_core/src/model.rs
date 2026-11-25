@@ -399,6 +399,9 @@ pub enum Input {
     /// `CurveOverAge(Color([(0.0, (1,1,1,1)), (1.0, (1,1,1,0))]))`:
     /// samples the curve at `Particles.NormalizedAge`.
     CurveOverAge(Curve),
+    /// `Box`: a bare name, the value of a static-switch input (an enum such
+    /// as Shape Location's "Shape Primitive"); cooks to its index.
+    Choice(String),
 }
 
 impl Input {
@@ -408,6 +411,7 @@ impl Input {
             Input::Link(t, _) => *t,
             Input::RandomRange(a, _) => a.ty(),
             Input::CurveOverAge(c) => c.ty(),
+            Input::Choice(_) => ValueType::Int,
         }
     }
 }
@@ -430,6 +434,11 @@ impl Serialize for Input {
                 tv.end()
             }
             Input::CurveOverAge(c) => s.serialize_newtype_variant("Input", 3, "CurveOverAge", c),
+            // A bare identifier in RON; serde needs it 'static, so take it from the module table.
+            Input::Choice(name) => match crate::modules::static_choice(name) {
+                Some(c) => s.serialize_unit_variant("Input", 4, c),
+                None => s.serialize_str(name),
+            },
         }
     }
 }

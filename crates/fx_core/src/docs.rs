@@ -5,7 +5,7 @@
 use std::fmt::Write;
 
 use crate::diag::suggest;
-use crate::modules::{MODULES, ModuleDef};
+use crate::modules::{InputDef, MODULES, ModuleDef};
 use crate::render::{RENDERER_FIELDS, RendererField};
 use crate::types::Value;
 
@@ -30,6 +30,23 @@ pub fn ron_value(v: &Value) -> String {
         Value::Vec4(a) => format!("Vec4(({}))", tuple(a)),
         Value::Color(a) => format!("Color(({}))", tuple(a)),
         Value::Quat(a) => format!("Quat(({}))", tuple(a)),
+    }
+}
+
+/// "Float", or "one of Sphere \| Box" for a static switch.
+pub fn input_type(i: &InputDef) -> String {
+    if i.choices.is_empty() {
+        i.ty.name().into()
+    } else {
+        format!("one of {}", i.choices.join(" \\| "))
+    }
+}
+
+/// The default in source form: a value, or a static switch's bare name.
+pub fn input_default(i: &InputDef) -> String {
+    match (i.choices.is_empty(), i.default) {
+        (false, Value::Int(n)) => i.choices.get(n as usize).copied().unwrap_or("?").into(),
+        _ => ron_value(&i.default),
     }
 }
 
@@ -105,8 +122,8 @@ pub fn module_doc(name: &str) -> Result<String, String> {
                 s,
                 "| {} | {} | `{}` | {} |",
                 i.name,
-                i.ty.name(),
-                ron_value(&i.default),
+                input_type(i).replace('|', "\\|"),
+                input_default(i),
                 i.doc
             );
         }
@@ -114,7 +131,7 @@ pub fn module_doc(name: &str) -> Result<String, String> {
     let inputs = m
         .inputs
         .iter()
-        .map(|i| format!("\"{}\": {}", i.name, ron_value(&i.default)))
+        .map(|i| format!("\"{}\": {}", i.name, input_default(i)))
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(s, "\nExample (in `{}`):\n```ron", m.stages[0].field());

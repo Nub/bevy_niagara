@@ -58,6 +58,12 @@ pub struct Particle {
     pub light_radius: f32,
     /// `Particles.DynamicMaterialParameter`.
     pub dynamic_material_parameter: Vec4,
+    /// `Particles.SubImageIndex`: flipbook frame (SubUV Animation).
+    pub sub_image_index: f32,
+    /// `Particles.Initial.Scale`.
+    pub initial_scale: Vec3,
+    /// `Particles.Initial.RibbonWidth`.
+    pub initial_ribbon_width: f32,
     pub alive: bool,
 }
 
@@ -87,6 +93,9 @@ impl Particle {
             ribbon_link_order: 0.0,
             light_radius: 1.0,
             dynamic_material_parameter: Vec4::ZERO,
+            sub_image_index: 0.0,
+            initial_scale: Vec3::ONE,
+            initial_ribbon_width: 0.1,
             alive: true,
         }
     }
@@ -118,13 +127,16 @@ impl Particle {
             attr::DYNAMIC_MATERIAL_PARAMETER => {
                 Value::Vec4(self.dynamic_material_parameter.to_array())
             }
+            attr::SUB_IMAGE_INDEX => Value::Float(self.sub_image_index),
+            attr::INITIAL_SCALE => Value::Vec3(self.initial_scale.to_array()),
+            attr::INITIAL_RIBBON_WIDTH => Value::Float(self.initial_ribbon_width),
             _ => Value::Float(0.0),
         }
     }
 
     /// Bit pattern of every field, for exact comparisons and hashing.
     pub fn bits(&self) -> Vec<u32> {
-        let mut v = Vec::with_capacity(46);
+        let mut v = Vec::with_capacity(51);
         let mut f = |xs: &[f32]| v.extend(xs.iter().map(|x| x.to_bits()));
         f(&self.position.to_array());
         f(&self.velocity.to_array());
@@ -151,6 +163,9 @@ impl Particle {
             self.light_radius,
         ]);
         f(&self.dynamic_material_parameter.to_array());
+        f(&[self.sub_image_index]);
+        f(&self.initial_scale.to_array());
+        f(&[self.initial_ribbon_width]);
         v.push(self.unique_id);
         v.push(self.alive as u32);
         v
@@ -176,6 +191,9 @@ pub struct Simulation {
     pub time: f32,
     /// Current `User.` parameter values, in declaration order.
     pub user: Vec<Value>,
+    /// `Engine.Owner.Velocity`: the owning entity's velocity (m/s), set by
+    /// the host; read by Inherit Velocity.
+    pub owner_velocity: Vec3,
     pub emitters: Vec<EmitterState>,
 }
 
@@ -190,6 +208,9 @@ struct Env<'a> {
     dt: f32,
     time: f32,
     emitter_age: f32,
+    owner_velocity: Vec3,
+    /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
+    sub_image_frames: u32,
 }
 
 impl Simulation {
@@ -202,6 +223,7 @@ impl Simulation {
             frame: 0,
             time: 0.0,
             user,
+            owner_velocity: Vec3::ZERO,
             emitters,
         }
     }
@@ -263,6 +285,8 @@ impl Simulation {
             dt,
             time: self.time,
             emitter_age: state.age,
+            owner_velocity: self.owner_velocity,
+            sub_image_frames: emitter.sub_image_frames(),
         };
         let key = |stage: u32, module: usize, particle: u32, frame: u32| RandKey {
             seed: self.seed,
@@ -359,7 +383,11 @@ fn read_param(r: ParamRef, env: &Env, p: Option<&Particle>) -> Value {
             .get(r.index as usize)
             .copied()
             .unwrap_or(Value::Float(0.0)),
-        Namespace::Engine => Value::Float(if r.index == 0 { env.dt } else { env.time }),
+        Namespace::Engine => match r.index {
+            0 => Value::Float(env.dt),
+            1 => Value::Float(env.time),
+            _ => Value::Vec3(env.owner_velocity.to_array()),
+        },
         Namespace::System => Value::Float(env.time),
         Namespace::Emitter => Value::Float(env.emitter_age),
         Namespace::Particles => p.map_or(Value::Float(0.0), |p| p.get(r.index)),
@@ -448,6 +476,138 @@ pub fn quat_normalize(q: Quat) -> Quat {
     }
 }
 
+/// Largest normalized age the flipbook reads, so the last frame is shown at
+/// the end of life instead of wrapping to the first (as the renderer does).
+pub const SUB_UV_LAST: f32 = 0.99999;
+
+/// `(1 - dist / radius) ^ exponent`, for `0 <= dist < radius`.
+fn falloff(dist: f32, radius: f32, exponent: f32) -> f32 {
+    (1.0 - dist / radius).powf(exponent)
+}
+
+/// `v` normalised, or +Y if it has no direction.
+fn unit_or_y(v: Vec3) -> Vec3 {
+    let rl = 1.0 / v.length();
+    if rl > 0.0 && rl <= f32::MAX {
+        v * rl
+    } else {
+        Vec3::Y
+    }
+}
+
+/// For offset `r` from a point on unit `axis`: the unit direction around the
+/// axis (counter-clockwise seen from its tip) and the unit direction towards
+/// it; both zero on the axis.
+fn vortex_dirs(axis: Vec3, r: Vec3) -> (Vec3, Vec3) {
+    let radial = r - axis * axis.dot(r);
+    let len = radial.length();
+    if len > 0.0 {
+        let out = radial / len;
+        (axis.cross(out), -out)
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    }
+}
+
+/// `clamp(|velocity| / threshold, 0, 1)`; 1 when the threshold is not positive.
+fn speed_fraction(velocity: Vec3, threshold: f32) -> f32 {
+    if threshold > 0.0 {
+        (velocity.length() / threshold).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Shape Location's size inputs.
+pub struct ShapeInputs {
+    pub surface: bool,
+    pub sphere_radius: f32,
+    pub box_size: Vec3,
+    pub cylinder_height: f32,
+    pub cylinder_radius: f32,
+    pub large_radius: f32,
+    pub handle_radius: f32,
+    pub cone_length: f32,
+    pub cone_angle: f32,
+    pub ring_radius: f32,
+    pub disc_coverage: f32,
+}
+
+/// A point of shape `primitive` (Shape Location's "Shape Primitive" index)
+/// from five uniform draws `u`, uniform over the volume (or surface). Radial
+/// draws use `1 - u`, which is never 0, so roots and powers stay defined on
+/// the GPU. `shape_point` in `fx_gpu`'s `sim_common.wgsl` is the same code.
+pub fn shape_point(primitive: i32, s: &ShapeInputs, u: [f32; 5]) -> Vec3 {
+    const TAU: f32 = std::f32::consts::TAU;
+    let around = |r: f32, phi: f32, y: f32| Vec3::new(r * phi.cos(), y, r * phi.sin());
+    match primitive {
+        // Box: a face chosen by area, then a point on it.
+        1 => {
+            let size = s.box_size;
+            let mut p = Vec3::new(u[0] - 0.5, u[1] - 0.5, u[2] - 0.5) * size;
+            if s.surface {
+                let (ax, ay) = (size.y * size.z, size.x * size.z);
+                let t = u[3] * (ax + ay + size.x * size.y);
+                let side = if u[4] < 0.5 { -0.5 } else { 0.5 };
+                if t < ax {
+                    p.x = side * size.x;
+                } else if t < ax + ay {
+                    p.y = side * size.y;
+                } else {
+                    p.z = side * size.z;
+                }
+            }
+            p
+        }
+        // Cylinder around Y, centred; Surface Only = the side wall.
+        2 => {
+            let r = if s.surface { 1.0 } else { (1.0 - u[1]).sqrt() };
+            around(
+                s.cylinder_radius * r,
+                TAU * u[0],
+                (u[2] - 0.5) * s.cylinder_height,
+            )
+        }
+        // Torus around Y: the tube's cross-section sampled as a disc.
+        3 => {
+            let theta = TAU * u[0];
+            let psi = TAU * u[1];
+            let rho = s.handle_radius * if s.surface { 1.0 } else { (1.0 - u[2]).sqrt() };
+            around(s.large_radius + rho * psi.cos(), theta, rho * psi.sin())
+        }
+        // Cone: apex at the origin, opening along +Y.
+        4 => {
+            let h = s.cone_length
+                * if s.surface {
+                    (1.0 - u[0]).sqrt()
+                } else {
+                    (1.0 - u[0]).powf(1.0 / 3.0)
+                };
+            let r = h
+                * (s.cone_angle.clamp(0.0, 89.9) * DEGREES).tan()
+                * if s.surface { 1.0 } else { (1.0 - u[1]).sqrt() };
+            around(r, TAU * u[2], h)
+        }
+        // Ring in the XZ plane; Disc Coverage fills it inwards, uniform by area.
+        5 => around(
+            s.ring_radius * (1.0 - s.disc_coverage.clamp(0.0, 1.0) * u[1]).sqrt(),
+            TAU * u[0],
+            0.0,
+        ),
+        // Sphere.
+        _ => {
+            let y = 1.0 - 2.0 * u[0];
+            let phi = TAU * u[1];
+            let ring = (1.0 - y * y).max(0.0).sqrt();
+            let r = s.sphere_radius * if s.surface { 1.0 } else { (1.0 - u[2]).powf(1.0 / 3.0) };
+            Vec3::new(ring * phi.cos(), y, ring * phi.sin()) * r
+        }
+    }
+}
+
+/// Radians per degree.
+const DEGREES: f32 = std::f32::consts::PI / 180.0;
+
 fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandKey) {
     let Some(kind) = modules::from_id(m.module) else {
         return;
@@ -528,12 +688,14 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
         }
         ModuleKind::InitializeRibbon => {
             p.ribbon_width = input(0, p).as_f32();
+            p.initial_ribbon_width = p.ribbon_width;
             p.ribbon_twist = input(1, p).as_f32();
             p.ribbon_id = input(2, p).as_i32();
             p.ribbon_link_order = input(3, p).as_f32();
         }
         ModuleKind::InitializeMesh => {
             p.scale = input(0, p).as_vec3();
+            p.initial_scale = p.scale;
             p.mesh_orientation = euler_quat(input(1, p).as_vec3());
         }
         ModuleKind::UpdateMeshOrientation => {
@@ -546,6 +708,139 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
         }
         ModuleKind::DynamicMaterialParameters => {
             p.dynamic_material_parameter = input(0, p).as_vec4();
+        }
+        ModuleKind::PointAttractionForce => {
+            let center = input(0, p).as_vec3();
+            let strength = input(1, p).as_f32();
+            let radius = input(2, p).as_f32();
+            let exponent = input(3, p).as_f32();
+            let kill = input(4, p).as_f32();
+            let d = center - p.position;
+            let dist = d.length();
+            if dist < kill {
+                p.alive = false;
+            }
+            if dist > 0.0 && dist < radius {
+                p.force += d * (strength * falloff(dist, radius, exponent) / dist);
+            }
+        }
+        ModuleKind::VortexVelocity => {
+            let axis = unit_or_y(input(0, p).as_vec3());
+            let origin = input(1, p).as_vec3();
+            let amount = input(2, p).as_f32();
+            let (tangent, _) = vortex_dirs(axis, p.position - origin);
+            p.velocity += tangent * amount;
+        }
+        ModuleKind::VortexForce => {
+            let axis = unit_or_y(input(0, p).as_vec3());
+            let origin = input(1, p).as_vec3();
+            let amount = input(2, p).as_f32();
+            let pull = input(3, p).as_f32();
+            let (tangent, inward) = vortex_dirs(axis, p.position - origin);
+            p.force += tangent * amount + inward * pull;
+        }
+        ModuleKind::WindForce => {
+            let wind = input(0, p).as_vec3();
+            let speed = input(1, p).as_f32();
+            let resistance = input(2, p).as_f32();
+            p.force += (wind * speed - p.velocity) * resistance;
+        }
+        ModuleKind::LinearForce => {
+            p.force += input(0, p).as_vec3();
+        }
+        ModuleKind::LimitForce => {
+            let limit = input(0, p).as_f32().max(0.0);
+            let len = p.force.length();
+            if len > limit {
+                p.force *= limit / len;
+            }
+        }
+        ModuleKind::AccelerationForce => {
+            p.force += input(0, p).as_vec3() * p.mass;
+        }
+        ModuleKind::PointForce => {
+            let center = input(0, p).as_vec3();
+            let strength = input(1, p).as_f32();
+            let radius = input(2, p).as_f32();
+            let exponent = input(3, p).as_f32();
+            let d = p.position - center;
+            let dist = d.length();
+            if dist > 0.0 && dist < radius {
+                p.force += d * (strength * falloff(dist, radius, exponent) / dist);
+            }
+        }
+        ModuleKind::InheritVelocity => {
+            p.velocity += env.owner_velocity * input(0, p).as_f32();
+        }
+        ModuleKind::ShapeLocation => {
+            let s = ShapeInputs {
+                surface: input(1, p).as_bool(),
+                sphere_radius: input(3, p).as_f32(),
+                box_size: input(4, p).as_vec3(),
+                cylinder_height: input(5, p).as_f32(),
+                cylinder_radius: input(6, p).as_f32(),
+                large_radius: input(7, p).as_f32(),
+                handle_radius: input(8, p).as_f32(),
+                cone_length: input(9, p).as_f32(),
+                cone_angle: input(10, p).as_f32(),
+                ring_radius: input(11, p).as_f32(),
+                disc_coverage: input(12, p).as_f32(),
+            };
+            let u: [f32; 5] = std::array::from_fn(|k| key.unit(128 + k as u32));
+            p.position = input(2, p).as_vec3() + shape_point(input(0, p).as_i32(), &s, u);
+        }
+        ModuleKind::InitialMeshOrientation => {
+            p.mesh_orientation = euler_quat(input(0, p).as_vec3());
+        }
+        ModuleKind::SpriteRotationRate => {
+            p.sprite_rotation += input(0, p).as_f32() * env.dt;
+        }
+        ModuleKind::SubUvAnimation => {
+            let n = input(1, p).as_i32();
+            let frames = if n > 0 { n as f32 } else { env.sub_image_frames as f32 };
+            let start = input(2, p).as_i32() as f32;
+            let f = match input(0, p).as_i32() {
+                // One draw per particle: the key ignores the step.
+                1 => (RandKey { frame: 0, ..key }.unit(128) * frames).floor(),
+                2 => {
+                    let x = p.age * input(3, p).as_f32();
+                    x - frames * (x / frames).floor()
+                }
+                _ => p.normalized_age.clamp(0.0, SUB_UV_LAST) * frames,
+            };
+            p.sub_image_index = start + f;
+        }
+        ModuleKind::ScaleMeshSize => {
+            p.scale = p.initial_scale * input(0, p).as_vec3();
+        }
+        ModuleKind::ScaleRibbonWidth => {
+            p.ribbon_width = p.initial_ribbon_width * input(0, p).as_f32();
+        }
+        ModuleKind::Color => {
+            p.color = input(0, p).as_vec4();
+        }
+        ModuleKind::ScaleColorBySpeed => {
+            let t = speed_fraction(p.velocity, input(0, p).as_f32());
+            let (lo, hi) = (input(1, p).as_vec4(), input(2, p).as_vec4());
+            p.color = p.initial_color * (lo + (hi - lo) * t);
+        }
+        ModuleKind::ScaleSpriteSizeBySpeed => {
+            let t = speed_fraction(p.velocity, input(0, p).as_f32());
+            let (lo, hi) = (input(1, p).as_vec2(), input(2, p).as_vec2());
+            p.sprite_size = p.initial_sprite_size * (lo + (hi - lo) * t);
+        }
+        ModuleKind::KillParticlesInVolume => {
+            let d = p.position - input(1, p).as_vec3();
+            let inside = if input(0, p).as_i32() == 1 {
+                let h = input(3, p).as_vec3() * 0.5;
+                d.x.abs() < h.x && d.y.abs() < h.y && d.z.abs() < h.z
+            } else {
+                let r = input(2, p).as_f32();
+                d.dot(d) < r * r
+            };
+            if inside != input(4, p).as_bool() {
+                p.alive = false;
+            }
         }
         ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
     }
