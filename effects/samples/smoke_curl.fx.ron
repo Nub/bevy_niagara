@@ -1,0 +1,46 @@
+// Smoke-like curl: slow, buoyant puffs that swirl in a panning curl-noise
+// field, grow and fade.
+(
+    name: "Smoke Curl",
+    user_parameters: {
+        "User.Turbulence": Float(1.5),
+    },
+    emitters: [
+        (
+            name: "Puffs",
+            sim_target: Gpu,
+            max_particles: 500,
+            emitter_update: [
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Float(40.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(3.0), Float(5.0)),
+                    "Position": RandomRange(Vec3((-0.2, 0.0, -0.2)), Vec3((0.2, 0.1, 0.2))),
+                    "Color": Color((0.35, 0.35, 0.38, 0.6)),
+                    "Sprite Size": RandomRange(Vec2((0.3, 0.3)), Vec2((0.5, 0.5))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-0.1, 0.4, -0.1)), Vec3((0.1, 0.7, 0.1))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                // Buoyancy: a weak upward pull instead of gravity.
+                (module: "Gravity Force", inputs: { "Gravity": Vec3((0.0, 0.3, 0.0)) }),
+                (module: "Curl Noise Force", inputs: {
+                    "Noise Strength": Link(Float, "User.Turbulence"),
+                    "Noise Frequency": Float(0.8),
+                    "Noise Offset": Vec3((0.0, -0.5, 0.0)),
+                }),
+                (module: "Drag", inputs: { "Drag": Float(0.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (2.5, 2.5))])),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+        ),
+    ],
+)

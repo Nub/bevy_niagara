@@ -1,0 +1,11 @@
+// expect: 7: `CurveOverAge` samples Particles.NormalizedAge
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [
+            (module: "Spawn Rate", inputs: { "Spawn Rate": CurveOverAge(Float([(0.0, 10.0), (1.0, 0.0)])) }),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)

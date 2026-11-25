@@ -1,0 +1,11 @@
+// expect: 7: user parameter "User.Rate" is not declared
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [
+            (module: "Spawn Rate", inputs: { "Spawn Rate": Link(Float, "User.Rate") }),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)

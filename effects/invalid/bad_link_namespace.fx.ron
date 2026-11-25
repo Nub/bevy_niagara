@@ -1,0 +1,14 @@
+// expect: 10: "Wind" does not start with a parameter namespace
+(
+    name: "Broken",
+    user_parameters: { "User.Wind": Vec3((1.0, 0.0, 0.0)) },
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Gravity Force", inputs: { "Gravity": Link(Vec3, "Wind") }),
+            (module: "Solve Forces and Velocity"),
+        ],
+    )],
+)

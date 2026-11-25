@@ -1,0 +1,11 @@
+// expect: 7: `emitter_update` cannot read Particles. parameters
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [
+            (module: "Spawn Rate", inputs: { "Spawn Rate": Link(Float, "Particles.Age") }),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)

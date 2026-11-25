@@ -1,0 +1,11 @@
+// expect: 7: unknown module "Spawn Rat"
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [
+            (module: "Spawn Rat", inputs: { "Spawn Rate": Float(10.0) }),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)

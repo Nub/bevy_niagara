@@ -1,0 +1,675 @@
+//! Turns the parsed RON tree into the effect model, reporting shape errors
+//! (wrong value kinds, unknown or missing fields) at their line.
+
+use crate::diag::{Diags, suggest};
+use crate::model::*;
+use crate::ron_parse::{Field, SKind, SValue};
+use crate::types::{Curve, Value, ValueType};
+
+pub const SYSTEM_FIELDS: &[&str] = &[
+    "name",
+    "user_parameters",
+    "system_spawn",
+    "system_update",
+    "emitters",
+];
+pub const EMITTER_FIELDS: &[&str] = &[
+    "name",
+    "sim_target",
+    "max_particles",
+    "emitter_spawn",
+    "emitter_update",
+    "particle_spawn",
+    "particle_update",
+    "event_handlers",
+];
+pub const MODULE_FIELDS: &[&str] = &["module", "enabled", "inputs"];
+
+const DEFAULT_MAX_PARTICLES: u32 = 1000;
+
+pub fn decode_system(v: &SValue, d: &mut Diags) -> Option<SystemSource> {
+    let mut f = Fields::new(v, "the effect", SYSTEM_FIELDS, d)?;
+    let name = f.required_string("name", d).unwrap_or_default();
+    let user_parameters = f
+        .take("user_parameters")
+        .map(|v| decode_params(v, d))
+        .unwrap_or_default();
+    let system_spawn = f
+        .take("system_spawn")
+        .map(|v| decode_stack(v, d))
+        .unwrap_or_default();
+    let system_update = f
+        .take("system_update")
+        .map(|v| decode_stack(v, d))
+        .unwrap_or_default();
+    let emitters = match f.take("emitters") {
+        Some(v) => list(v, "`emitters`", d)
+            .iter()
+            .filter_map(|e| decode_emitter(e, d))
+            .collect(),
+        None => Vec::new(),
+    };
+    f.finish(d);
+    Some(SystemSource {
+        name,
+        user_parameters,
+        system_spawn,
+        system_update,
+        emitters,
+        span: v.span,
+    })
+}
+
+fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
+    let mut f = Fields::new(v, "an emitter", EMITTER_FIELDS, d)?;
+    let name = f.required_string("name", d).unwrap_or_default();
+    let sim_target = match f.take("sim_target") {
+        None => SimTarget::default(),
+        Some(SValue {
+            kind: SKind::Ident(i),
+            ..
+        }) if i == "Gpu" => SimTarget::Gpu,
+        Some(SValue {
+            kind: SKind::Ident(i),
+            ..
+        }) if i == "Cpu" => SimTarget::Cpu,
+        Some(other) => {
+            d.error(
+                other.span,
+                format!(
+                    "`sim_target` must be `Gpu` or `Cpu`, found {}",
+                    other.kind.describe()
+                ),
+                Some("write `sim_target: Gpu` (the default) or `sim_target: Cpu`".into()),
+            );
+            SimTarget::default()
+        }
+    };
+    let max_particles = match f.take("max_particles") {
+        None => DEFAULT_MAX_PARTICLES,
+        Some(SValue {
+            kind: SKind::Number(n, true),
+            ..
+        }) if *n >= 1.0 && *n <= u32::MAX as f64 => *n as u32,
+        Some(other) => {
+            d.error(
+                other.span,
+                format!(
+                    "`max_particles` must be a whole number of at least 1, found {}",
+                    other.kind.describe()
+                ),
+                Some(format!(
+                    "write e.g. `max_particles: {DEFAULT_MAX_PARTICLES}`"
+                )),
+            );
+            DEFAULT_MAX_PARTICLES
+        }
+    };
+    let mut stack =
+        |name: &str, d: &mut Diags| f.take(name).map(|v| decode_stack(v, d)).unwrap_or_default();
+    let emitter_spawn = stack("emitter_spawn", d);
+    let emitter_update = stack("emitter_update", d);
+    let particle_spawn = stack("particle_spawn", d);
+    let particle_update = stack("particle_update", d);
+    if let Some(ev) = f.take("event_handlers")
+        && !matches!(&ev.kind, SKind::List(l) if l.is_empty())
+    {
+        d.error(
+            ev.span,
+            "event handlers are not supported yet",
+            Some("remove `event_handlers` (or leave it as `[]`)".into()),
+        );
+    }
+    f.finish(d);
+    Some(EmitterSource {
+        name,
+        sim_target,
+        max_particles,
+        emitter_spawn,
+        emitter_update,
+        particle_spawn,
+        particle_update,
+        span: v.span,
+    })
+}
+
+fn decode_stack(v: &SValue, d: &mut Diags) -> Vec<ModuleCall> {
+    list(v, "a stage", d)
+        .iter()
+        .filter_map(|m| decode_module(m, d))
+        .collect()
+}
+
+fn decode_module(v: &SValue, d: &mut Diags) -> Option<ModuleCall> {
+    let mut f = Fields::new(v, "a module call", MODULE_FIELDS, d)?;
+    let module = f.required_string("module", d)?;
+    let enabled = match f.take("enabled") {
+        None => true,
+        Some(SValue {
+            kind: SKind::Bool(b),
+            ..
+        }) => *b,
+        Some(other) => {
+            d.error(
+                other.span,
+                format!(
+                    "`enabled` must be `true` or `false`, found {}",
+                    other.kind.describe()
+                ),
+                None,
+            );
+            true
+        }
+    };
+    let mut inputs = InputMap::default();
+    if let Some(m) = f.take("inputs") {
+        for (k, val) in map(m, "`inputs`", d) {
+            let Some(name) = key_string(k, d) else {
+                continue;
+            };
+            if inputs.0.iter().any(|e| e.name == name) {
+                d.error(
+                    k.span,
+                    format!("input \"{name}\" is set twice in this module"),
+                    Some("keep one of the two entries".into()),
+                );
+                continue;
+            }
+            if let Some(input) = decode_input(val, &name, d) {
+                inputs.0.push(InputEntry {
+                    name,
+                    input,
+                    span: k.span,
+                });
+            }
+        }
+    }
+    f.finish(d);
+    // Point module diagnostics at the module name, not the opening bracket.
+    let span = match &v.kind {
+        SKind::Struct(_, fields) => fields
+            .iter()
+            .find(|f| f.name == "module")
+            .map_or(v.span, |f| f.value.span),
+        _ => v.span,
+    };
+    Some(ModuleCall {
+        module,
+        enabled,
+        inputs,
+        span,
+    })
+}
+
+fn decode_params(v: &SValue, d: &mut Diags) -> ParamMap {
+    let mut out = ParamMap::default();
+    for (k, val) in map(v, "`user_parameters`", d) {
+        let Some(name) = key_string(k, d) else {
+            continue;
+        };
+        match decode_input(val, &name, d) {
+            Some(Input::Literal(value)) => out.0.push(ParamEntry { name, value, span: k.span }),
+            Some(_) => d.error(
+                val.span,
+                format!("user parameter \"{name}\" must have a literal default value"),
+                Some("write a typed literal such as `Float(1.0)`; links, random ranges and curves go in module inputs".into()),
+            ),
+            None => {}
+        }
+    }
+    out
+}
+
+const INPUT_FORMS: &str = "an input is a typed literal (`Float(1.0)`, `Int(5)`, `Bool(true)`, `Vec2((x, y))`, `Vec3((x, y, z))`, `Vec4((x, y, z, w))`, `Color((r, g, b, a))`, `Quat((x, y, z, w))`), `Link(Type, \"Namespace.Name\")`, `RandomRange(min, max)` or `CurveOverAge(Type([(time, value), ...]))`";
+
+fn decode_input(v: &SValue, name: &str, d: &mut Diags) -> Option<Input> {
+    match &v.kind {
+        SKind::Tuple(Some(tag), items) => {
+            match tag.as_str() {
+                "Link" => {
+                    let [
+                        SValue {
+                            kind: SKind::Ident(ty),
+                            span: ty_span,
+                        },
+                        SValue {
+                            kind: SKind::Str(target),
+                            ..
+                        },
+                    ] = items.as_slice()
+                    else {
+                        d.error(
+                            v.span,
+                            format!(
+                                "`Link` for \"{name}\" must be `Link(Type, \"Namespace.Name\")`"
+                            ),
+                            Some("e.g. `Link(Vec3, \"User.Wind\")`".into()),
+                        );
+                        return None;
+                    };
+                    let Some(t) = ValueType::from_name(ty) else {
+                        d.error(
+                            *ty_span,
+                            format!("unknown type `{ty}`"),
+                            Some(type_help(ty)),
+                        );
+                        return None;
+                    };
+                    Some(Input::Link(t, target.clone()))
+                }
+                "RandomRange" => {
+                    let [a, b] = items.as_slice() else {
+                        d.error(v.span, format!("`RandomRange` for \"{name}\" takes two values: `RandomRange(min, max)`"), Some("e.g. `RandomRange(Float(1.0), Float(2.0))`".into()));
+                        return None;
+                    };
+                    let a = decode_literal(a, d)?;
+                    let b = decode_literal(b, d)?;
+                    Some(Input::RandomRange(a, b))
+                }
+                "CurveOverAge" => {
+                    let [c] = items.as_slice() else {
+                        d.error(
+                            v.span,
+                            format!("`CurveOverAge` for \"{name}\" takes one curve"),
+                            Some("e.g. `CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)]))`".into()),
+                        );
+                        return None;
+                    };
+                    decode_curve(c, d).map(Input::CurveOverAge)
+                }
+                _ => decode_literal(v, d).map(Input::Literal),
+            }
+        }
+        SKind::Number(..) => {
+            d.error(
+                v.span,
+                format!("input \"{name}\" must state its type, found a bare number"),
+                Some(format!(
+                    "wrap it in its type, e.g. `Float({})` or `Int(...)`",
+                    fmt_num(v)
+                )),
+            );
+            None
+        }
+        _ => {
+            d.error(
+                v.span,
+                format!(
+                    "input \"{name}\" has an invalid value: found {}",
+                    v.kind.describe()
+                ),
+                Some(INPUT_FORMS.into()),
+            );
+            None
+        }
+    }
+}
+
+fn fmt_num(v: &SValue) -> String {
+    match v.kind {
+        SKind::Number(n, _) if n.fract() == 0.0 => format!("{n:.1}"),
+        SKind::Number(n, _) => format!("{n}"),
+        _ => "1.0".into(),
+    }
+}
+
+fn type_help(ty: &str) -> String {
+    let names: Vec<_> = ValueType::ALL.iter().map(|t| t.name()).collect();
+    match suggest(ty, names.iter().copied()) {
+        Some(s) => format!("did you mean `{s}`? Types are: {}", names.join(", ")),
+        None => format!(
+            "types are: {} (`Color` is Niagara's Linear Color, `Vec3` its Vector)",
+            names.join(", ")
+        ),
+    }
+}
+
+pub fn decode_literal(v: &SValue, d: &mut Diags) -> Option<Value> {
+    let SKind::Tuple(Some(tag), items) = &v.kind else {
+        d.error(
+            v.span,
+            format!("expected a typed literal, found {}", v.kind.describe()),
+            Some("e.g. `Float(1.0)` or `Vec3((0.0, 1.0, 0.0))`".into()),
+        );
+        return None;
+    };
+    let Some(ty) = ValueType::from_name(tag) else {
+        d.error(
+            v.span,
+            format!("unknown type or input form `{tag}`"),
+            Some(format!("{}. {INPUT_FORMS}", type_help(tag))),
+        );
+        return None;
+    };
+    let example = ty.example();
+    match ty {
+        ValueType::Bool => match items.as_slice() {
+            [
+                SValue {
+                    kind: SKind::Bool(b),
+                    ..
+                },
+            ] => Some(Value::Bool(*b)),
+            _ => {
+                d.error(
+                    v.span,
+                    "`Bool` takes `true` or `false`",
+                    Some(format!("write `{example}`")),
+                );
+                None
+            }
+        },
+        ValueType::Int => match items.as_slice() {
+            [
+                SValue {
+                    kind: SKind::Number(n, true),
+                    ..
+                },
+            ] if n.abs() <= i32::MAX as f64 => Some(Value::Int(*n as i32)),
+            [
+                SValue {
+                    kind: SKind::Number(n, false),
+                    span,
+                },
+            ] => {
+                d.error(
+                    *span,
+                    format!("`Int` needs a whole number, found {n}"),
+                    Some(format!("write `Int({})` or use a `Float` input", n.round())),
+                );
+                None
+            }
+            _ => {
+                d.error(
+                    v.span,
+                    "`Int` takes one whole number",
+                    Some(format!("write `{example}`")),
+                );
+                None
+            }
+        },
+        _ => {
+            let n = ty.components();
+            let nums: &[SValue] = match items.as_slice() {
+                [
+                    SValue {
+                        kind: SKind::Tuple(None, inner) | SKind::List(inner),
+                        ..
+                    },
+                ] if n > 1 => inner,
+                other => other,
+            };
+            if nums.len() != n {
+                d.error(
+                    v.span,
+                    format!(
+                        "`{tag}` needs {n} number{}, found {}",
+                        if n == 1 { "" } else { "s" },
+                        nums.len()
+                    ),
+                    Some(format!("write `{example}`")),
+                );
+                return None;
+            }
+            let mut a = [0.0f32; 4];
+            for (i, x) in nums.iter().enumerate() {
+                a[i] = number(x, d)?;
+            }
+            Some(Value::from_array(ty, a))
+        }
+    }
+}
+
+fn number(v: &SValue, d: &mut Diags) -> Option<f32> {
+    match v.kind {
+        SKind::Number(n, _) => Some(n as f32),
+        _ => {
+            d.error(
+                v.span,
+                format!("expected a number, found {}", v.kind.describe()),
+                None,
+            );
+            None
+        }
+    }
+}
+
+fn decode_curve(v: &SValue, d: &mut Diags) -> Option<Curve> {
+    let help = "write a curve as `Type([(time, value), ...])`, e.g. `Float([(0.0, 1.0), (1.0, 0.0)])` or `Color([(0.0, (1.0, 1.0, 1.0, 1.0)), (1.0, (1.0, 1.0, 1.0, 0.0))])`";
+    let SKind::Tuple(Some(tag), items) = &v.kind else {
+        d.error(
+            v.span,
+            format!("expected a curve, found {}", v.kind.describe()),
+            Some(help.into()),
+        );
+        return None;
+    };
+    let ty = match ValueType::from_name(tag) {
+        Some(t) if t.interpolable() => t,
+        _ => {
+            d.error(
+                v.span,
+                format!("`{tag}` is not a curve type"),
+                Some(format!(
+                    "curve types are Float, Vec2, Vec3, Vec4 and Color; {help}"
+                )),
+            );
+            return None;
+        }
+    };
+    let [
+        SValue {
+            kind: SKind::List(keys),
+            ..
+        },
+    ] = items.as_slice()
+    else {
+        d.error(v.span, "a curve holds one list of keys", Some(help.into()));
+        return None;
+    };
+    let mut out: Vec<(f32, [f32; 4])> = Vec::new();
+    for k in keys {
+        let SKind::Tuple(None, kv) = &k.kind else {
+            d.error(
+                k.span,
+                format!(
+                    "a curve key is `(time, value)`, found {}",
+                    k.kind.describe()
+                ),
+                Some(help.into()),
+            );
+            return None;
+        };
+        let [t, val] = kv.as_slice() else {
+            d.error(k.span, "a curve key is `(time, value)`", Some(help.into()));
+            return None;
+        };
+        let t = number(t, d)?;
+        let n = ty.components();
+        let comps: Vec<&SValue> = match &val.kind {
+            SKind::Tuple(None, inner) | SKind::List(inner) => inner.iter().collect(),
+            _ => vec![val],
+        };
+        if comps.len() != n {
+            d.error(
+                val.span,
+                format!(
+                    "a {} curve key value needs {n} number{}, found {}",
+                    ty.name(),
+                    if n == 1 { "" } else { "s" },
+                    comps.len()
+                ),
+                Some(help.into()),
+            );
+            return None;
+        }
+        let mut a = [0.0f32; 4];
+        for (i, c) in comps.iter().enumerate() {
+            a[i] = number(c, d)?;
+        }
+        out.push((t, a));
+    }
+    Some(match ty {
+        ValueType::Float => Curve::Float(out.iter().map(|(t, a)| (*t, a[0])).collect()),
+        ValueType::Vec2 => Curve::Vec2(out.iter().map(|(t, a)| (*t, [a[0], a[1]])).collect()),
+        ValueType::Vec3 => Curve::Vec3(out.iter().map(|(t, a)| (*t, [a[0], a[1], a[2]])).collect()),
+        ValueType::Vec4 => Curve::Vec4(out),
+        _ => Curve::Color(out),
+    })
+}
+
+fn key_string(k: &SValue, d: &mut Diags) -> Option<String> {
+    match &k.kind {
+        SKind::Str(s) => Some(s.clone()),
+        other => {
+            d.error(
+                k.span,
+                format!(
+                    "map keys must be \"quoted strings\", found {}",
+                    other.describe()
+                ),
+                None,
+            );
+            None
+        }
+    }
+}
+
+fn list<'a>(v: &'a SValue, what: &str, d: &mut Diags) -> &'a [SValue] {
+    match &v.kind {
+        SKind::List(items) => items,
+        other => {
+            d.error(
+                v.span,
+                format!("{what} must be a list `[...]`, found {}", other.describe()),
+                None,
+            );
+            &[]
+        }
+    }
+}
+
+fn map<'a>(v: &'a SValue, what: &str, d: &mut Diags) -> &'a [(SValue, SValue)] {
+    match &v.kind {
+        SKind::Map(items) => items,
+        // `{}` and `()`-style empties are common slips; accept an empty tuple as an empty map.
+        SKind::Tuple(None, items) if items.is_empty() => &[],
+        other => {
+            d.error(
+                v.span,
+                format!(
+                    "{what} must be a map `{{ \"Name\": value, ... }}`, found {}",
+                    other.describe()
+                ),
+                None,
+            );
+            &[]
+        }
+    }
+}
+
+/// Field access for a struct value, tracking which fields were used.
+struct Fields<'a> {
+    fields: &'a [Field],
+    used: Vec<bool>,
+    what: &'static str,
+    allowed: &'static [&'static str],
+    span: crate::model::Span,
+}
+
+impl<'a> Fields<'a> {
+    fn new(
+        v: &'a SValue,
+        what: &'static str,
+        allowed: &'static [&'static str],
+        d: &mut Diags,
+    ) -> Option<Self> {
+        let fields: &[Field] = match &v.kind {
+            SKind::Struct(_, f) => f,
+            SKind::Tuple(_, items) if items.is_empty() => &[],
+            other => {
+                d.error(
+                    v.span,
+                    format!(
+                        "{what} must be a struct `( field: value, ... )`, found {}",
+                        other.describe()
+                    ),
+                    Some(format!("its fields are: {}", allowed.join(", "))),
+                );
+                return None;
+            }
+        };
+        let mut used = vec![false; fields.len()];
+        for (i, f) in fields.iter().enumerate() {
+            if fields[..i].iter().any(|g| g.name == f.name) {
+                d.error(
+                    f.span,
+                    format!("field `{}` appears twice in {what}", f.name),
+                    Some("keep one of the two".into()),
+                );
+                used[i] = true;
+            }
+        }
+        Some(Fields {
+            fields,
+            used,
+            what,
+            allowed,
+            span: v.span,
+        })
+    }
+
+    fn take(&mut self, name: &str) -> Option<&'a SValue> {
+        let i = self.fields.iter().position(|f| f.name == name)?;
+        self.used[i] = true;
+        Some(&self.fields[i].value)
+    }
+
+    fn required_string(&mut self, name: &str, d: &mut Diags) -> Option<String> {
+        match self.take(name) {
+            Some(SValue {
+                kind: SKind::Str(s),
+                ..
+            }) => Some(s.clone()),
+            Some(other) => {
+                d.error(
+                    other.span,
+                    format!(
+                        "`{name}` must be a \"quoted string\", found {}",
+                        other.kind.describe()
+                    ),
+                    None,
+                );
+                None
+            }
+            None => {
+                d.error(
+                    self.span,
+                    format!("{} is missing the `{name}` field", self.what),
+                    Some(format!("add `{name}: \"...\",`")),
+                );
+                None
+            }
+        }
+    }
+
+    fn finish(self, d: &mut Diags) {
+        for (f, used) in self.fields.iter().zip(&self.used) {
+            if !used {
+                let help = match suggest(&f.name, self.allowed.iter().copied()) {
+                    Some(s) => format!(
+                        "did you mean `{s}`? Fields of {} are: {}",
+                        self.what,
+                        self.allowed.join(", ")
+                    ),
+                    None => format!("fields of {} are: {}", self.what, self.allowed.join(", ")),
+                };
+                d.error(
+                    f.span,
+                    format!("unknown field `{}` in {}", f.name, self.what),
+                    Some(help),
+                );
+            }
+        }
+    }
+}

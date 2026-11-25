@@ -1,0 +1,18 @@
+[package]
+name = "fx_core"
+description = "Effect model, .fx.ron source format, validator, cooker and CPU reference simulation"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy_math.workspace = true
+rkyv.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+ron.workspace = true
+
+[[bin]]
+name = "fxc"
+path = "src/bin/fxc.rs"

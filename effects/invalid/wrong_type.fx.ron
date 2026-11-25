@@ -1,0 +1,13 @@
+// expect: 8: input "Spawn Rate" of "Spawn Rate" is Float, but the value given is Vec3
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [
+            (module: "Spawn Rate", inputs: {
+                "Spawn Rate": Vec3((1.0, 2.0, 3.0)),
+            }),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)

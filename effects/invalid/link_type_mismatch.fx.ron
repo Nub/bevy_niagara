@@ -1,0 +1,13 @@
+// expect: 9: "User.Gravity" is Float, but the link says Vec3
+(
+    name: "Broken",
+    user_parameters: { "User.Gravity": Float(9.81) },
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_update: [(module: "Particle State"),
+            (module: "Gravity Force", inputs: { "Gravity": Link(Vec3, "User.Gravity") }),
+            (module: "Solve Forces and Velocity"),
+        ],
+    )],
+)

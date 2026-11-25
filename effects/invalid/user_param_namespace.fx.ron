@@ -1,0 +1,12 @@
+// expect: 5: user parameter "Emitter.Rate" must be in the User namespace
+(
+    name: "Broken",
+    user_parameters: {
+        "Emitter.Rate": Float(10.0),
+    },
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_update: [(module: "Particle State")],
+    )],
+)

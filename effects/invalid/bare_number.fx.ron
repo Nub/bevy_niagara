@@ -1,0 +1,14 @@
+// expect: 9: input "Lifetime" must state its type, found a bare number
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": 2.0,
+            }),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)

@@ -1,0 +1,10 @@
+// expect: 7: syntax error: expected `,` or `)` in struct
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_update: [(module: "Particle State")]
+        max_particles: 100,
+    )],
+)

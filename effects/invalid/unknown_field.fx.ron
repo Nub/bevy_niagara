@@ -1,0 +1,10 @@
+// expect: 8: unknown field `max_particle` in an emitter
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_update: [(module: "Particle State")],
+        max_particle: 100,
+    )],
+)

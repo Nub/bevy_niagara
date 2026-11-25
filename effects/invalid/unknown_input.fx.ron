@@ -1,0 +1,15 @@
+// expect: 10: module "Add Velocity" has no input "Velocty"
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        particle_spawn: [
+            (module: "Initialize Particle"),
+            (module: "Add Velocity", inputs: {
+                "Velocty": Vec3((0.0, 1.0, 0.0)),
+            }),
+        ],
+        particle_update: [(module: "Particle State"), (module: "Solve Forces and Velocity")],
+    )],
+)

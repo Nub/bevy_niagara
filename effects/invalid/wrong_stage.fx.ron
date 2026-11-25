@@ -1,0 +1,14 @@
+// expect: 9: module "Gravity Force" cannot be used in `emitter_update`
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [
+            (module: "Spawn Rate"),
+            (
+                module: "Gravity Force",
+            ),
+        ],
+        particle_update: [(module: "Particle State")],
+    )],
+)
