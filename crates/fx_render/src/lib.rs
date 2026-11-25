@@ -217,6 +217,7 @@ struct BuiltinMeshes(HashMap<&'static str, Handle<Mesh>>);
 
 impl Plugin for FxPlugin {
     fn build(&self, app: &mut App) {
+        load_shader_library!(app, "particle_surface.wesl");
         load_shader_library!(app, "particle_io.wesl");
         embedded_asset!(app, "sprite.wesl");
         embedded_asset!(app, "ribbon.wesl");
@@ -258,11 +259,16 @@ impl Plugin for FxPlugin {
             .add_systems(ExtractSchedule, extract_effects)
             .add_systems(
                 Render,
-                prepare_effects.in_set(RenderSystems::PrepareResources),
+                prepare_effects
+                    .in_set(RenderSystems::PrepareResources)
+                    .in_set(FxRenderSystems::Prepare),
             )
             .add_systems(Render, queue_particles.in_set(RenderSystems::Queue))
             .add_systems(Render, read_lights.in_set(RenderSystems::Cleanup))
-            .add_systems(RenderGraph, simulate.before(camera_driver));
+            .add_systems(
+                RenderGraph,
+                simulate.in_set(FxRenderGraphSystems::Simulate).before(camera_driver),
+            );
     }
 }
 
@@ -725,8 +731,10 @@ struct EffectInstance {
     seen: u64,
 }
 
+/// Render world: the GPU state of every effect. Read it (after
+/// [`FxRenderGraphSystems::Simulate`]) to feed particles to other passes.
 #[derive(Resource)]
-struct FxState {
+pub struct FxState {
     view_pipelines: ViewPipelines,
     ribbon_pipelines: RibbonPipelines,
     light_pipelines: LightPipelines,
@@ -1337,7 +1345,7 @@ fn local_view(view: &ExtractedView, world_from_local: &Mat4) -> ViewParams {
 }
 
 /// View parameters that cull nothing (ribbons).
-const NO_VIEW: ViewParams = ViewParams {
+pub const NO_VIEW: ViewParams = ViewParams {
     planes: [[0.0, 0.0, 0.0, 1.0]; 6],
     camera_position: [0.0; 3],
     camera_forward: [0.0, 0.0, -1.0],
@@ -1516,4 +1524,52 @@ impl<P: PhaseItem> RenderCommand<P> for DrawParticles {
 /// entity (the draw reads nothing from it), but distinct per renderer.
 fn renderer_entity(i: usize) -> Entity {
     Entity::from_raw_u32(u32::MAX - 2 - i as u32).unwrap_or(Entity::PLACEHOLDER)
+}
+
+/// Systems of the `RenderGraph` schedule other plugins order against.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FxRenderGraphSystems {
+    /// Records this frame's simulation steps, culls, ribbon builds and light
+    /// gathers. Particle buffers are final for the frame after it.
+    Simulate,
+}
+
+impl FxState {
+    /// The simulated effect of main-world entity `main` and its
+    /// world-from-local transform this frame.
+    pub fn effect(&self, main: Entity) -> Option<(&GpuEffect, Mat4)> {
+        self.effects
+            .get(&main)
+            .map(|inst| (&inst.gpu, inst.world_from_local))
+    }
+
+    /// The cull/sort pipelines, for an [`fx_gpu::view::ViewDraw`] of one's own.
+    pub fn view_pipelines(&self) -> &ViewPipelines {
+        &self.view_pipelines
+    }
+}
+
+/// The built-in sprite texture (soft round dot, or a puff per flipbook cell
+/// for a `cols` × `rows` grid) as an image, for renderers that name none.
+pub fn builtin_sprite_image(cols: u32, rows: u32) -> Image {
+    use bevy::asset::RenderAssetUsages;
+    let (cols, rows) = (cols.max(1), rows.max(1));
+    Image::new(
+        Extent3d {
+            width: cols * textures::CELL,
+            height: rows * textures::CELL,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        textures::pixels(cols, rows),
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// Systems of the `Render` schedule other plugins order against.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FxRenderSystems {
+    /// Builds and updates the effects' GPU state ([`FxState`]).
+    Prepare,
 }

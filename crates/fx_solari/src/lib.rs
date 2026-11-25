@@ -1,0 +1,645 @@
+//! Particles in Solari ray tracing.
+//!
+//! [`FxSolariPlugin`] (add it after `FxPlugin` and `SolariPlugins`) puts every
+//! sprite renderer with `ray_tracing: true` into Solari's ray-traced scene:
+//!
+//! - **One proxy per emitter, never one instance per particle.** The renderer
+//!   gets a proxy entity: a [`RaytracingMesh3d`] whose mesh has two quads per
+//!   particle slot (up to [`MAX_SLOTS`]). Each frame, after the simulation, a
+//!   compute pass (`proxy.wesl`) writes the living particles' quads (the same
+//!   facing as the raster sprites, via `fx_render::particle_surface`) into
+//!   that mesh's vertices, and Solari's deform pass rebuilds the emitter's one
+//!   BLAS from them; the instance sits in the partitioned TLAS like any other.
+//! - **Same look in reflections.** The proxy's material ([`ParticleRtMaterial`])
+//!   has a Solari hit function (`particle_hit.wesl`) computing the sprite's
+//!   colour and opacity with the raster shader's WGSL from the particle's
+//!   colour and age (a data texture the proxy pass writes) and its texture.
+//! - **Emissive sprites light the scene.** Unlit and additive sprites are
+//!   emissive surfaces, which Solari samples as lights. Light renderers'
+//!   `PointLight`s are Solari lights already.
+//! - **Shadows.** The sprite's opacity cuts the proxy (alpha mask at
+//!   [`ALPHA_CUTOFF`]): shadow rays are blocked where the sprite is opaque.
+//!
+//! Seen directly, particles keep drawing in the raster transparent pass,
+//! which runs after Solari's lighting and is depth tested against its
+//! G-buffer: additive blending stays exact and nothing is stochastic. With
+//! `ray_tracing` off everywhere no proxy exists and Solari does no extra work
+//! beyond compiling the one hit function into its shaders.
+
+use std::sync::Arc;
+
+use bevy::asset::{RenderAssetUsages, embedded_asset, load_embedded_asset};
+use bevy::camera::Exposure;
+use bevy::image::ImageSampler;
+use bevy::math::{Mat4, Vec4};
+use bevy::mesh::{Indices, MeshRaytracingFlags, PrimitiveTopology, morph::MeshMorphWeights};
+use bevy::pbr::{Material, MeshMaterial3d};
+use bevy::platform::collections::{HashMap, HashSet};
+use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
+use bevy::render::mesh::RenderMesh;
+use bevy::render::mesh::allocator::MeshAllocator;
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_resource::binding_types::{
+    storage_buffer_read_only_sized, storage_buffer_sized, texture_storage_2d, uniform_buffer_sized,
+};
+use bevy::render::render_resource::*;
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue};
+use bevy::render::sync_world::RenderEntity;
+use bevy::render::texture::GpuImage;
+use bevy::render::view::ExtractedView;
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::shader::load_shader_library;
+use bevy::solari::prelude::{RaytracingMesh3d, SolariLighting};
+use bevy::solari::scene::{RaytracingMaterial, RaytracingMaterialDescription, SolariMaterialPlugin};
+use fx_core::cook::{CookedRenderer, CookedSprite, CookedSystem};
+use fx_core::render::{BlendMode, FacingMode, SpriteAlignment};
+use fx_gpu::view::{CullRadius, SortMode, ViewDraw, ViewDrawConfig};
+use fx_gpu::wgpu;
+use fx_render::{FxRenderGraphSystems, FxState, NO_VIEW, ParticleEffect};
+
+/// Most particles of one emitter in ray tracing: Solari samples an emissive
+/// mesh's triangles with a 16-bit index, and each particle has 4 triangles.
+/// Past it, the first `MAX_SLOTS` living particles are traced.
+pub const MAX_SLOTS: u32 = 16383;
+/// Sprite opacity below which rays pass through the proxy.
+pub const ALPHA_CUTOFF: f32 = 0.25;
+/// Width of the particle data texture (two texels per particle).
+const DATA_WIDTH: u32 = 512;
+const PARAMS_BYTES: usize = 52 * 4;
+
+/// Adds ray tracing to `fx_render`'s particles in Solari scenes.
+pub struct FxSolariPlugin;
+
+impl Plugin for FxSolariPlugin {
+    fn build(&self, app: &mut App) {
+        load_shader_library!(app, "particle_hit.wesl");
+        embedded_asset!(app, "proxy.wesl");
+        app.init_asset::<ParticleRtMaterial>()
+            .add_plugins(SolariMaterialPlugin::<ParticleRtMaterial>::default())
+            .init_resource::<Proxies>()
+            .add_systems(PostUpdate, sync_proxies);
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        render_app
+            .init_resource::<ExtractedProxies>()
+            .add_systems(RenderStartup, init_proxy_state)
+            .add_systems(ExtractSchedule, extract_proxies)
+            .add_systems(
+                Render,
+                prepare_proxies
+                    .in_set(RenderSystems::PrepareResources)
+                    .after(fx_render::FxRenderSystems::Prepare),
+            )
+            .add_systems(
+                RenderGraph,
+                write_proxies
+                    .after(FxRenderGraphSystems::Simulate)
+                    .before(RenderGraphSystems::Begin),
+            );
+    }
+}
+
+// ------------------------------------------------------------------ material
+
+/// What Solari's rays see of a ray-traced sprite renderer: the fallback
+/// properties, the sprite texture and the per-particle data texture, refined
+/// per hit by `fx_solari::particle_hit`. Never drawn in raster (its proxy has
+/// no `Mesh3d`).
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct ParticleRtMaterial {
+    pub sprite: Handle<Image>,
+    pub data: Handle<Image>,
+    /// Unlit or additive: emits its colour.
+    pub emissive: bool,
+    pub additive: bool,
+    pub sub_image: [u32; 2],
+    pub sub_uv_blending: bool,
+    /// Radiance per unit of raster colour: 1 / the Solari camera's exposure.
+    pub radiance_scale: f32,
+}
+
+impl Material for ParticleRtMaterial {}
+
+impl RaytracingMaterial for ParticleRtMaterial {
+    fn raytracing_hit_module() -> Option<&'static str> {
+        Some("fx_solari::particle_hit")
+    }
+
+    fn raytracing_description(&self) -> RaytracingMaterialDescription {
+        let flags = self.emissive as u32 | (self.additive as u32) << 1;
+        RaytracingMaterialDescription {
+            fallback: StandardMaterial {
+                base_color: if self.emissive { Color::BLACK } else { Color::WHITE },
+                // Non-zero so Solari lists it as a light; the hit function
+                // gives the real emission.
+                emissive: if self.emissive {
+                    LinearRgba::rgb(0.1, 0.05, 0.02) * self.radiance_scale
+                } else {
+                    LinearRgba::BLACK
+                },
+                alpha_mode: AlphaMode::Mask(ALPHA_CUTOFF),
+                double_sided: true,
+                cull_mode: None,
+                perceptual_roughness: 1.0,
+                reflectance: 0.0,
+                ..default()
+            },
+            params: [
+                Vec4::new(
+                    self.sub_image[0].max(1) as f32,
+                    self.sub_image[1].max(1) as f32,
+                    self.sub_uv_blending as u32 as f32,
+                    flags as f32,
+                ),
+                Vec4::new(self.radiance_scale, DATA_WIDTH as f32, 0.0, 0.0),
+                Vec4::ZERO,
+                Vec4::ZERO,
+            ],
+            textures: [Some(self.sprite.clone()), Some(self.data.clone()), None, None],
+        }
+    }
+}
+
+// ---------------------------------------------------------------- main world
+
+/// The ray-tracing proxy of one sprite renderer of a [`ParticleEffect`].
+#[derive(Component, Clone)]
+pub struct ParticleRtProxy {
+    pub effect: Entity,
+    /// Index among all the effect's renderers.
+    pub renderer: usize,
+    pub emitter: usize,
+    /// Particle slots in the proxy mesh.
+    pub slots: u32,
+    pub data: Handle<Image>,
+    pub sprite: CookedSprite,
+}
+
+/// Main world: proxy entity and system of each (effect, renderer).
+#[derive(Resource, Default)]
+struct Proxies {
+    by_renderer: HashMap<(Entity, usize), (Entity, usize)>,
+    builtin_sprites: HashMap<(u32, u32), Handle<Image>>,
+    radiance_scale: f32,
+}
+
+fn renderers(sys: &CookedSystem) -> impl Iterator<Item = (usize, &CookedRenderer)> {
+    sys.emitters
+        .iter()
+        .enumerate()
+        .flat_map(|(ei, e)| e.renderers.iter().map(move |r| (ei, r)))
+}
+
+/// Two quads (front and back) per slot; slot k's UVs are (2k + u, v).
+fn proxy_mesh(slots: u32) -> Mesh {
+    let n = slots as usize * 8;
+    let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut uvs = Vec::with_capacity(n);
+    let mut indices = Vec::with_capacity(slots as usize * 12);
+    for k in 0..slots {
+        for side in 0..2u32 {
+            for c in corners {
+                uvs.push([2.0 * k as f32 + c[0], c[1]]);
+            }
+            let b = 8 * k + 4 * side;
+            // Counter-clockwise seen from the side the vertex normals face (uv v
+            // runs down the sprite): the front quad faces the camera, the back
+            // quad away. Solari keeps shading normals on the geometric side.
+            if side == 0 {
+                indices.extend([b, b + 2, b + 1, b, b + 3, b + 2]);
+            } else {
+                indices.extend([b, b + 1, b + 2, b, b + 2, b + 3]);
+            }
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; n])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[1.0f32, 0.0, 0.0, 1.0]; n])
+        .with_inserted_indices(Indices::U32(indices));
+    mesh.raytracing = MeshRaytracingFlags::NON_OPAQUE;
+    mesh
+}
+
+fn data_image(slots: u32) -> Image {
+    let texels = 2 * slots;
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: DATA_WIDTH,
+            height: texels.div_ceil(DATA_WIDTH).max(1),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage |= TextureUsages::STORAGE_BINDING;
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
+/// Spawns, replaces and despawns the proxies of ray-traced sprite renderers,
+/// and keeps their emission in step with the Solari camera's exposure.
+#[allow(clippy::too_many_arguments)]
+fn sync_proxies(
+    mut commands: Commands,
+    effects: Query<(Entity, &ParticleEffect)>,
+    cameras: Query<(&Camera, Option<&Exposure>), With<SolariLighting>>,
+    mut proxies: ResMut<Proxies>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<ParticleRtMaterial>>,
+    asset_server: Res<AssetServer>,
+) {
+    let proxies = &mut *proxies;
+    let exposure = cameras
+        .iter()
+        .find(|(c, _)| c.is_active)
+        .map(|(_, e)| e.copied().unwrap_or_default())
+        .unwrap_or_default()
+        .exposure();
+    let radiance_scale = 1.0 / exposure.max(1e-12);
+    if radiance_scale != proxies.radiance_scale {
+        proxies.radiance_scale = radiance_scale;
+        let ids: Vec<_> = materials.ids().collect();
+        for id in ids {
+            if let Some(mut m) = materials.get_mut(id) {
+                m.radiance_scale = radiance_scale;
+            }
+        }
+    }
+
+    let mut live = HashSet::new();
+    for (effect, fx) in &effects {
+        let system_ptr = Arc::as_ptr(&fx.system) as usize;
+        for (ri, (ei, r)) in renderers(&fx.system).enumerate() {
+            let CookedRenderer::Sprite(s) = r else { continue };
+            if !s.ray_tracing {
+                continue;
+            }
+            live.insert((effect, ri));
+            match proxies.by_renderer.get(&(effect, ri)) {
+                Some(&(_, ptr)) if ptr == system_ptr => continue,
+                Some(&(old, _)) => commands.entity(old).despawn(),
+                None => {}
+            }
+            let slots = fx.system.emitters[ei].max_particles.clamp(1, MAX_SLOTS);
+            let data = images.add(data_image(slots));
+            let sprite = match &s.texture {
+                Some(path) => asset_server.load::<Image>(path.clone()),
+                None => {
+                    let key = (s.sub_image_size[0].max(1), s.sub_image_size[1].max(1));
+                    proxies
+                        .builtin_sprites
+                        .entry(key)
+                        .or_insert_with(|| images.add(fx_render::builtin_sprite_image(key.0, key.1)))
+                        .clone()
+                }
+            };
+            let material = materials.add(ParticleRtMaterial {
+                sprite,
+                data: data.clone(),
+                emissive: !s.lit || s.blend_mode == BlendMode::Additive,
+                additive: s.blend_mode == BlendMode::Additive,
+                sub_image: s.sub_image_size,
+                sub_uv_blending: s.sub_uv_blending,
+                radiance_scale,
+            });
+            let proxy = commands
+                .spawn((
+                    Name::new(format!("fx ray-tracing proxy {ri}")),
+                    ParticleRtProxy {
+                        effect,
+                        renderer: ri,
+                        emitter: ei,
+                        slots,
+                        data,
+                        sprite: s.clone(),
+                    },
+                    RaytracingMesh3d(meshes.add(proxy_mesh(slots))),
+                    MeshMaterial3d(material),
+                    // Particles are written in world space.
+                    Transform::IDENTITY,
+                    // Makes Solari re-read the mesh's vertices and rebuild its
+                    // BLAS every frame (its deform path; no morph targets are
+                    // used: the entity has no visibility, so Bevy's morph
+                    // extraction skips it).
+                    MeshMorphWeights::Value { weights: Vec::new() },
+                ))
+                .id();
+            proxies.by_renderer.insert((effect, ri), (proxy, system_ptr));
+        }
+    }
+    proxies.by_renderer.retain(|key, (proxy, _)| {
+        let keep = live.contains(key);
+        if !keep {
+            commands.entity(*proxy).despawn();
+        }
+        keep
+    });
+}
+
+// -------------------------------------------------------------- render world
+
+struct ExtractedProxy {
+    render: Entity,
+    effect: Entity,
+    emitter: usize,
+    slots: u32,
+    mesh: AssetId<Mesh>,
+    data: AssetId<Image>,
+    sprite: CookedSprite,
+}
+
+#[derive(Resource, Default)]
+struct ExtractedProxies(Vec<ExtractedProxy>);
+
+fn extract_proxies(
+    mut out: ResMut<ExtractedProxies>,
+    proxies: Extract<Query<(RenderEntity, &ParticleRtProxy, &RaytracingMesh3d)>>,
+) {
+    out.0.clear();
+    for (render, p, mesh) in &proxies {
+        out.0.push(ExtractedProxy {
+            render,
+            effect: p.effect,
+            emitter: p.emitter,
+            slots: p.slots,
+            mesh: mesh.id(),
+            data: p.data.id(),
+            sprite: p.sprite.clone(),
+        });
+    }
+}
+
+struct ProxyGpu {
+    particles: wgpu::Buffer,
+    draw: ViewDraw,
+    uniform: wgpu::Buffer,
+    data_view: Option<(AssetId<Image>, TextureView)>,
+    scratch: [u8; PARAMS_BYTES],
+    seen: bool,
+}
+
+#[derive(Resource)]
+struct ProxyState {
+    layout: BindGroupLayoutDescriptor,
+    pipeline: CachedComputePipelineId,
+    entries: HashMap<Entity, ProxyGpu>,
+    /// The camera sprites face: position, right, up, back (world).
+    camera: [Vec4; 4],
+}
+
+fn init_proxy_state(mut commands: Commands, asset_server: Res<AssetServer>, cache: Res<PipelineCache>) {
+    let layout = BindGroupLayoutDescriptor::new(
+        "fx rt proxy",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_sized(false, None),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            ),
+        ),
+    );
+    let pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("fx rt proxy".into()),
+        layout: vec![layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "proxy.wesl"),
+        entry_point: Some("proxy".into()),
+        ..default()
+    });
+    commands.insert_resource(ProxyState {
+        layout,
+        pipeline,
+        entries: HashMap::default(),
+        camera: [Vec4::ZERO, Vec4::X, Vec4::Y, Vec4::Z],
+    });
+}
+
+/// Per proxy: the cull (no frustum: every living particle, compacted) and
+/// the uniform; the camera sprites face this frame.
+fn prepare_proxies(
+    mut state: ResMut<ProxyState>,
+    extracted: Res<ExtractedProxies>,
+    fx: Res<FxState>,
+    device: Res<RenderDevice>,
+    solari_views: Query<&ExtractedView, With<SolariLighting>>,
+    views: Query<&ExtractedView>,
+) {
+    let state = &mut *state;
+    if let Some(view) = solari_views.iter().next().or_else(|| views.iter().next()) {
+        let m = view.world_from_view.to_matrix();
+        state.camera = [m.w_axis, m.x_axis, m.y_axis, m.z_axis];
+    }
+    for e in state.entries.values_mut() {
+        e.seen = false;
+    }
+    for p in &extracted.0 {
+        let Some((gpu, _)) = fx.effect(p.effect) else { continue };
+        let Some(em) = gpu.emitters.get(p.emitter) else { continue };
+        let fresh = state
+            .entries
+            .get(&p.render)
+            .is_some_and(|e| e.particles == em.particles[0]);
+        if !fresh {
+            let wd = device.wgpu_device();
+            state.entries.insert(
+                p.render,
+                ProxyGpu {
+                    particles: em.particles[0].clone(),
+                    draw: ViewDraw::with_config(
+                        wd,
+                        fx.view_pipelines(),
+                        em,
+                        ViewDrawConfig {
+                            sort_mode: SortMode::None,
+                            vertex_count: 6,
+                            cull: CullRadius::Off,
+                        },
+                    ),
+                    uniform: wd.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("fx rt proxy params"),
+                        size: PARAMS_BYTES as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    data_view: None,
+                    scratch: [0; PARAMS_BYTES],
+                    seen: true,
+                },
+            );
+        }
+        state.entries.get_mut(&p.render).unwrap().seen = true;
+    }
+    state.entries.retain(|_, e| e.seen);
+}
+
+fn facing_index(f: FacingMode) -> u32 {
+    match f {
+        FacingMode::FaceCamera => 0,
+        FacingMode::FaceCameraPlane => 1,
+        FacingMode::FaceCameraPosition => 2,
+        FacingMode::CustomFacingVector => 3,
+    }
+}
+
+fn alignment_index(a: SpriteAlignment) -> u32 {
+    match a {
+        SpriteAlignment::Unaligned => 0,
+        SpriteAlignment::VelocityAligned => 1,
+        SpriteAlignment::CustomAlignment => 2,
+    }
+}
+
+/// Word offsets of the normal and tangent in a mesh's interleaved vertices,
+/// and words per vertex, if positions and normals are plain `Float32x3`.
+fn vertex_layout(mesh: &RenderMesh) -> Option<(u32, u32, u32)> {
+    let layout = mesh.layout.0.layout();
+    if layout.array_stride % 4 != 0 {
+        return None;
+    }
+    let (mut pos, mut normal, mut tangent) = (None, None, u32::MAX);
+    for (id, a) in mesh.layout.0.attribute_ids().iter().zip(&layout.attributes) {
+        if *id == Mesh::ATTRIBUTE_POSITION.id && a.format == VertexFormat::Float32x3 {
+            pos = Some(a.offset as u32 / 4);
+        } else if *id == Mesh::ATTRIBUTE_NORMAL.id && a.format == VertexFormat::Float32x3 {
+            normal = Some(a.offset as u32 / 4);
+        } else if *id == Mesh::ATTRIBUTE_TANGENT.id && a.format == VertexFormat::Float32x4 {
+            tangent = a.offset as u32 / 4;
+        }
+    }
+    (pos? == 0).then_some((normal?, tangent, layout.array_stride as u32 / 4))
+}
+
+/// Writes every proxy's geometry and particle data from this frame's
+/// particles (after the simulation, before Solari's deform pass and TLAS
+/// build, which run in `RenderGraphSystems::Begin`).
+#[allow(clippy::too_many_arguments)]
+fn write_proxies(
+    mut ctx: RenderContext,
+    queue: Res<RenderQueue>,
+    fx: Res<FxState>,
+    mut state: ResMut<ProxyState>,
+    extracted: Res<ExtractedProxies>,
+    mesh_allocator: Res<MeshAllocator>,
+    render_meshes: Res<RenderAssets<RenderMesh>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    pipeline_cache: Res<PipelineCache>,
+    device: Res<RenderDevice>,
+) {
+    if extracted.0.is_empty() {
+        return;
+    }
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(state.pipeline) else {
+        return;
+    };
+    let layout = pipeline_cache.get_bind_group_layout(&state.layout);
+    let state = &mut *state;
+    let camera = state.camera;
+    let recorder = ctx.diagnostic_recorder();
+    let diagnostics = recorder.as_deref();
+    let encoder = ctx.command_encoder();
+    let span = diagnostics.time_span(encoder, "fx_rt_proxy");
+    for p in &extracted.0 {
+        let (Some(entry), Some((gpu, world_from_local))) =
+            (state.entries.get_mut(&p.render), fx.effect(p.effect))
+        else {
+            continue;
+        };
+        let Some(em) = gpu.emitters.get(p.emitter) else { continue };
+        let (Some(slice), Some(render_mesh), Some(image)) = (
+            mesh_allocator.mesh_vertex_slice(&p.mesh),
+            render_meshes.get(p.mesh),
+            gpu_images.get(p.data),
+        ) else {
+            continue;
+        };
+        let Some((normal_offset, tangent_offset, stride)) = vertex_layout(render_mesh) else {
+            continue;
+        };
+        if entry.data_view.as_ref().is_none_or(|(id, _)| *id != p.data) {
+            entry.data_view = Some((p.data, image.texture.create_view(&TextureViewDescriptor::default())));
+        }
+        let Some((_, data_view)) = &entry.data_view else { continue };
+
+        // Uniform (see `ProxyParams` in proxy.wesl).
+        let s = &p.sprite;
+        let mut words = [0u32; 52];
+        let mut f = |i: usize, v: f32| words[i] = v.to_bits();
+        let m: Mat4 = world_from_local;
+        for (i, v) in m.to_cols_array().iter().enumerate() {
+            f(i, *v);
+        }
+        for (j, c) in camera.iter().enumerate() {
+            for (k, v) in c.to_array().iter().enumerate() {
+                f(16 + 4 * j + k, *v);
+            }
+        }
+        for k in 0..3 {
+            f(32 + k, s.custom_facing_vector[k]);
+            f(36 + k, s.custom_alignment_vector[k]);
+        }
+        f(40, s.pivot_in_uv_space[0]);
+        f(41, s.pivot_in_uv_space[1]);
+        words[42] = em.capacity;
+        words[43] = p.slots.min(em.capacity);
+        words[44] = facing_index(s.facing_mode);
+        words[45] = alignment_index(s.alignment);
+        words[46] = slice.range.start * stride;
+        words[47] = stride;
+        words[48] = normal_offset;
+        words[49] = tangent_offset;
+        words[50] = DATA_WIDTH;
+        entry.scratch.copy_from_slice(bytemuck::cast_slice(&words));
+        queue.write_buffer(&entry.uniform, 0, &entry.scratch);
+
+        entry
+            .draw
+            .record(&queue, encoder, fx.view_pipelines(), em, &NO_VIEW);
+        let bind_group = device.wgpu_device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx rt proxy"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: entry.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: em.particles[em.current].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: entry.draw.indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: entry.draw.draw_args.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: slice.buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(data_view),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fx rt proxy"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(words[43].div_ceil(64), 1, 1);
+    }
+    span.end(encoder);
+}

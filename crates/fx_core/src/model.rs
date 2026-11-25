@@ -153,6 +153,9 @@ pub struct SpriteSource {
     pub sort_mode: SortMode,
     /// Metres; 0 disables soft-particle fading.
     pub soft_particle_fade_distance: f32,
+    /// Visible to Solari's rays (reflections, bounce light, shadows); emissive
+    /// sprites light the scene. Off by default, as in Niagara.
+    pub ray_tracing: bool,
     /// Asset path; `None` uses the built-in soft round sprite.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -183,6 +186,7 @@ impl Default for SpriteSource {
             sub_uv_blending: false,
             sort_mode: SortMode::default(),
             soft_particle_fade_distance: 0.0,
+            ray_tracing: false,
             texture: None,
             material: None,
             span: Span::default(),

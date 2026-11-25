@@ -90,6 +90,7 @@ fn every_field_decodes_and_cooks() {
             sub_uv_blending: true,
             sort_mode: ViewDistance,
             soft_particle_fade_distance: 0.25,
+            ray_tracing: true,
             texture: "textures/spark.png",
             material: "shaders/spark.wesl",
         ))"#,
@@ -108,6 +109,7 @@ fn every_field_decodes_and_cooks() {
             sub_uv_blending: true,
             sort_mode: SortMode::ViewDistance,
             soft_particle_fade_distance: 0.25,
+            ray_tracing: true,
             texture: Some("textures/spark.png".into()),
             material: Some("shaders/spark.wesl".into()),
         }]
@@ -142,7 +144,7 @@ fn renderers_survive_the_cooked_binary() {
     ));
     let bytes = cook::to_bytes(&sys);
     assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
-    assert_eq!(cook::COOKED_FORMAT_VERSION, 3);
+    assert_eq!(cook::COOKED_FORMAT_VERSION, 4);
 }
 
 #[test]

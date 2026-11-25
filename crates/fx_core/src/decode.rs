@@ -256,6 +256,9 @@ fn decode_sprite(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option
             ),
         }
     }
+    if let Some(v) = f.take("ray_tracing") {
+        s.ray_tracing = boolean(v, "ray_tracing", d).unwrap_or_default();
+    }
     if let Some(v) = f.take("texture") {
         s.texture = asset_path(
             v,

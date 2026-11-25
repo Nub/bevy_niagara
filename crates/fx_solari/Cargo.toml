@@ -1,0 +1,18 @@
+[package]
+name = "fx_solari"
+description = "Particles in Solari ray tracing: per-emitter proxy geometry, hit function, test scene"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx_core = { path = "../fx_core" }
+fx_gpu = { path = "../fx_gpu" }
+fx_render = { path = "../fx_render" }
+bevy = { workspace = true, features = ["bevy_solari"] }
+bytemuck.workspace = true
+png = "0.17"
+
+[[bin]]
+name = "fxsolari"
+path = "src/bin/fxsolari.rs"

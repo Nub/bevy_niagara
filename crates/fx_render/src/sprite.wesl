@@ -6,8 +6,9 @@ import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::prepass::utils;
 import fx_render::particle_io::{
     FxVertexOutput, fx, indices, pw, particle_color, particle_dynamic_param, set_sub_uv,
-    safe_normalize, sample_particle_texture, scene_light, finish_faded,
+    sample_particle_texture, scene_light, finish_faded,
 };
+import fx_render::particle_surface::{sprite_corner, sprite_texel};
 
 @vertex
 fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FxVertexOutput {
@@ -20,54 +21,26 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     let rotation = radians(pw(12u, i));
     let nage = pw(16u, i);
 
-    // Facing: the sprite plane's normal, pointing at the viewer.
-    let cam_right = view.world_from_view[0].xyz;
-    let cam_up = view.world_from_view[1].xyz;
-    let cam_back = view.world_from_view[2].xyz;
-    // FaceCamera faces the camera position keeping the camera's roll;
-    // FaceCameraPlane faces the view plane; FaceCameraPosition faces the
-    // camera position with world up; CustomFacingVector faces a local vector.
-    var n = cam_back;
-    var up_ref = cam_up;
-    switch fx.facing_mode {
-        case 0u: { n = safe_normalize(view.world_position - pos, cam_back); }
-        case 2u: {
-            n = safe_normalize(view.world_position - pos, cam_back);
-            up_ref = vec3<f32>(0.0, 1.0, 0.0);
-        }
-        case 3u: { n = safe_normalize((m * vec4<f32>(fx.custom_facing.xyz, 0.0)).xyz, cam_back); }
-        default: {}
-    }
-    // Alignment: the sprite's up axis follows velocity or a custom vector.
-    if (fx.alignment == 1u) {
-        up_ref = safe_normalize(vel, up_ref);
-    } else if (fx.alignment == 2u) {
-        up_ref = safe_normalize((m * vec4<f32>(fx.custom_alignment.xyz, 0.0)).xyz, up_ref);
-    }
-    var right = cross(up_ref, n);
-    if (length(right) < 1e-6) {
-        right = cam_right;
-    }
-    right = normalize(right);
-    let up = cross(n, right);
-
     // Quad corner: two triangles, uv (0,0) top left.
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 0.0),
     );
     let uv = corners[vi];
-    let q = (vec2<f32>(uv.x, 1.0 - uv.y) - vec2<f32>(fx.pivot.x, 1.0 - fx.pivot.y)) * size;
-    let c = cos(rotation);
-    let s = sin(rotation);
-    let r = vec2<f32>(q.x * c - q.y * s, q.x * s + q.y * c);
-    let world = pos + right * r.x + up * r.y;
+    // Facing and alignment (shared with fx_solari's ray-traced proxies).
+    let corner = sprite_corner(
+        pos, vel, size, rotation, uv, fx.pivot, fx.facing_mode, fx.alignment,
+        (m * vec4<f32>(fx.custom_facing.xyz, 0.0)).xyz,
+        (m * vec4<f32>(fx.custom_alignment.xyz, 0.0)).xyz,
+        view.world_position,
+        view.world_from_view[0].xyz, view.world_from_view[1].xyz, view.world_from_view[2].xyz,
+    );
 
     var out: FxVertexOutput;
-    out.position = view.clip_from_world * vec4<f32>(world, 1.0);
+    out.position = view.clip_from_world * vec4<f32>(corner.world, 1.0);
     out.color = particle_color(i);
-    out.normal = n;
-    out.world_position = world;
+    out.normal = corner.normal;
+    out.world_position = corner.world;
     out.dynamic_param = particle_dynamic_param(i);
     set_sub_uv(&out, nage, uv);
     return out;
@@ -79,9 +52,9 @@ fn fragment(
     in: FxVertexOutput,
 ) -> @location(0) vec4<f32> {
     @if(!MULTISAMPLED) let sample_index = 0u;
-    let tex = sample_particle_texture(in);
-    var rgb = in.color.rgb * tex.rgb;
-    let a = in.color.a * tex.a;
+    let texel = sprite_texel(in.color, sample_particle_texture(in));
+    var rgb = texel.rgb;
+    let a = texel.a;
 
     @if(LIT) {
         rgb *= scene_light(in.normal, true);

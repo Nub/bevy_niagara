@@ -11,7 +11,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 3;
+pub const COOKED_FORMAT_VERSION: u32 = 4;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -102,6 +102,9 @@ pub struct CookedSprite {
     pub sort_mode: SortMode,
     /// Metres; 0 disables soft-particle fading.
     pub soft_particle_fade_distance: f32,
+    /// Visible to Solari's rays (reflections, bounce light, shadows); emissive
+    /// sprites light the scene. Off by default, as in Niagara.
+    pub ray_tracing: bool,
     /// Asset path; `None` uses the built-in soft round sprite.
     pub texture: Option<String>,
     /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
@@ -127,6 +130,7 @@ fn cook_sprite(s: &SpriteSource) -> CookedSprite {
         sub_uv_blending: s.sub_uv_blending,
         sort_mode: s.sort_mode,
         soft_particle_fade_distance: s.soft_particle_fade_distance,
+        ray_tracing: s.ray_tracing,
         texture: s.texture.clone(),
         material: s.material.clone(),
     }

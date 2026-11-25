@@ -2513,12 +2513,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fx_solari"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bytemuck",
+ "fx_core",
+ "fx_gpu",
+ "fx_render",
+ "png 0.17.16",
+]
+
+[[package]]
 name = "fx_viewer"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "fx_core",
  "fx_render",
+ "fx_solari",
  "serde_json",
 ]
 

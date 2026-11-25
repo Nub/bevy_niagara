@@ -16,6 +16,7 @@
 //     }
 
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
+import fx_render::particle_surface::{flipbook, flipbook_cell_uv};
 
 struct FxRenderer {
     world_from_local: mat4x4<f32>,
@@ -83,23 +84,18 @@ fn particle_dynamic_param(i: u32) -> vec4<f32> {
 
 // Fills the flipbook fields of `out` for normalized age `nage` and quad UV `uv`.
 fn set_sub_uv(out: ptr<function, FxVertexOutput>, nage: f32, uv: vec2<f32>) {
-    let frames = fx.sub_image.x * fx.sub_image.y;
-    let f = clamp(nage, 0.0, 0.99999) * frames;
-    let f0 = floor(f);
-    let f1 = min(f0 + 1.0, frames - 1.0);
+    let f = flipbook(nage, uv, fx.sub_image, fx.sub_uv_blending != 0u);
     (*out).uv = uv;
-    (*out).uv0 = cell_uv(f0, uv);
-    (*out).uv1 = cell_uv(f1, uv);
-    (*out).sub_uv_blend = select(0.0, f - f0, fx.sub_uv_blending != 0u);
-    (*out).sub_image_index = f;
+    (*out).uv0 = f.uv0;
+    (*out).uv1 = f.uv1;
+    (*out).sub_uv_blend = f.blend;
+    (*out).sub_image_index = f.index;
     (*out).normalized_age = nage;
 }
 
+// UV of `uv` inside flipbook cell `frame`.
 fn cell_uv(frame: f32, uv: vec2<f32>) -> vec2<f32> {
-    let cols = fx.sub_image.x;
-    let col = frame % cols;
-    let row = floor(frame / cols);
-    return (vec2<f32>(col, row) + uv) / fx.sub_image;
+    return flipbook_cell_uv(frame, uv, fx.sub_image);
 }
 
 // Unit vector, or `fallback` when `v` is (nearly) zero.

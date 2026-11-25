@@ -267,6 +267,12 @@ pub const SPRITE_FIELDS: &[RendererField] = &[
         doc: "fade near opaque surfaces; 0 = off",
     },
     RendererField {
+        name: "ray_tracing",
+        form: "bool",
+        default: "false",
+        doc: "Solari: seen in reflections and bounce light, casts shadows, emissive sprites light the scene (needs fx_solari)",
+    },
+    RendererField {
         name: "texture",
         form: "\"asset/path.png\"",
         default: "none",

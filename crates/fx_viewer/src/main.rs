@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! fxviewer [effect.fx.ron] [--backdrop dark|grey|room] [--duration S] [--speed X]
-//!          [--size WxH] [--seed N] [--paused] [--at S]
+//!          [--size WxH] [--seed N] [--paused] [--at S] [--solari]
 //! ```
 //!
 //! - Hot reload: the file is re-checked when it changes on disk. A valid edit
@@ -12,12 +12,17 @@
 //! - Mouse: left drag orbits, right/middle drag pans, wheel zooms. Click or
 //!   drag the timeline to scrub.
 //! - Keys: Space play/pause, R restart, ←/→ scrub 0.1 s (Shift: 1 s), ↑/↓
-//!   speed ×2/÷2, B backdrop, L loop, F reset camera, H help, F12 screenshot.
+//!   speed ×2/÷2, B backdrop, S raster/Solari, L loop, F reset camera, H help,
+//!   F12 screenshot.
+//! - Raster or Solari: `S` (or `--solari`, or the `solari on|off` command)
+//!   switches the camera to Solari ray tracing (`fx_solari`: sprites with
+//!   `ray_tracing: true` show in reflections, cast shadows and light the
+//!   scene). Backdrops are ray traced too. Needs a ray-tracing GPU.
 //!
 //! Remote control (used by the `fx_mcp` server): the viewer writes its pid to
 //! `<dir>/fxviewer.pid`, reads commands appended as lines to
 //! `<dir>/fxviewer.cmd` (`open PATH`, `screenshot PATH`, `play`, `pause`,
-//! `restart`, `seek S`, `speed X`, `backdrop NAME`, `quit`) and writes its
+//! `restart`, `seek S`, `speed X`, `backdrop NAME`, `solari on|off`, `quit`) and writes its
 //! state to `<dir>/fxviewer.status.json` twice a second. `<dir>` is
 //! `$FXVIEWER_DIR`, else `$XDG_RUNTIME_DIR`, else the temp dir.
 
@@ -26,17 +31,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use bevy::camera::Hdr;
+use bevy::camera::{CameraMainTextureUsages, Hdr};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
+use bevy::render::render_resource::TextureUsages;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::solari::prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins};
 use bevy::text::FontSize;
 use bevy::window::{PrimaryWindow, WindowResolution};
 use fx_core::CookedSystem;
 use fx_render::{FxClock, FxPlugin, FxReady, FxStats, FxStatsPlugin, ParticleEffect};
+use fx_solari::FxSolariPlugin;
 
 const SIM_HZ: f32 = 60.0;
 const BACKDROPS: [&str; 3] = ["dark", "grey", "room"];
@@ -134,6 +142,9 @@ struct Viewer {
     looping: bool,
     backdrop: usize,
     backdrop_dirty: bool,
+    /// Solari ray tracing instead of raster.
+    solari: bool,
+    solari_dirty: bool,
     help: bool,
     status_timer: Timer,
     control: Control,
@@ -155,9 +166,10 @@ struct Options {
     seed: u32,
     paused: bool,
     at: f32,
+    solari: bool,
 }
 
-const USAGE: &str = "usage: fxviewer [effect.fx.ron] [--backdrop dark|grey|room] [--duration S] [--speed X] [--size WxH] [--seed N] [--paused] [--at S]";
+const USAGE: &str = "usage: fxviewer [effect.fx.ron] [--backdrop dark|grey|room] [--duration S] [--speed X] [--size WxH] [--seed N] [--paused] [--at S] [--solari]";
 
 fn parse_args() -> Result<Options, String> {
     let mut o = Options {
@@ -170,6 +182,7 @@ fn parse_args() -> Result<Options, String> {
         seed: 1,
         paused: false,
         at: 0.0,
+        solari: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -187,6 +200,7 @@ fn parse_args() -> Result<Options, String> {
             "--seed" => o.seed = val()?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--at" => o.at = val()?.parse().map_err(|e| format!("--at: {e}"))?,
             "--paused" => o.paused = true,
+            "--solari" => o.solari = true,
             "--size" => {
                 let v = val()?;
                 let (w, h) = v.split_once('x').ok_or("--size is WxH")?;
@@ -232,6 +246,8 @@ fn main() -> std::process::ExitCode {
         looping: true,
         backdrop: o.backdrop,
         backdrop_dirty: true,
+        solari: o.solari,
+        solari_dirty: true,
         help: true,
         status_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
         control: Control::new(),
@@ -258,6 +274,8 @@ fn main() -> std::process::ExitCode {
             RenderDiagnosticsPlugin,
             FxPlugin::default(),
             FxStatsPlugin,
+            SolariPlugins,
+            FxSolariPlugin,
         ))
         .insert_resource(FxClock::manual(1.0 / SIM_HZ))
         .insert_resource(viewer)
@@ -270,7 +288,7 @@ fn main() -> std::process::ExitCode {
                 (remote_control, watch_file, keyboard, timeline_mouse),
                 apply_effect,
                 advance_time,
-                (orbit_camera, apply_backdrop, update_overlay, write_status),
+                (orbit_camera, apply_backdrop, apply_solari, update_overlay, write_status),
             )
                 .chain(),
         )
@@ -311,7 +329,7 @@ struct TimelineFill;
 #[derive(Component)]
 struct TimelineLabel;
 
-const HELP: &str = "Space play/pause   R restart   Left/Right scrub (Shift: 1 s)\nUp/Down speed   B backdrop   L loop   F reset camera\nLeft drag orbit   Right drag pan   Wheel zoom\nF12 screenshot   H hide help";
+const HELP: &str = "Space play/pause   R restart   Left/Right scrub (Shift: 1 s)\nUp/Down speed   B backdrop   S raster/Solari   L loop   F reset camera\nLeft drag orbit   Right drag pan   Wheel zoom\nF12 screenshot   H hide help";
 
 fn mono(size: f32) -> TextFont {
     TextFont {
@@ -326,6 +344,8 @@ fn setup(mut commands: Commands) {
         Hdr,
         DepthPrepass,
         Msaa::Off,
+        // Solari writes the main texture from compute.
+        CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         ViewCamera,
         Transform::default(),
     ));
@@ -571,6 +591,10 @@ fn keyboard(
         v.backdrop = (v.backdrop + 1) % BACKDROPS.len();
         v.backdrop_dirty = true;
     }
+    if keys.just_pressed(KeyCode::KeyS) {
+        v.solari = !v.solari;
+        v.solari_dirty = true;
+    }
     if keys.just_pressed(KeyCode::KeyL) {
         v.looping = !v.looping;
     }
@@ -726,6 +750,10 @@ fn remote_control(
                     v.backdrop_dirty = true;
                 }
             }
+            "solari" => {
+                v.solari = arg != "off";
+                v.solari_dirty = true;
+            }
             "help" => v.help = arg != "off",
             "quit" => {
                 exit.write(AppExit::Success);
@@ -773,7 +801,7 @@ fn apply_backdrop(
     }
     let size = if name == "room" { 12.0 } else { 30.0 };
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(size, size))),
+        Mesh3d(meshes.add(rt_mesh(Plane3d::default().mesh().size(size, size)))),
         MeshMaterial3d(mat(ground, 0.9)),
         BackdropPart,
     ));
@@ -794,7 +822,7 @@ fn apply_backdrop(
         // A lit test room: back and side walls, a few reference objects and
         // a warm point light, to judge lighting, soft particles and scale.
         let wall = mat(Color::srgb(0.55, 0.55, 0.58), 0.85);
-        let wall_mesh = meshes.add(Cuboid::new(12.0, 6.0, 0.2));
+        let wall_mesh = meshes.add(rt_mesh(Cuboid::new(12.0, 6.0, 0.2)));
         for (pos, rot) in [
             (Vec3::new(0.0, 3.0, -6.0), 0.0),
             (Vec3::new(-6.0, 3.0, 0.0), std::f32::consts::FRAC_PI_2),
@@ -808,13 +836,13 @@ fn apply_backdrop(
             ));
         }
         commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+            Mesh3d(meshes.add(rt_mesh(Cuboid::new(1.0, 1.0, 1.0)))),
             MeshMaterial3d(mat(Color::srgb(0.7, 0.25, 0.2), 0.6)),
             Transform::from_xyz(-2.2, 0.5, -1.5),
             BackdropPart,
         ));
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(0.6))),
+            Mesh3d(meshes.add(rt_mesh(Sphere::new(0.6)))),
             MeshMaterial3d(mat(Color::srgb(0.2, 0.45, 0.75), 0.3)),
             Transform::from_xyz(2.2, 0.6, -1.2),
             BackdropPart,
@@ -830,6 +858,36 @@ fn apply_backdrop(
             Transform::from_xyz(0.0, 4.5, 2.0),
             BackdropPart,
         ));
+    }
+}
+
+/// A backdrop mesh Solari can ray trace too (it needs tangents).
+fn rt_mesh(m: impl Into<Mesh>) -> Mesh {
+    let m: Mesh = m.into();
+    m.clone().with_generated_tangents().unwrap_or(m)
+}
+
+/// Switches the camera between raster and Solari, and puts backdrop meshes
+/// in the ray-traced scene.
+fn apply_solari(
+    mut commands: Commands,
+    mut v: ResMut<Viewer>,
+    cam: Query<Entity, With<ViewCamera>>,
+    parts: Query<(Entity, &Mesh3d), (With<BackdropPart>, Without<RaytracingMesh3d>)>,
+) {
+    for (e, mesh) in &parts {
+        commands.entity(e).insert(RaytracingMesh3d(mesh.0.clone()));
+    }
+    if !v.solari_dirty {
+        return;
+    }
+    v.solari_dirty = false;
+    let Ok(cam) = cam.single() else { return };
+    if v.solari {
+        commands.entity(cam).insert(SolariLighting::default());
+    } else {
+        // (Keeps the prepasses SolariLighting required: soft particles use depth.)
+        commands.entity(cam).remove::<SolariLighting>();
     }
 }
 
@@ -875,8 +933,10 @@ fn update_overlay(
     let name = v.system.as_ref().map(|s| s.name.as_str()).unwrap_or("-");
     s.push_str(&format!("{file}  \"{name}\"  reloads {}\n", v.reloads.saturating_sub(1)));
     s.push_str(&format!(
-        "Raster  |  backdrop {}  |  {:.0} fps\n",
-        BACKDROPS[v.backdrop], fps
+        "{}  |  backdrop {}  |  {:.0} fps\n",
+        if v.solari { "Solari" } else { "Raster" },
+        BACKDROPS[v.backdrop],
+        fps
     ));
     let snap = stats.snapshot();
     let mut total = 0;
@@ -969,6 +1029,7 @@ fn write_status(
         "playing": v.playing,
         "speed": v.speed,
         "backdrop": BACKDROPS[v.backdrop],
+        "renderer": if v.solari { "solari" } else { "raster" },
         "emitters": emitters,
         "gpu_ms": passes,
     });

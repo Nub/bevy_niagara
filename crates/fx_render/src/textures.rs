@@ -5,7 +5,7 @@
 use bevy::platform::collections::HashMap;
 use fx_gpu::wgpu;
 
-const CELL: u32 = 64;
+pub const CELL: u32 = 64;
 
 pub struct Builtin {
     textures: HashMap<(u32, u32), (wgpu::Texture, wgpu::TextureView)>,
