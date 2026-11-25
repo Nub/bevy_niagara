@@ -230,6 +230,41 @@ fn common_modules_system() -> fx_core::CookedSystem {
     c.cooked.unwrap_or_else(|| panic!("common modules: {errs:?}"))
 }
 
+/// Dynamic inputs of the types the sample does not use (Vec4, Vec2 and Int
+/// families, Break of each vector), nested, on extended attributes.
+const DYNAMIC_TYPES: &str = r#"(
+    name: "Dynamic types",
+    emitters: [(
+        name: "E",
+        max_particles: 400,
+        emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Dynamic("Add Float", { "A": Float(60.0), "B": Dynamic("Random Float from List", { "Values": [Float(0.0), Float(40.0)] }) }) })],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": Dynamic("Uniform Ranged Float", { "Minimum": Float(0.5), "Maximum": Float(1.5) }),
+                "Sprite Size": Dynamic("Lerp Vec2", { "A": Vec2((0.1, 0.2)), "B": Dynamic("Uniform Ranged Vec2", {}), "Alpha": Float(0.25) }),
+                "Mass": Dynamic("Break Vec2", { "Value": Dynamic("Random Range Vec2 by Uniform", { "Minimum": Vec2((1.0, 2.0)), "Maximum": Vec2((3.0, 5.0)) }), "Component": Y }),
+                "Sprite Rotation": Dynamic("Break Color", { "Value": Dynamic("Random Color from List", { "Values": [Color((1.0, 2.0, 3.0, 4.0)), Color((5.0, 6.0, 7.0, 8.0))] }), "Component": B }),
+            }),
+            (module: "Initialize Ribbon", inputs: {
+                "Ribbon ID": Dynamic("Select Int by Int", { "Index": Dynamic("Uniform Ranged Int", { "Minimum": Int(-1), "Maximum": Int(3) }), "Values": [Int(4), Int(5), Int(6)] }),
+                "Ribbon Width": Dynamic("Break Vec4", { "Value": Dynamic("Make Vec4 from Floats", { "X": Float(1.0), "W": Dynamic("Uniform Ranged Float", {}) }), "Component": W }),
+            }),
+            (module: "Add Velocity", inputs: { "Velocity": Dynamic("Uniform Ranged Vec3", { "Minimum": Vec3((-1.0, 1.0, -1.0)), "Maximum": Vec3((1.0, 3.0, 1.0)) }) }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Solve Forces and Velocity"),
+            (module: "Dynamic Material Parameters", inputs: { "Dynamic Material Parameter": Dynamic("Lerp Vec4", {
+                "A": Dynamic("Select Vec4 by Int", { "Index": Link(Int, "Particles.RibbonID"), "Values": [Vec4((1.0, 0.0, 0.0, 0.0)), Vec4((0.0, 1.0, 0.0, 0.0)), Vec4((0.0, 0.0, 1.0, 0.0)), Vec4((0.0, 0.0, 0.0, 1.0)), Vec4((1.0, 1.0, 1.0, 1.0)), Vec4((2.0, 2.0, 2.0, 2.0)), Vec4((3.0, 3.0, 3.0, 3.0))] }),
+                "B": Dynamic("Multiply Vec4", { "A": Dynamic("Vec4 from Curve", { "Curve": Vec4([(0.0, (0.0, 1.0, 2.0, 3.0)), (1.0, (3.0, 2.0, 1.0, 0.0))]), "Curve Index": Link(Float, "Particles.NormalizedAge") }), "B": Dynamic("Uniform Ranged Vec4", {}) }),
+                "Alpha": Dynamic("Sine over Time", { "Time": Link(Float, "Particles.Age"), "Amplitude": Float(0.5), "Offset": Float(0.5) }),
+            }) }),
+            (module: "Scale Color", inputs: { "Scale RGB": Dynamic("Subtract Vec3", { "A": Vec3((1.0, 1.0, 1.0)), "B": Dynamic("Random Range Vec3 by Uniform", { "Maximum": Vec3((0.5, 0.5, 0.5)) }) }) }),
+            (module: "Kill Particles", inputs: { "Kill Particles": Dynamic("Compare Floats", { "A": Link(Float, "Particles.Age"), "B": Float(1.3), "Operation": GreaterThan }) }),
+        ],
+    )],
+)"#;
+
 #[test]
 fn gpu_matches_cpu_reference() {
     let (device, queue, info) = match fx_gpu::headless_device() {
@@ -246,9 +281,13 @@ fn gpu_matches_cpu_reference() {
     // The reference effect library (effects/library); words per particle vary
     // by emitter there, so 0 skips that check.
     // Samples of the common modules (forces, shapes, rotation, sub-UV).
-    for n in ["forces.fx.ron", "shapes.fx.ron", "rotation.fx.ron", "subuv.fx.ron"] {
+    for n in ["forces.fx.ron", "shapes.fx.ron", "rotation.fx.ron", "subuv.fx.ron", "dynamic_inputs.fx.ron"] {
         systems.push((n, sample(n), 0));
     }
+    // Nested dynamic inputs of every type.
+    let c = fx_core::check_source("dynamic_types.fx.ron", DYNAMIC_TYPES);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    systems.push(("dynamic types", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), WORDS_PER_PARTICLE_EXTENDED));
     for n in LIBRARY {
         systems.push((n, library(n), 0));
     }

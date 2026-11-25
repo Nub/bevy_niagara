@@ -1,0 +1,160 @@
+// Dynamic inputs: a pulsing bloom of petals and a ring of sparks, built from
+// nested Niagara dynamic inputs (Uniform Ranged, Random Range by Uniform,
+// curves indexed by speed and distance, vector maths, sine over time,
+// selects, random from list). Units are Bevy's: metres, seconds, Y up.
+(
+    name: "Dynamic Inputs",
+    user_parameters: {
+        "User.Warm": Color((1.0, 0.45, 0.1, 1.0)),
+    },
+    emitters: [
+        (
+            name: "Petals",
+            sim_target: Gpu,
+            max_particles: 2000,
+            emitter_update: [
+                // The spawn rate breathes: 200 ± 150 per second, one cycle every 2 s.
+                (module: "Spawn Rate", inputs: { "Spawn Rate": Dynamic("Sine over Time", {
+                    "Amplitude": Float(150.0),
+                    "Frequency": Float(0.5),
+                    "Offset": Float(200.0),
+                }) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Dynamic("Uniform Ranged Float", { "Minimum": Float(1.2), "Maximum": Float(2.0) }),
+                    "Position": Dynamic("Multiply Vec3 by Float", {
+                        "A": Dynamic("Random Unit Vec3"),
+                        "B": Float(0.15),
+                    }),
+                    // From a warm palette towards a random grey-to-violet, more so as the emitter ages.
+                    "Color": Dynamic("Lerp Color", {
+                        "A": Dynamic("Random Color from List", { "Values": [
+                            Link(Color, "User.Warm"),
+                            Color((1.0, 0.8, 0.2, 1.0)),
+                            Color((1.0, 0.2, 0.35, 1.0)),
+                        ] }),
+                        "B": Dynamic("Random Range Color by Uniform", {
+                            "Minimum": Color((0.3, 0.3, 0.4, 1.0)),
+                            "Maximum": Color((0.6, 0.3, 1.0, 1.0)),
+                        }),
+                        "Alpha": Dynamic("Multiply Float", {
+                            "A": Dynamic("Normalized Emitter Age", { "Duration": Float(3.0) }),
+                            "B": Float(0.8),
+                        }),
+                    }),
+                    "Sprite Size": Dynamic("Multiply Vec2 by Float", {
+                        "A": Vec2((0.07, 0.07)),
+                        "B": Dynamic("Uniform Ranged Float", { "Minimum": Float(0.6), "Maximum": Float(1.4) }),
+                    }),
+                    "Sprite Rotation": Dynamic("Multiply Float", {
+                        "A": Dynamic("Break Vec3", { "Value": Dynamic("Random Unit Vec3"), "Component": X }),
+                        "B": Float(180.0),
+                    }),
+                }),
+                // Outward and upward: normalize(random direction + up) * 1.5..3 m/s.
+                (module: "Add Velocity", inputs: { "Velocity": Dynamic("Multiply Vec3 by Float", {
+                    "A": Dynamic("Normalize Vec3", { "Vector": Dynamic("Add Vec3", {
+                        "A": Dynamic("Random Unit Vec3"),
+                        "B": Vec3((0.0, 1.5, 0.0)),
+                    }) }),
+                    "B": Dynamic("Uniform Ranged Float", { "Minimum": Float(1.5), "Maximum": Float(3.0) }),
+                }) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                // A swaying gravity: each particle drifts on its own sine and cosine of its age.
+                (module: "Gravity Force", inputs: { "Gravity": Dynamic("Make Vec3 from Floats", {
+                    "X": Dynamic("Sine over Time", { "Amplitude": Float(1.5), "Frequency": Float(0.8), "Time": Link(Float, "Particles.Age") }),
+                    "Y": Float(-2.5),
+                    "Z": Dynamic("Cosine over Time", { "Amplitude": Float(1.5), "Frequency": Float(0.8), "Time": Link(Float, "Particles.Age") }),
+                }) }),
+                // Fast petals feel more drag: a curve indexed by speed / 3 m/s.
+                (module: "Drag", inputs: { "Drag": Dynamic("Float from Curve", {
+                    "Curve": Float([(0.0, 0.2), (1.0, 1.5)]),
+                    "Curve Index": Dynamic("Divide Float", {
+                        "A": Dynamic("Vec3 Length", { "Vector": Link(Vec3, "Particles.Velocity") }),
+                        "B": Float(3.0),
+                    }),
+                }) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": Dynamic("Float from Curve", { "Curve": Float([(0.0, 0.0), (0.1, 1.0), (0.7, 1.0), (1.0, 0.0)]) }),
+                }),
+                // Petals grow with distance from the centre, up to 2 m.
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": Dynamic("Vec2 from Curve", {
+                    "Curve": Vec2([(0.0, (0.5, 0.5)), (1.0, (1.6, 1.6))]),
+                    "Curve Index": Dynamic("Clamp Float", {
+                        "Value": Dynamic("Divide Float", {
+                            "A": Dynamic("Vec3 Distance", { "B": Vec3((0.0, 0.0, 0.0)) }),
+                            "B": Float(2.0),
+                        }),
+                    }),
+                }) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Sparks",
+            sim_target: Gpu,
+            max_particles: 500,
+            emitter_update: [
+                // A burst every half second for the first 2 s; 40 while the system is young, then 20.
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Time": Float(0.0), "Spawn Count": Int(40) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Time": Float(0.5), "Spawn Count": Int(40) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Time": Float(1.0), "Spawn Count": Dynamic("Select Int by Bool", {
+                    "Condition": Dynamic("Compare Floats", { "A": Link(Float, "System.Age"), "B": Float(0.9), "Operation": LessThan }),
+                    "If True": Int(40),
+                    "If False": Int(20),
+                }) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Time": Float(1.5), "Spawn Count": Dynamic("Uniform Ranged Int", { "Minimum": Int(15), "Maximum": Int(25) }) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    // Three lifetimes, picked by a random index.
+                    "Lifetime": Dynamic("Select Float by Int", {
+                        "Index": Dynamic("Uniform Ranged Int", { "Minimum": Int(0), "Maximum": Int(2) }),
+                        "Values": [Float(0.6), Float(0.9), Float(1.2)],
+                    }),
+                    "Color": Dynamic("Make Color from Vec3 and Float", {
+                        "RGB": Dynamic("Select Vec3 by Bool", {
+                            "Condition": Dynamic("Compare Floats", {
+                                "A": Dynamic("Uniform Ranged Float", {}),
+                                "B": Float(0.3),
+                                "Operation": LessThan,
+                            }),
+                            "If True": Vec3((0.4, 0.8, 1.0)),
+                            "If False": Vec3((1.0, 0.9, 0.6)),
+                        }),
+                        "Alpha": Float(1.0),
+                    }),
+                    "Sprite Size": Vec2((0.03, 0.03)),
+                }),
+                // A flat ring lifted a little: a random flat direction minus a random downward nudge, at 4 m/s.
+                (module: "Add Velocity", inputs: { "Velocity": Dynamic("Multiply Vec3 by Float", {
+                    "A": Dynamic("Normalize Vec3", { "Vector": Dynamic("Subtract Vec3", {
+                        "A": Dynamic("Uniform Ranged Vec3", { "Minimum": Vec3((-1.0, -0.1, -1.0)), "Maximum": Vec3((1.0, 0.1, 1.0)) }),
+                        "B": Dynamic("Multiply Vec3", {
+                            "A": Vec3((0.0, 1.0, 0.0)),
+                            "B": Dynamic("Random Range Vec3 by Uniform", { "Minimum": Vec3((0.0, -0.2, 0.0)), "Maximum": Vec3((0.0, -0.6, 0.0)) }),
+                        }),
+                    }) }),
+                    "B": Float(4.0),
+                }) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(2.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": Dynamic("Vec3 from Curve", { "Curve": Vec3([(0.0, (3.0, 3.0, 3.0)), (1.0, (0.5, 0.2, 0.1))]) }),
+                    "Scale Alpha": Dynamic("Cosine over Time", {
+                        "Amplitude": Float(0.5), "Offset": Float(0.5), "Frequency": Float(0.5),
+                        "Time": Link(Float, "Particles.NormalizedAge"),
+                    }),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

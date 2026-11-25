@@ -868,7 +868,7 @@ pub fn by_name(name: &str) -> Option<&'static ModuleDef> {
     MODULES.iter().find(|m| m.name == name)
 }
 
-/// The table's own copy of static-switch value `name`, if any module has it.
+/// The table's own copy of static-switch value `name`, if any module or dynamic input has it.
 pub fn static_choice(name: &str) -> Option<&'static str> {
     MODULES
         .iter()
@@ -876,6 +876,15 @@ pub fn static_choice(name: &str) -> Option<&'static str> {
         .flat_map(|i| i.choices)
         .find(|c| **c == name)
         .copied()
+        .or_else(|| {
+            crate::dynamic::DYNAMIC_INPUTS
+                .iter()
+                .flat_map(|d| d.args.iter())
+                .find_map(|a| match a.kind {
+                    crate::dynamic::ArgKind::Choice(c) => c.iter().find(|x| **x == name).copied(),
+                    _ => None,
+                })
+        })
 }
 
 pub fn by_kind(kind: ModuleKind) -> &'static ModuleDef {
