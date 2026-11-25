@@ -23,3 +23,18 @@ Regenerate the previews (needs the GPU; camera per effect as in `fx_bench`'s
 ```sh
 nix develop /home/zach/helm-projects/bevy-solari-opt -c sh effects/library/previews.sh
 ```
+
+## GPU cost on the RTX 3080 (fx_bench, 1080p, commit 312ed48)
+
+| Effect | Emitters | Sim | Sort | Draw | Total GPU ms | Budget 0.2 |
+|---|---|---|---|---|---|---|
+| campfire | 4 | 0.147 | 0.067 | 0.054 | 0.268 | over by 0.068 |
+| sparks_burst | 2 | 0.065 | 0.034 | 0.004 | 0.102 | ok |
+| rising_smoke | 1 | 0.038 | 0.035 | 0.081 | 0.154 | ok |
+| magic_swirl | 5 | 0.180 | 0.034 | 0.013 | 0.227 | over by 0.027 |
+| sword_trail | 2 | 0.070 | 0.001 | 0.008 | 0.079 | ok |
+| debris | 2 | 0.062 | 0.048 | 0.010 | 0.121 | ok |
+
+Sim time grows with the number of emitters (about 0.035 ms each), not with
+particle count (all are under 1000 particles), so the two effects over budget
+are over because of fixed per-emitter cost.
