@@ -8,7 +8,7 @@ cargo run -p fx_core --bin fxc -- cook  effects/samples/fountain.fx.ron   # writ
 cargo run -p fx_core --bin fxc -- modules                                  # modules, stages, inputs
 ```
 
-Shape: `( name, user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
+Shape: `( name, duration, scalability: ( ... ), user_parameters: { "User.X": <literal> }, system_spawn, system_update, emitters: [ ( name, sim_target: Gpu|Cpu, max_particles, emitter_spawn, emitter_update, particle_spawn, particle_update, event_handlers: [ ... ], renderers: [ ... ] ) ] )`.
 Each stage is a list of `(module: "Niagara Module Name", enabled: true, inputs: { "Input Name": <input> })`.
 
 **Renderers** (Niagara's emitter renderers) say how particles are drawn. `renderers` is a list of `Sprite(( ... ))`, `Ribbon(( ... ))`, `Mesh(( ... ))` and `Light(( ... ))`; an emitter without it draws nothing. Every field is optional and defaults to Niagara's value. `Sprite`:
@@ -143,6 +143,26 @@ simulation_stages: [
 ```
 
 A 2D grid lies in the world XY plane. Stages run each step after the spawn, in order, each `iterations` times (1..=64). A grid stage runs custom modules once per cell; the body sees `Cell` (`vec2<i32>`/`vec3<i32>`), `CellPosition` (world) and every attribute of the grid as a `var`; it reads the previous values (stages ping-pong two copies), so neighbour reads are race-free. Every body of the emitter can read its grids: `Smoke_Density(cell)` (clamped to the grid), `Smoke_sample_Velocity(pos)` (bilinear/trilinear at a world position), `Smoke_cell(pos)`, `Smoke_cell_position(cell)` and the constants `Smoke_NumCells`, `Smoke_Min`, `Smoke_CellSize`. Particle stages run built-in and custom particle modules in place (no kills, collisions or events there). `samples/wgsl_swirl.fx.ron` (a custom particle module) and `samples/grid_smoke.fx.ron` (a 64x96 stable-fluids smoke grid moving the particles) use them.
+
+**Lifecycle and scalability** (Niagara's Effect Type) are two optional system-level fields:
+
+```ron
+duration: 0.6,                 // seconds a one-shot keeps spawning
+scalability: (                 // every field optional
+    max_distance: 40.0,                 // m from the nearest camera to the bounds sphere; beyond it the instance is culled (default: none)
+    spawn_count_scale_by_distance: [(10.0, 1.0), (40.0, 0.25)],  // (distance m, scale), piecewise linear, clamped at the ends
+    cull_when_not_visible: true,        // default false
+    visibility_grace: 0.5,              // s out of every view before the visibility cull applies; default 0.5
+    bounds_radius: 2.0,                 // m, sphere around the effect origin used for distance and visibility; default 2.0
+    max_instances: 32,                  // per system, the nearest are kept; 0 = unlimited (default)
+    quality: (                          // per level, each optional, each field optional
+        Low: (spawn_count_scale: 0.25, max_distance: 20.0, max_instances: 8),
+        Medium: (spawn_count_scale: 0.5),
+    ),
+),
+```
+
+Without `duration`, the cook derives it: an emitter whose spawn modules are only `Spawn Burst Instantaneous` with constant Spawn Times stops spawning after its latest Spawn Time (no spawn modules: at once); if every emitter stops, the effect is a one-shot lasting the latest of them, otherwise (any `Spawn Rate`, or a Spawn Time that is not a constant) it loops. The game runtime stops spawning a one-shot after `duration` and despawns it when its particles are gone. A culled looping effect pauses until it is back in range or view; a culled one-shot ends. The spawn-count scale (the quality level's `spawn_count_scale` times the distance curve) multiplies every spawn request. The game picks the quality level (`Low`, `Medium`, `High` (default), `Epic`, `Cinematic`) at runtime; a level's `max_distance` and `max_instances` replace the base values. Distances, scales, `visibility_grace` and `bounds_radius` must be finite and at least 0 (`max_distance` and `duration` more than 0), curve distances strictly increasing.
 
 Units are Bevy's: metres, seconds, Y up (Niagara's -980 cm/s² Z gravity is `(0.0, -9.81, 0.0)` here).
 Put `Particle State` first in `particle_update` (ages and kills particles) and `Solve Forces and Velocity` after the force modules.

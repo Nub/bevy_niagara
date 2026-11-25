@@ -144,7 +144,7 @@ fn renderers_survive_the_cooked_binary() {
     ));
     let bytes = cook::to_bytes(&sys);
     assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
-    assert_eq!(cook::COOKED_FORMAT_VERSION, 8);
+    assert_eq!(cook::COOKED_FORMAT_VERSION, 9);
 }
 
 #[test]

@@ -85,6 +85,18 @@ impl Stage {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SystemSource {
     pub name: String,
+    /// Seconds a one-shot keeps spawning; `None` derives it from the emitters.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalability::serialize_plain"
+    )]
+    pub duration: Option<f32>,
+    /// The `scalability: ( ... )` block, if written.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalability::serialize_plain"
+    )]
+    pub scalability: Option<crate::scalability::ScalabilitySource>,
     /// Exposed `User.` parameters with their default values.
     pub user_parameters: ParamMap,
     pub system_spawn: Vec<ModuleCall>,

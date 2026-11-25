@@ -26,6 +26,7 @@ pub mod ribbon;
 pub mod view;
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use fx_core::cook::CookedSystem;
 use fx_core::events::{EVENT_WORDS, Event, EventKind};
@@ -139,17 +140,28 @@ pub struct GpuEmitter {
     bind_groups: [wgpu::BindGroup; 2],
     args: wgpu::Buffer,
     args_bind_group: wgpu::BindGroup,
-    pipelines: Pipelines,
+    pipelines: Arc<Pipelines>,
     pub current: usize,
     age: f32,
     spawn_remainder: f32,
+    /// Fraction of a particle carried over by the spawn-count scale.
+    scale_remainder: f32,
     /// Generated WGSL, for inspection.
-    pub shader_source: String,
+    pub shader_source: Arc<str>,
 }
 
 /// A cooked system simulated on the GPU.
 pub struct GpuEffect {
-    pub system: CookedSystem,
+    pub system: Arc<CookedSystem>,
+    /// The compiled pipelines and layouts, shared by every instance made from it.
+    pub program: Arc<GpuProgram>,
+    /// Emitters spawn while active (Niagara Activate/Deactivate); living
+    /// particles simulate either way.
+    pub active: bool,
+    /// Multiplies every spawn request (scalability); fractions carry over.
+    pub spawn_scale: f32,
+    /// Set by [`GpuEffect::reset`]: the next step clears the GPU counts first.
+    clear_pending: bool,
     pub seed: u32,
     /// Steps taken so far.
     pub frame: u32,
@@ -171,9 +183,6 @@ pub struct GpuEffect {
     ray_tracing_scene: Option<wgpu::BindGroup>,
     slot: u32,
     scratch: [u8; FRAME_BYTES],
-    /// Bytes between the slots of the stage iteration uniform.
-    iteration_stride: u64,
-    _iterations: wgpu::Buffer,
 }
 
 /// What the host offers the simulation beyond the effect itself.
@@ -210,8 +219,8 @@ struct SceneBindings {
 }
 
 impl SceneBindings {
-    fn new(device: &wgpu::Device) -> Self {
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx_gpu scene"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -235,7 +244,11 @@ impl SceneBindings {
                     count: None,
                 },
             ],
-        });
+        })
+    }
+
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
+        let layout = layout.clone();
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fx scene"),
             contents: &[0u8; SCENE_BYTES],
@@ -306,17 +319,38 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-impl GpuEffect {
-    /// Compiles every emitter and allocates its pooled buffers.
-    pub fn new(device: &wgpu::Device, system: &CookedSystem, seed: u32) -> Result<Self, String> {
-        Self::with_options(device, system, seed, GpuOptions::default())
-    }
+/// One emitter's compiled kernels and sizes, shared by every instance.
+struct EmitterProgram {
+    pipelines: Arc<Pipelines>,
+    shader_source: Arc<str>,
+    capacity: u32,
+    words: u32,
+    grid_bytes: u64,
+}
 
-    /// [`GpuEffect::new`] with what the host offers (a ray-tracing scene).
-    pub fn with_options(
+/// A cooked system compiled for the GPU: its pipelines and bind group
+/// layouts. Instances made from one program ([`GpuEffect::from_program`])
+/// share them, so a new instance only allocates its buffers.
+pub struct GpuProgram {
+    pub system: Arc<CookedSystem>,
+    layout: wgpu::BindGroupLayout,
+    args_layout: wgpu::BindGroupLayout,
+    data_layout: wgpu::BindGroupLayout,
+    scene_layout: wgpu::BindGroupLayout,
+    event_layout: EventLayout,
+    emitters: Vec<EmitterProgram>,
+    /// Bytes between the slots of the stage iteration uniform.
+    iteration_stride: u64,
+    iterations: wgpu::Buffer,
+    /// Built with a ray-tracing scene layout.
+    pub ray_tracing: bool,
+}
+
+impl GpuProgram {
+    /// Compiles every emitter of `system`.
+    pub fn new(
         device: &wgpu::Device,
-        system: &CookedSystem,
-        seed: u32,
+        system: Arc<CookedSystem>,
         options: GpuOptions,
     ) -> Result<Self, String> {
         if system.user_params.len() > MAX_USER_PARAMS {
@@ -372,8 +406,8 @@ impl GpuEffect {
             label: Some("fx_gpu sim args"),
             entries: &[storage_entry(0, false)],
         });
-        let scene = SceneBindings::new(device);
-        let data = data::DataBindings::new(device, system);
+        let scene_layout = SceneBindings::layout(device);
+        let data_layout = data::DataBindings::layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fx_gpu sim"),
             bind_group_layouts: &[Some(&layout)],
@@ -386,7 +420,7 @@ impl GpuEffect {
         });
         let scene_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fx_gpu sim scene"),
-            bind_group_layouts: &[Some(&layout), Some(&data.layout), Some(&scene.layout)],
+            bind_group_layouts: &[Some(&layout), Some(&data_layout), Some(&scene_layout)],
             immediate_size: 0,
         });
         let rt_pipeline_layout = options.ray_tracing_layout.map(|rt| {
@@ -394,8 +428,8 @@ impl GpuEffect {
                 label: Some("fx_gpu sim ray tracing"),
                 bind_group_layouts: &[
                     Some(&layout),
-                    Some(&data.layout),
-                    Some(&scene.layout),
+                    Some(&data_layout),
+                    Some(&scene_layout),
                     Some(rt),
                 ],
                 immediate_size: 0,
@@ -414,28 +448,13 @@ impl GpuEffect {
             contents: &iteration_bytes,
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let event_layout = EventLayout::new(system);
-        let event_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("fx event counts"),
-            contents: &vec![0u8; event_layout.regions.len().max(1) * 4],
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
+        let event_layout = EventLayout::new(&system);
         let event_bytes = event_layout.data_words.max(1) * 4;
         if event_bytes > limit {
             return Err(format!(
                 "the effect's events need {event_bytes} bytes, over this GPU's storage binding limit of {limit}"
             ));
         }
-        let event_data = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fx event data"),
-            size: event_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         let mut emitters = Vec::new();
         for (ei, e) in system.emitters.iter().enumerate() {
@@ -452,7 +471,16 @@ impl GpuEffect {
                     e.name, e.max_particles
                 ));
             }
-            let shader = codegen::emitter_shader(system, ei, &event_layout, ShaderOptions::default());
+            // Grid collections: two copies of each.
+            let grid_words: u64 = e.grids.iter().map(|g| 2 * g.half_words() as u64).sum();
+            let grid_bytes = (grid_words * 4).max(16);
+            if grid_bytes > limit {
+                return Err(format!(
+                    "emitter \"{}\": its grids need {grid_bytes} bytes, over this GPU's storage binding limit of {limit}",
+                    e.name
+                ));
+            }
+            let shader = codegen::emitter_shader(&system, ei, &event_layout, ShaderOptions::default());
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&e.name),
                 source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&shader.source)),
@@ -487,7 +515,7 @@ impl GpuEffect {
             // The ray-tracing variant of the update, when it differs.
             let update_rt = rt_pipeline_layout.as_ref().and_then(|rt_layout| {
                 let rt = codegen::emitter_shader(
-                    system,
+                    &system,
                     ei,
                     &event_layout,
                     ShaderOptions { ray_tracing: true },
@@ -516,6 +544,88 @@ impl GpuEffect {
                     .collect(),
                 uses_scene: modules_read,
             };
+            emitters.push(EmitterProgram {
+                pipelines: Arc::new(pipelines),
+                shader_source: shader.source.into(),
+                capacity,
+                words,
+                grid_bytes,
+            });
+        }
+        Ok(GpuProgram {
+            system,
+            layout,
+            args_layout,
+            data_layout,
+            scene_layout,
+            event_layout,
+            emitters,
+            iteration_stride,
+            iterations,
+            ray_tracing: options.ray_tracing_layout.is_some(),
+        })
+    }
+
+    /// GPU bytes one instance of this program allocates (before data interfaces).
+    pub fn instance_bytes(&self) -> u64 {
+        self.emitters
+            .iter()
+            .map(|e| {
+                e.capacity as u64 * e.words as u64 * 4 * 2
+                    + STATE_WORDS * 4
+                    + FRAME_SLOT * MAX_STEPS_PER_SUBMIT as u64
+                    + e.grid_bytes
+            })
+            .sum::<u64>()
+            + self.event_layout.regions.len().max(1) as u64 * 4
+            + self.event_layout.data_words.max(1) * 4
+    }
+}
+
+impl GpuEffect {
+    /// Compiles every emitter and allocates its pooled buffers.
+    pub fn new(device: &wgpu::Device, system: &CookedSystem, seed: u32) -> Result<Self, String> {
+        Self::with_options(device, system, seed, GpuOptions::default())
+    }
+
+    /// [`GpuEffect::new`] with what the host offers (a ray-tracing scene).
+    pub fn with_options(
+        device: &wgpu::Device,
+        system: &CookedSystem,
+        seed: u32,
+        options: GpuOptions,
+    ) -> Result<Self, String> {
+        let program = GpuProgram::new(device, Arc::new(system.clone()), options)?;
+        Ok(Self::from_program(device, &Arc::new(program), seed))
+    }
+
+    /// A new instance of a compiled program: allocates its buffers and bind
+    /// groups only (no shader compilation).
+    pub fn from_program(device: &wgpu::Device, program: &Arc<GpuProgram>, seed: u32) -> Self {
+        let system = &program.system;
+        let scene = SceneBindings::new(device, &program.scene_layout);
+        let data = data::DataBindings::new(device, &program.data_layout, system);
+        let event_layout = program.event_layout.clone();
+        let event_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fx event counts"),
+            contents: &vec![0u8; event_layout.regions.len().max(1) * 4],
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        let event_data = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx event data"),
+            size: event_layout.data_words.max(1) * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut emitters = Vec::new();
+        for (e, ep) in system.emitters.iter().zip(&program.emitters) {
+            let (capacity, words) = (ep.capacity, ep.words);
+            let bytes = capacity as u64 * words as u64 * 4;
             let particle_buffer = |i: usize| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(if i == 0 {
@@ -531,19 +641,12 @@ impl GpuEffect {
                 })
             };
             let particles = [particle_buffer(0), particle_buffer(1)];
-            // Grid collections: two copies of each, zeroed.
-            let grid_words: u64 = e.grids.iter().map(|g| 2 * g.half_words() as u64).sum();
-            let grid_bytes = (grid_words * 4).max(16);
-            if grid_bytes > limit {
-                return Err(format!(
-                    "emitter \"{}\": its grids need {grid_bytes} bytes, over this GPU's storage binding limit of {limit}",
-                    e.name
-                ));
-            }
             let grids = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("fx grids"),
-                contents: &vec![0u8; grid_bytes as usize],
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                contents: &vec![0u8; ep.grid_bytes as usize],
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
             });
             let state = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("fx emitter state"),
@@ -561,7 +664,7 @@ impl GpuEffect {
             });
             let args_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fx sim args"),
-                layout: &args_layout,
+                layout: &program.args_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: args.as_entire_binding(),
@@ -576,7 +679,7 @@ impl GpuEffect {
             let bind_group = |s: usize| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("fx sim"),
-                    layout: &layout,
+                    layout: &program.layout,
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
@@ -613,7 +716,7 @@ impl GpuEffect {
                         wgpu::BindGroupEntry {
                             binding: 7,
                             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &iterations,
+                                buffer: &program.iterations,
                                 offset: 0,
                                 size: wgpu::BufferSize::new(16),
                             }),
@@ -633,15 +736,20 @@ impl GpuEffect {
                 bind_groups,
                 args,
                 args_bind_group,
-                pipelines,
+                pipelines: ep.pipelines.clone(),
                 current: 0,
                 age: 0.0,
                 spawn_remainder: 0.0,
-                shader_source: shader.source,
+                scale_remainder: 0.0,
+                shader_source: ep.shader_source.clone(),
             });
         }
-        Ok(GpuEffect {
+        GpuEffect {
             system: system.clone(),
+            program: program.clone(),
+            active: true,
+            spawn_scale: 1.0,
+            clear_pending: false,
             seed,
             frame: 0,
             time: 0.0,
@@ -656,9 +764,31 @@ impl GpuEffect {
             ray_tracing_scene: None,
             slot: 0,
             scratch: [0; FRAME_BYTES],
-            iteration_stride,
-            _iterations: iterations,
-        })
+        }
+    }
+
+    /// Restarts the effect as if just created with `seed` (pooling: reuse an
+    /// instance instead of building a new one). No allocation: the next
+    /// [`GpuEffect::step`] clears the GPU counts, events and grids with
+    /// buffer clears before it runs. `User.` values go back to their
+    /// defaults; data interface bindings are kept.
+    pub fn reset(&mut self, seed: u32) {
+        self.seed = seed;
+        self.frame = 0;
+        self.time = 0.0;
+        self.active = true;
+        self.spawn_scale = 1.0;
+        self.owner_velocity = [0.0; 3];
+        for (u, p) in self.user.iter_mut().zip(&self.system.user_params) {
+            *u = p.value;
+        }
+        for em in &mut self.emitters {
+            em.current = 0;
+            em.age = 0.0;
+            em.spawn_remainder = 0.0;
+            em.scale_remainder = 0.0;
+        }
+        self.clear_pending = true;
     }
 
     /// Sets a `User.` parameter. Returns false if it is not declared or the type differs.
@@ -854,6 +984,15 @@ impl GpuEffect {
             "more than {MAX_STEPS_PER_SUBMIT} steps recorded without GpuEffect::submitted()"
         );
         let offset = self.slot as u64 * FRAME_SLOT;
+        if self.clear_pending {
+            // A reset instance: zero its counts, ids, events and grids (no allocation).
+            for em in &self.emitters {
+                encoder.clear_buffer(&em.state, 0, None);
+                encoder.clear_buffer(&em.grids, 0, None);
+            }
+            encoder.clear_buffer(&self.event_counts, 0, None);
+            self.clear_pending = false;
+        }
         for ei in 0..self.emitters.len() {
             let ce = &self.system.emitters[ei];
             let em = &mut self.emitters[ei];
@@ -885,6 +1024,14 @@ impl GpuEffect {
                 ei as u32,
                 self.frame,
             ));
+            if !self.active {
+                request = 0;
+            } else if self.spawn_scale != 1.0 {
+                let r = request as f32 * self.spawn_scale.max(0.0) + em.scale_remainder;
+                let whole = r.floor();
+                em.scale_remainder = r - whole;
+                request = whole as u32;
+            }
 
             // Frame uniform, in sim_common.wgsl's `Frame` layout.
             let s = &mut self.scratch;
@@ -991,7 +1138,7 @@ impl GpuEffect {
                 for (pipeline, k) in &p.stages {
                     pass.set_pipeline(pipeline);
                     for j in 0..k.iterations as u64 {
-                        pass.set_bind_group(0, bg, &[offset as u32, (j * self.iteration_stride) as u32]);
+                        pass.set_bind_group(0, bg, &[offset as u32, (j * self.program.iteration_stride) as u32]);
                         match k.groups {
                             Some([x, y, z]) => pass.dispatch_workgroups(x, y, z),
                             None => pass.dispatch_workgroups_indirect(&em.args, 48),

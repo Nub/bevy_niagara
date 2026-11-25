@@ -17,6 +17,8 @@ pub const SYSTEM_FIELDS: &[&str] = &[
     "system_update",
     "emitters",
     "custom_modules",
+    "duration",
+    "scalability",
 ];
 pub const EMITTER_FIELDS: &[&str] = &[
     "name",
@@ -64,9 +66,13 @@ pub fn decode_system(v: &SValue, d: &mut Diags) -> Option<SystemSource> {
             .collect(),
         None => Vec::new(),
     };
+    let duration = f.take("duration").and_then(|v| decode_duration(v, d));
+    let scalability = f.take("scalability").and_then(|v| decode_scalability(v, d));
     f.finish(d);
     Some(SystemSource {
         name,
+        duration,
+        scalability,
         user_parameters,
         system_spawn,
         system_update,
@@ -1631,4 +1637,230 @@ fn decode_sim_stage(v: &SValue, d: &mut Diags) -> Option<crate::custom::SimStage
         modules,
         span: v.span,
     })
+}
+
+/// A finite number `>= min` (or `> min` when `strict`), else an error at `v`.
+fn bounded(v: &SValue, field: &str, min: f64, strict: bool, help: &str, d: &mut Diags) -> Option<f32> {
+    match v.kind {
+        SKind::Number(n, _) if n.is_finite() && (n > min || (!strict && n == min)) => Some(n as f32),
+        _ => {
+            let bound = if strict { "greater than" } else { "of at least" };
+            d.error(
+                v.span,
+                format!("{field} must be a finite number {bound} {min}, found {}", v.kind.describe()),
+                Some(help.into()),
+            );
+            None
+        }
+    }
+}
+
+/// The system's `duration: 0.6`.
+fn decode_duration(v: &SValue, d: &mut Diags) -> Option<f32> {
+    bounded(
+        v,
+        "`duration`",
+        0.0,
+        true,
+        "write e.g. `duration: 2.0` (seconds a one-shot keeps spawning), or leave it out to derive it from the emitters' bursts",
+        d,
+    )
+}
+
+/// The system's `scalability: ( ... )` block.
+fn decode_scalability(
+    v: &SValue,
+    d: &mut Diags,
+) -> Option<crate::scalability::ScalabilitySource> {
+    use crate::scalability::{SCALABILITY_FIELDS, ScalabilitySource};
+    let mut f = Fields::new(v, "`scalability`", SCALABILITY_FIELDS, d)?;
+    let mut s = ScalabilitySource {
+        span: v.span,
+        ..ScalabilitySource::default()
+    };
+    if let Some(x) = f.take("max_distance") {
+        s.max_distance = max_distance(x, d).unwrap_or(s.max_distance);
+    }
+    if let Some(x) = f.take("spawn_count_scale_by_distance") {
+        s.spawn_count_scale_by_distance = distance_curve(x, d);
+    }
+    if let Some(x) = f.take("cull_when_not_visible") {
+        s.cull_when_not_visible = boolean(x, "cull_when_not_visible", d).unwrap_or(false);
+    }
+    if let Some(x) = f.take("visibility_grace") {
+        s.visibility_grace = bounded(
+            x,
+            "`visibility_grace`",
+            0.0,
+            false,
+            "write e.g. `visibility_grace: 0.5` (seconds out of every view before the visibility cull applies)",
+            d,
+        )
+        .unwrap_or(s.visibility_grace);
+    }
+    if let Some(x) = f.take("bounds_radius") {
+        s.bounds_radius = bounded(
+            x,
+            "`bounds_radius`",
+            0.0,
+            false,
+            "write e.g. `bounds_radius: 2.0` (metres around the effect origin, used for distance and visibility)",
+            d,
+        )
+        .unwrap_or(s.bounds_radius);
+    }
+    if let Some(x) = f.take("max_instances") {
+        s.max_instances = max_instances(x, d).unwrap_or(0);
+    }
+    if let Some(x) = f.take("quality") {
+        s.quality = decode_quality(x, d);
+    }
+    f.finish(d);
+    Some(s)
+}
+
+fn max_distance(v: &SValue, d: &mut Diags) -> Option<f32> {
+    bounded(
+        v,
+        "`max_distance`",
+        0.0,
+        true,
+        "write e.g. `max_distance: 40.0` (metres from the nearest camera), or leave it out for no distance cull",
+        d,
+    )
+}
+
+fn max_instances(v: &SValue, d: &mut Diags) -> Option<u32> {
+    match v.kind {
+        SKind::Number(n, true) if n >= 0.0 && n <= u32::MAX as f64 => Some(n as u32),
+        _ => {
+            d.error(
+                v.span,
+                format!(
+                    "`max_instances` must be a whole number of at least 0, found {}",
+                    v.kind.describe()
+                ),
+                Some("write e.g. `max_instances: 32` (the nearest are kept; 0 = unlimited)".into()),
+            );
+            None
+        }
+    }
+}
+
+/// `[(distance, scale), ...]`, distances strictly increasing.
+fn distance_curve(v: &SValue, d: &mut Diags) -> Vec<(f32, f32)> {
+    const HELP: &str = "write e.g. `spawn_count_scale_by_distance: [(10.0, 1.0), (40.0, 0.25)]` ((distance m, scale) pairs, distances increasing)";
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    for p in list(v, "`spawn_count_scale_by_distance`", d) {
+        let items = match &p.kind {
+            SKind::Tuple(None, items) if items.len() == 2 => items,
+            other => {
+                d.error(
+                    p.span,
+                    format!(
+                        "each `spawn_count_scale_by_distance` entry must be `(distance, scale)`, found {}",
+                        other.describe()
+                    ),
+                    Some(HELP.into()),
+                );
+                continue;
+            }
+        };
+        let dist = bounded(&items[0], "a `spawn_count_scale_by_distance` distance", 0.0, false, HELP, d);
+        let scale = bounded(&items[1], "a `spawn_count_scale_by_distance` scale", 0.0, false, HELP, d);
+        let (Some(dist), Some(scale)) = (dist, scale) else {
+            continue;
+        };
+        if let Some(&(prev, _)) = out.last()
+            && dist <= prev
+        {
+            d.error(
+                p.span,
+                format!(
+                    "`spawn_count_scale_by_distance` distances must be strictly increasing, but {dist} follows {prev}"
+                ),
+                Some(HELP.into()),
+            );
+            continue;
+        }
+        out.push((dist, scale));
+    }
+    out
+}
+
+/// `quality: ( Low: ( ... ), ... )`: one entry per level, each optional.
+fn decode_quality(v: &SValue, d: &mut Diags) -> [crate::scalability::QualitySource; 5] {
+    use crate::scalability::{QUALITY_NAMES, QualityLevel};
+    let mut out: [crate::scalability::QualitySource; 5] = Default::default();
+    let levels = QUALITY_NAMES.join(", ");
+    let fields: &[Field] = match &v.kind {
+        SKind::Struct(_, f) => f,
+        SKind::Tuple(_, items) if items.is_empty() => &[],
+        other => {
+            d.error(
+                v.span,
+                format!(
+                    "`quality` must be a struct `( Low: ( ... ), ... )`, found {}",
+                    other.describe()
+                ),
+                Some(format!("its fields are the quality levels: {levels}")),
+            );
+            return out;
+        }
+    };
+    let mut seen = [false; 5];
+    for f in fields {
+        let Some(level) = QualityLevel::from_name(&f.name) else {
+            let help = match suggest(&f.name, QUALITY_NAMES.iter().copied()) {
+                Some(s) => format!("did you mean `{s}`? Quality levels are: {levels}"),
+                None => format!("quality levels are: {levels}"),
+            };
+            d.error(
+                f.span,
+                format!("unknown quality level `{}`", f.name),
+                Some(help),
+            );
+            continue;
+        };
+        if std::mem::replace(&mut seen[level.index()], true) {
+            d.error(
+                f.span,
+                format!("quality level `{}` appears twice", f.name),
+                Some("keep one of the two".into()),
+            );
+            continue;
+        }
+        if let Some(q) = decode_quality_level(&f.value, d) {
+            out[level.index()] = q;
+        }
+    }
+    out
+}
+
+fn decode_quality_level(v: &SValue, d: &mut Diags) -> Option<crate::scalability::QualitySource> {
+    use crate::scalability::{QUALITY_FIELDS, QualitySource};
+    let mut f = Fields::new(v, "a quality level", QUALITY_FIELDS, d)?;
+    let mut q = QualitySource {
+        span: v.span,
+        ..QualitySource::default()
+    };
+    if let Some(x) = f.take("spawn_count_scale") {
+        q.spawn_count_scale = bounded(
+            x,
+            "`spawn_count_scale`",
+            0.0,
+            false,
+            "write e.g. `spawn_count_scale: 0.5` (multiplies every spawn request at this level)",
+            d,
+        )
+        .unwrap_or(1.0);
+    }
+    if let Some(x) = f.take("max_distance") {
+        q.max_distance = max_distance(x, d);
+    }
+    if let Some(x) = f.take("max_instances") {
+        q.max_instances = max_instances(x, d);
+    }
+    f.finish(d);
+    Some(q)
 }

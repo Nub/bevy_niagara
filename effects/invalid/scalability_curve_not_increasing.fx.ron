@@ -1,0 +1,12 @@
+// expect: 6: distances must be strictly increasing
+(
+    name: "Broken",
+    scalability: (
+        spawn_count_scale_by_distance: [(10.0, 1.0), (40.0, 0.25),
+            (20.0, 0.5)],
+    ),
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+    )],
+)

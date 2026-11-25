@@ -1,0 +1,13 @@
+// expect: 6: unknown field `max_instance` in a quality level
+(
+    name: "Broken",
+    scalability: (
+        quality: (
+            Low: (max_instance: 4),
+        ),
+    ),
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+    )],
+)

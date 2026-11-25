@@ -495,12 +495,7 @@ fn apply_effect(
     if let Some(sys) = v.system.clone() {
         let e = commands
             .spawn((
-                ParticleEffect {
-                    system: sys,
-                    seed: v.seed,
-                    meshes: Vec::new(),
-                    bindings: Vec::new(),
-                },
+                ParticleEffect::shared(sys, v.seed),
                 Transform::IDENTITY,
             ))
             .id();

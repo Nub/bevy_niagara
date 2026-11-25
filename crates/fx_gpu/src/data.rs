@@ -162,11 +162,15 @@ fn buffer(device: &wgpu::Device, label: &str, words: &[u32]) -> wgpu::Buffer {
 }
 
 impl DataBindings {
-    pub fn new(device: &wgpu::Device, system: &CookedSystem) -> Self {
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    pub fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx_gpu data interfaces"),
             entries: &[storage(0), storage(1), storage(2)],
-        });
+        })
+    }
+
+    pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, system: &CookedSystem) -> Self {
+        let layout = layout.clone();
         let slots = system
             .data_interfaces
             .iter()

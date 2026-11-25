@@ -1,0 +1,10 @@
+// expect: 4: `duration` must be a finite number greater than 0
+(
+    name: "Broken",
+    duration: -1.0,
+    scalability: (bounds_radius: 1.0),
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Burst Instantaneous")],
+    )],
+)

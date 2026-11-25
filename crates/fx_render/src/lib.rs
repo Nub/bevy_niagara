@@ -30,6 +30,7 @@
 //! uniform writes from fixed-size scratch arrays.
 
 pub mod data;
+pub mod game;
 mod mesh_data;
 mod scene;
 pub mod stats;
@@ -37,6 +38,11 @@ mod textures;
 
 pub use stats::{EffectStats, EmitterStats, FxStats, FxStatsData, FxStatsPlugin};
 pub use data::DataBinding;
+pub use game::{
+    CullReason, EffectControl, EffectMode, FxCommandsExt, FxPoolStats, FxQuality, FxScalability,
+    IntoParam, ParamError, PoolStats, find_joint,
+};
+pub use fx_core::scalability::QualityLevel;
 pub use scene::{FxRayTracingScene, FxSceneDepth};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,8 +97,11 @@ use fx_gpu::wgpu;
 /// in its `user_parameters`) read their default asset unless bound with
 /// [`ParticleEffect::bind_entity`], [`ParticleEffect::bind_mesh`] or
 /// [`ParticleEffect::bind_texture`] (see the `data` module docs).
+///
+/// Instances made from the same `Arc<CookedSystem>` ([`ParticleEffect::shared`])
+/// share one compiled program and one pool of GPU instances (see [`game`]).
 #[derive(Component, Clone)]
-#[require(Transform, Visibility)]
+#[require(Transform, Visibility, EffectControl)]
 pub struct ParticleEffect {
     pub system: Arc<CookedSystem>,
     pub seed: u32,
@@ -101,16 +110,60 @@ pub struct ParticleEffect {
     pub meshes: Vec<(usize, Handle<Mesh>)>,
     /// Data interface bindings by full name (`"User.Character"`).
     pub bindings: Vec<(String, DataBinding)>,
+    /// `User.` parameter values, in declaration order.
+    user: Vec<fx_core::types::Value>,
 }
 
 impl ParticleEffect {
     pub fn new(system: CookedSystem, seed: u32) -> Self {
+        Self::shared(Arc::new(system), seed)
+    }
+
+    /// An instance of a system loaded once and shared: spawns of the same
+    /// `Arc` reuse its compiled program and pooled GPU instances.
+    pub fn shared(system: Arc<CookedSystem>, seed: u32) -> Self {
+        let user = system.user_params.iter().map(|p| p.value).collect();
         ParticleEffect {
-            system: Arc::new(system),
+            system,
             seed,
             meshes: Vec::new(),
             bindings: Vec::new(),
+            user,
         }
+    }
+
+    /// Sets `User.` parameter `name` (`"User.Rate"` or `"Rate"`), checked
+    /// against its declared type; applied from the next simulation step.
+    /// No allocation on success.
+    pub fn set_param(&mut self, name: &str, value: impl IntoParam) -> Result<(), ParamError> {
+        let value = value.into_param();
+        let Some(i) = game::user_index(&self.system, name) else {
+            return Err(ParamError::Unknown {
+                name: name.to_string(),
+                system: self.system.name.clone(),
+            });
+        };
+        let expected = self.system.user_params[i].value.ty();
+        if expected != value.ty() {
+            return Err(ParamError::WrongType {
+                name: self.system.user_params[i].name.clone(),
+                expected,
+                found: value.ty(),
+            });
+        }
+        self.user[i] = value;
+        Ok(())
+    }
+
+    /// Builder form of [`Self::set_param`].
+    pub fn with_param(mut self, name: &str, value: impl IntoParam) -> Result<Self, ParamError> {
+        self.set_param(name, value)?;
+        Ok(self)
+    }
+
+    /// The current value of `User.` parameter `name`.
+    pub fn param(&self, name: &str) -> Option<fx_core::types::Value> {
+        game::user_index(&self.system, name).map(|i| self.user[i])
     }
 
     /// Draws mesh renderer `renderer` (index among all emitters' renderers,
@@ -246,7 +299,20 @@ impl Plugin for FxPlugin {
                     .collect(),
             )
         };
+        let pool_stats = FxPoolStats::default();
+        let done = game::DoneInbox::default();
         app.init_resource::<FxClock>()
+            .init_resource::<FxQuality>()
+            .init_resource::<FxScalability>()
+            .insert_resource(pool_stats.clone())
+            .insert_resource(done.clone())
+            .add_systems(
+                PostUpdate,
+                (game::finish_effects, game::update_effects)
+                    .chain()
+                    .after(TransformSystems::Propagate)
+                    .after(advance_clock),
+            )
             .insert_resource(ready.clone())
             .insert_resource(inbox.clone())
             .insert_resource(builtins)
@@ -274,6 +340,9 @@ impl Plugin for FxPlugin {
             .insert_resource(ready)
             .insert_resource(inbox)
             .insert_resource(FxDeterministic(self.deterministic))
+            .insert_resource(pool_stats)
+            .insert_resource(done)
+            .init_resource::<DoneReadback>()
             .init_resource::<ExtractedEffects>()
             .init_resource::<FxSceneDepth>()
             .init_resource::<FxRayTracingScene>()
@@ -291,6 +360,11 @@ impl Plugin for FxPlugin {
             )
             .add_systems(Render, queue_particles.in_set(RenderSystems::Queue))
             .add_systems(Render, read_lights.in_set(RenderSystems::Cleanup))
+            .add_systems(Render, map_done_counts.in_set(RenderSystems::Cleanup))
+            .add_systems(
+                RenderGraph,
+                copy_done_counts.after(simulate).before(camera_driver),
+            )
             .add_systems(
                 RenderGraph,
                 simulate.in_set(FxRenderGraphSystems::Simulate).before(camera_driver),
@@ -422,6 +496,16 @@ struct ExtractedEffect {
     data: Vec<(String, data::DiValue)>,
     /// A data interface's asset is still loading.
     data_pending: bool,
+    /// `User.` values (the first `system.user_params.len()`).
+    user: [fx_core::types::Value; fx_gpu::MAX_USER_PARAMS],
+    /// [`EffectControl`] generation: a change restarts the instance.
+    generation: u32,
+    spawning: bool,
+    /// Culled by scalability: not simulated, not drawn.
+    paused: bool,
+    spawn_scale: f32,
+    /// A one-shot waiting for its particles to die: read its counts back.
+    draining: bool,
 }
 
 #[derive(Resource, Default)]
@@ -469,7 +553,7 @@ fn extract_effects(
     mut cache: ResMut<RendererAssetsCache>,
     mut pending: ResMut<PendingMeshes>,
     clock: Extract<Res<FxClock>>,
-    effects: Extract<Query<(Entity, &ParticleEffect, &GlobalTransform)>>,
+    effects: Extract<Query<(Entity, &ParticleEffect, &EffectControl, &GlobalTransform)>>,
     asset_server: Extract<Res<AssetServer>>,
     builtins: Extract<Res<BuiltinMeshes>>,
     meshes: Extract<Res<Assets<Mesh>>>,
@@ -479,8 +563,8 @@ fn extract_effects(
     out.dt = clock.step;
     out.pose_interval = data_interfaces.interval;
     out.effects.clear();
-    for (entity, effect, transform) in &effects {
-        let key = (entity, Arc::as_ptr(&effect.system) as usize);
+    for (entity, effect, control, transform) in &effects {
+        let key = assets_key(entity, effect);
         let assets = cache
             .0
             .entry(key)
@@ -542,13 +626,23 @@ fn extract_effects(
             assets,
             data,
             data_pending,
+            user: {
+                let mut u = [fx_core::types::Value::Float(0.0); fx_gpu::MAX_USER_PARAMS];
+                let n = effect.user.len().min(fx_gpu::MAX_USER_PARAMS);
+                u[..n].copy_from_slice(&effect.user[..n]);
+                u
+            },
+            generation: control.generation(),
+            spawning: control.spawning,
+            paused: control.paused() || control.is_finished(),
+            spawn_scale: control.spawn_scale(),
+            draining: control.draining(),
         });
     }
     if cache.0.len() > out.effects.len() {
-        let live: Vec<(Entity, usize)> = out
-            .effects
+        let live: Vec<(Entity, usize)> = effects
             .iter()
-            .map(|e| (e.main, Arc::as_ptr(&e.system) as usize))
+            .map(|(e, effect, _, _)| assets_key(e, effect))
             .collect();
         cache.0.retain(|k, _| live.contains(k));
     }
@@ -780,6 +874,14 @@ struct EffectInstance {
     /// Data interface name → the data uploaded to `gpu` (held, so its address stays unique).
     uploaded: HashMap<String, Arc<dyn std::any::Any + Send + Sync>>,
     seen: u64,
+    /// [`EffectControl`] generation it last ran.
+    generation: u32,
+    /// Culled this frame: no steps, no draws.
+    paused: bool,
+    /// A one-shot waiting for its particles to die.
+    draining: bool,
+    /// Spawning was off in every step since `draining` began (counts read now mean the end).
+    drain_steps: u32,
 }
 
 /// Render world: the GPU state of every effect. Read it (after
@@ -795,6 +897,19 @@ pub struct FxState {
     /// Bound where a renderer has no buffer of its own.
     dummy: wgpu::Buffer,
     frame: u64,
+    /// Compiled systems by (system pointer, ray tracing).
+    programs: HashMap<(usize, bool), Arc<fx_gpu::GpuProgram>>,
+    /// Idle instances by program key, ready for reuse.
+    pool: HashMap<(usize, bool), Vec<EffectInstance>>,
+    /// Scratch list of entities gone this frame.
+    gone: Vec<Entity>,
+    /// Pool counters changed this frame.
+    pool_dirty: bool,
+    /// Last frame each program key was used.
+    used: HashMap<(usize, bool), u64>,
+    stats_programs: u64,
+    stats_created: u64,
+    stats_reused: u64,
 }
 
 fn init_render(
@@ -842,6 +957,14 @@ fn init_render(
             mapped_at_creation: false,
         }),
         frame: 0,
+        programs: HashMap::default(),
+        pool: HashMap::default(),
+        gone: Vec::new(),
+        pool_dirty: false,
+        used: HashMap::default(),
+        stats_programs: 0,
+        stats_created: 0,
+        stats_reused: 0,
     });
 }
 
@@ -933,6 +1056,7 @@ fn prepare_effects(
     views: Query<&ExtractedView>,
     deterministic: Res<FxDeterministic>,
     rt: Res<FxRayTracingScene>,
+    pool_stats: Res<FxPoolStats>,
 ) {
     let state = &mut *state;
     state.frame += 1;
@@ -963,68 +1087,91 @@ fn prepare_effects(
         );
     }
 
+    let ray_tracing = rt.layout.is_some();
     for ex in &extracted.effects {
-        let rebuild = match state.effects.get(&ex.main) {
-            Some(inst) => {
-                !Arc::ptr_eq(&inst.system, &ex.system)
-                    || inst.seed != ex.seed
-                    || inst.ray_tracing != rt.layout.is_some()
-            }
-            None => true,
-        };
-        if rebuild {
-            let options = fx_gpu::GpuOptions {
-                ray_tracing_layout: rt.layout.as_ref(),
-            };
-            let gpu = match GpuEffect::with_options(wd, &ex.system, ex.seed, options) {
-                Ok(g) => g,
-                Err(e) => {
-                    error!("effect \"{}\" cannot run on the GPU: {e}", ex.system.name);
-                    state.effects.remove(&ex.main);
-                    continue;
+        let key = (Arc::as_ptr(&ex.system) as usize, ray_tracing);
+        state.used.insert(key, frame);
+        // Another system (hot reload) or scene layout: back to the pool, take a fitting one.
+        if state.effects.get(&ex.main).is_some_and(|inst| {
+            !Arc::ptr_eq(&inst.system, &ex.system) || inst.ray_tracing != ray_tracing
+        }) {
+            let inst = state.effects.remove(&ex.main).unwrap();
+            state.release(inst);
+        }
+        if !state.effects.contains_key(&ex.main) {
+            let reused = state.pool.get_mut(&key).and_then(|idle| idle.pop());
+            let inst = match reused {
+                Some(mut inst) => {
+                    inst.gpu.reset(ex.seed);
+                    inst.seed = ex.seed;
+                    inst.generation = ex.generation;
+                    inst.draining = false;
+                    for (i, rd) in inst.draws.iter_mut().enumerate() {
+                        let a = ex.assets.get(i).cloned().unwrap_or_default();
+                        if a.mesh != rd.assets.mesh
+                            || a.texture != rd.assets.texture
+                            || a.material != rd.assets.material
+                        {
+                            rd.views.clear();
+                            rd.ribbon = None;
+                            rd.light = None;
+                            rd.assets = a;
+                        }
+                    }
+                    state.stats_reused += 1;
+                    inst
+                }
+                None => {
+                    let program = match state.programs.get(&key) {
+                        Some(p) => p.clone(),
+                        None => {
+                            let options = fx_gpu::GpuOptions {
+                                ray_tracing_layout: rt.layout.as_ref(),
+                            };
+                            match fx_gpu::GpuProgram::new(wd, ex.system.clone(), options) {
+                                Ok(p) => {
+                                    let p = Arc::new(p);
+                                    state.programs.insert(key, p.clone());
+                                    state.stats_programs += 1;
+                                    p
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "effect \"{}\" cannot run on the GPU: {e}",
+                                        ex.system.name
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    state.stats_created += 1;
+                    new_instance(wd, &program, ex, ray_tracing, frame)
                 }
             };
-            let draws = renderers(&ex.system)
-                .enumerate()
-                .map(|(i, (emitter, r))| RendererDraw {
-                    emitter,
-                    settings: match r {
-                        CookedRenderer::Sprite(s) => Settings::Sprite(s.clone()),
-                        CookedRenderer::Ribbon(s) => Settings::Ribbon(s.clone()),
-                        CookedRenderer::Mesh(s) => Settings::Mesh(s.clone()),
-                        CookedRenderer::Light(s) => Settings::Light(s.clone()),
-                    },
-                    uniform: wd.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("fx renderer uniform"),
-                        size: UNIFORM_BYTES as u64,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }),
-                    assets: ex.assets.get(i).cloned().unwrap_or_default(),
-                    views: HashMap::default(),
-                    ribbon: None,
-                    light: None,
-                    scratch: [0; UNIFORM_BYTES],
-                })
-                .collect();
-            state.effects.insert(
-                ex.main,
-                EffectInstance {
-                    system: ex.system.clone(),
-                    seed: ex.seed,
-                    gpu,
-                    ray_tracing: rt.layout.is_some(),
-                    depth_generation: u64::MAX,
-                    draws,
-                    world_from_local: ex.world_from_local,
-                    uploaded: HashMap::default(),
-                    seen: frame,
-                },
-            );
+            state.effects.insert(ex.main, inst);
+            state.pool_dirty = true;
         }
         let inst = state.effects.get_mut(&ex.main).unwrap();
+        if inst.seed != ex.seed || inst.generation != ex.generation {
+            inst.gpu.reset(ex.seed);
+            inst.seed = ex.seed;
+            inst.generation = ex.generation;
+            inst.draining = false;
+        }
         inst.seen = frame;
         inst.world_from_local = ex.world_from_local;
+        inst.paused = ex.paused;
+        inst.gpu.active = ex.spawning;
+        inst.gpu.spawn_scale = ex.spawn_scale;
+        let n = inst.gpu.user.len().min(ex.user.len());
+        inst.gpu.user[..n].copy_from_slice(&ex.user[..n]);
+        if !ex.draining {
+            inst.draining = false;
+        } else if !inst.draining {
+            inst.draining = true;
+            inst.drain_steps = 0;
+        }
 
         // Data interfaces: upload new data, move meshes to this frame's pose.
         for (name, value) in &ex.data {
@@ -1202,7 +1349,45 @@ fn prepare_effects(
             }
         }
     }
-    state.effects.retain(|_, e| e.seen == frame);
+    // Instances whose entity is gone go back to the pool.
+    let mut gone = std::mem::take(&mut state.gone);
+    gone.clear();
+    gone.extend(state.effects.iter().filter(|(_, e)| e.seen != frame).map(|(k, _)| *k));
+    for e in gone.drain(..) {
+        let inst = state.effects.remove(&e).unwrap();
+        state.release(inst);
+    }
+    state.gone = gone;
+    // Systems unused for a while (hot-reloaded away): drop their pools and programs.
+    if frame % 60 == 0 {
+        let stale = |last: &u64| frame.saturating_sub(*last) > POOL_UNUSED_FRAMES;
+        if state.used.values().any(stale) {
+            let used = std::mem::take(&mut state.used);
+            for (key, last) in &used {
+                if stale(last) {
+                    state.pool.remove(key);
+                    state.programs.remove(key);
+                    state.pool_dirty = true;
+                }
+            }
+            state.used = used.into_iter().filter(|(_, l)| !stale(l)).collect();
+        }
+    }
+    if state.pool_dirty {
+        state.pool_dirty = false;
+        let mut s = pool_stats.0.lock().unwrap();
+        s.programs = state.stats_programs;
+        s.instances_created = state.stats_created;
+        s.instances_reused = state.stats_reused;
+        s.live = state.effects.len() as u64;
+        s.idle = state.pool.values().map(|v| v.len() as u64).sum();
+        s.gpu_bytes = state
+            .effects
+            .values()
+            .chain(state.pool.values().flatten())
+            .map(|i| i.gpu.gpu_bytes())
+            .sum();
+    }
 }
 
 fn bytemuck_bytes<T: Copy>(v: &[T]) -> &[u8] {
@@ -1323,6 +1508,9 @@ fn queue_particles(
             continue;
         };
         for (main, inst) in &state.effects {
+            if inst.paused {
+                continue;
+            }
             let center = inst.world_from_local.w_axis.truncate();
             for (i, rd) in inst.draws.iter().enumerate() {
                 let material = rd.assets.material.clone();
@@ -1459,7 +1647,7 @@ fn simulate(
     let state = &mut *state;
     // What scene collisions read this frame.
     for inst in state.effects.values_mut() {
-        if !inst.gpu.uses_scene() {
+        if !inst.gpu.uses_scene() || inst.paused {
             continue;
         }
         if inst.depth_generation != depth.generation {
@@ -1480,13 +1668,23 @@ fn simulate(
     for inst in state.effects.values_mut() {
         // The previous frame's commands were submitted: its uniform slots are free.
         inst.gpu.submitted();
-        for _ in 0..extracted.steps.min(fx_gpu::MAX_STEPS_PER_SUBMIT) {
+        if inst.paused {
+            continue;
+        }
+        let steps = extracted.steps.min(fx_gpu::MAX_STEPS_PER_SUBMIT);
+        for _ in 0..steps {
             inst.gpu.step(&queue, encoder, extracted.dt);
+        }
+        if inst.draining {
+            inst.drain_steps += steps;
         }
     }
     span.end(encoder);
     let span = diagnostics.time_span(encoder, "fx_cull_sort");
     for inst in state.effects.values_mut() {
+        if inst.paused {
+            continue;
+        }
         for rd in &mut inst.draws {
             let em = &inst.gpu.emitters[rd.emitter];
             for view in &views {
@@ -1501,6 +1699,9 @@ fn simulate(
     span.end(encoder);
     let span = diagnostics.time_span(encoder, "fx_ribbon_build");
     for inst in state.effects.values_mut() {
+        if inst.paused {
+            continue;
+        }
         for rd in &mut inst.draws {
             let em = &inst.gpu.emitters[rd.emitter];
             if let Some(rs) = &mut rd.ribbon {
@@ -1514,6 +1715,9 @@ fn simulate(
     span.end(encoder);
     let span = diagnostics.time_span(encoder, "fx_lights");
     for inst in state.effects.values_mut() {
+        if inst.paused {
+            continue;
+        }
         let tag = inst.gpu.frame as u64;
         for rd in &mut inst.draws {
             let em = &inst.gpu.emitters[rd.emitter];
@@ -1711,4 +1915,184 @@ pub fn builtin_sprite_image(cols: u32, rows: u32) -> Image {
 pub enum FxRenderSystems {
     /// Builds and updates the effects' GPU state ([`FxState`]).
     Prepare,
+}
+
+/// Renderer assets are shared by every instance of a system unless the
+/// instance replaces a mesh.
+fn assets_key(entity: Entity, effect: &ParticleEffect) -> (Entity, usize) {
+    let system = Arc::as_ptr(&effect.system) as usize;
+    if effect.meshes.is_empty() {
+        (Entity::PLACEHOLDER, system)
+    } else {
+        (entity, system)
+    }
+}
+
+// ------------------------------------------------------------------ pooling
+
+/// Idle instances kept per system.
+const MAX_IDLE_PER_SYSTEM: usize = 1024;
+/// Frames a system may go unused before its pool and program are dropped.
+const POOL_UNUSED_FRAMES: u64 = 600;
+
+impl FxState {
+    /// Puts an instance whose entity is gone back in its system's pool.
+    fn release(&mut self, mut inst: EffectInstance) {
+        self.pool_dirty = true;
+        let key = (Arc::as_ptr(&inst.system) as usize, inst.ray_tracing);
+        let idle = self.pool.entry(key).or_default();
+        if idle.len() < MAX_IDLE_PER_SYSTEM {
+            inst.draining = false;
+            inst.paused = false;
+            idle.push(inst);
+        }
+    }
+}
+
+/// A new instance of `program`, its renderers' state built lazily.
+fn new_instance(
+    wd: &wgpu::Device,
+    program: &Arc<fx_gpu::GpuProgram>,
+    ex: &ExtractedEffect,
+    ray_tracing: bool,
+    frame: u64,
+) -> EffectInstance {
+    let gpu = GpuEffect::from_program(wd, program, ex.seed);
+    let draws = renderers(&ex.system)
+        .enumerate()
+        .map(|(i, (emitter, r))| RendererDraw {
+            emitter,
+            settings: match r {
+                CookedRenderer::Sprite(s) => Settings::Sprite(s.clone()),
+                CookedRenderer::Ribbon(s) => Settings::Ribbon(s.clone()),
+                CookedRenderer::Mesh(s) => Settings::Mesh(s.clone()),
+                CookedRenderer::Light(s) => Settings::Light(s.clone()),
+            },
+            uniform: wd.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fx renderer uniform"),
+                size: UNIFORM_BYTES as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            assets: ex.assets.get(i).cloned().unwrap_or_default(),
+            views: HashMap::default(),
+            ribbon: None,
+            light: None,
+            scratch: [0; UNIFORM_BYTES],
+        })
+        .collect();
+    EffectInstance {
+        system: ex.system.clone(),
+        seed: ex.seed,
+        gpu,
+        ray_tracing,
+        depth_generation: u64::MAX,
+        draws,
+        world_from_local: ex.world_from_local,
+        uploaded: HashMap::default(),
+        seen: frame,
+        generation: ex.generation,
+        paused: false,
+        draining: false,
+        drain_steps: 0,
+    }
+}
+
+// ------------------------------------------- one-shot completion readback
+
+/// Count readback of draining one-shots: their emitters' living counts are
+/// copied after the simulation into a staging buffer and mapped
+/// asynchronously; an instance whose counts are all zero is reported to the
+/// main world ([`game::DoneInbox`]). One readback in flight at a time; the
+/// buffer and lists are reused (they grow only while warming up).
+#[derive(Resource, Default)]
+struct DoneReadback {
+    buffer: Option<wgpu::Buffer>,
+    /// `(entity, generation, emitters)` in copy order.
+    layout: Arc<Mutex<Vec<(Entity, u32, u32)>>>,
+    bytes: u64,
+    copied: bool,
+    busy: Arc<AtomicBool>,
+}
+
+fn copy_done_counts(
+    mut ctx: RenderContext,
+    state: Option<Res<FxState>>,
+    device: Res<RenderDevice>,
+    mut rb: ResMut<DoneReadback>,
+) {
+    let Some(state) = state else { return };
+    if rb.busy.load(Ordering::Acquire) || rb.copied {
+        return;
+    }
+    let draining = || {
+        state
+            .effects
+            .iter()
+            .filter(|(_, i)| i.draining && i.drain_steps > 0 && !i.paused)
+    };
+    let words: usize = draining().map(|(_, i)| i.gpu.emitters.len()).sum();
+    if words == 0 {
+        return;
+    }
+    let bytes = (words * 4) as u64;
+    if rb.buffer.as_ref().is_none_or(|b| b.size() < bytes) {
+        rb.buffer = Some(device.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx one-shot counts"),
+            size: bytes.next_power_of_two().max(256),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let rb = &mut *rb;
+    let buffer = rb.buffer.as_ref().unwrap();
+    let encoder = ctx.command_encoder();
+    let mut layout = rb.layout.lock().unwrap();
+    layout.clear();
+    let mut off = 0;
+    for (entity, inst) in draining() {
+        for em in &inst.gpu.emitters {
+            encoder.copy_buffer_to_buffer(&em.state, fx_gpu::STATE_COUNT * 4, buffer, off, 4);
+            off += 4;
+        }
+        layout.push((*entity, inst.generation, inst.gpu.emitters.len() as u32));
+    }
+    rb.bytes = bytes;
+    rb.copied = true;
+}
+
+/// After the frame's submit: map what `copy_done_counts` copied.
+fn map_done_counts(mut rb: ResMut<DoneReadback>, inbox: Res<game::DoneInbox>) {
+    if !rb.copied {
+        return;
+    }
+    rb.copied = false;
+    rb.busy.store(true, Ordering::Release);
+    let buffer = rb.buffer.clone().unwrap();
+    let layout = rb.layout.clone();
+    let busy = rb.busy.clone();
+    let done = inbox.0.clone();
+    let bytes = rb.bytes;
+    buffer.clone().slice(..bytes).map_async(wgpu::MapMode::Read, move |res| {
+        if res.is_ok() {
+            {
+                let data = buffer.slice(..bytes).get_mapped_range().unwrap();
+                let layout = layout.lock().unwrap();
+                let mut done = done.lock().unwrap();
+                let mut w = 0usize;
+                for &(entity, generation, n) in layout.iter() {
+                    let empty = (0..n as usize).all(|k| {
+                        let at = (w + k) * 4;
+                        u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) == 0
+                    });
+                    w += n as usize;
+                    if empty {
+                        done.push((entity, generation));
+                    }
+                }
+            }
+            buffer.unmap();
+        }
+        busy.store(false, Ordering::Release);
+    });
 }

@@ -1,0 +1,15 @@
+// expect: 8: unknown quality level `Ultra`
+(
+    name: "Broken",
+    scalability: (
+        max_distance: 40.0,
+        quality: (
+            Low: (spawn_count_scale: 0.25),
+            Ultra: (spawn_count_scale: 2.0),
+        ),
+    ),
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+    )],
+)

@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 8;
+pub const COOKED_FORMAT_VERSION: u32 = 9;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -29,6 +29,12 @@ pub struct CookedSystem {
     /// Modules written in WGSL; a [`CookedModule`] whose id is
     /// [`crate::custom::custom_id`]`(i)` calls entry `i`.
     pub custom_modules: Vec<crate::custom::CookedCustomModule>,
+    /// Seconds a one-shot keeps spawning: the source `duration`, else the
+    /// latest emitter [`CookedEmitter::spawn_end`]; `None` = loops (spawns
+    /// until stopped).
+    pub duration: Option<f32>,
+    /// Distance / visibility culling, instance budget and spawn scaling.
+    pub scalability: crate::scalability::CookedScalability,
 }
 
 #[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -56,6 +62,10 @@ pub struct CookedEmitter {
     pub stages: Vec<crate::custom::CookedSimStage>,
     /// A custom module writes an extended attribute (see [`Self::uses_extended_attributes`]).
     pub custom_extended: bool,
+    /// Emitter age (s) after which its emitter stacks never request spawns
+    /// again; `None` if they may spawn at any age (Spawn Rate, or a burst
+    /// whose Spawn Time is not a constant).
+    pub spawn_end: Option<f32>,
 }
 
 /// An event handler with its source resolved.
@@ -583,6 +593,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             Stage::ParticleUpdate,
         ]
         .map(|s| cx.stack(s, e.stage(s), d));
+        let spawn_end = spawn_end(&es, &eu);
         if !d.has_errors() {
             lint_emitter(e, d);
         }
@@ -599,6 +610,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             grids: Vec::new(),
             stages: Vec::new(),
             custom_extended: false,
+            spawn_end,
         });
     }
     for (e, ce) in src.emitters.iter().zip(emitters.iter_mut()) {
@@ -614,10 +626,18 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             lint_events(src, e, ce, d);
         }
     }
+    let duration = src.duration.or_else(|| {
+        emitters
+            .iter()
+            .map(|e| e.spawn_end)
+            .try_fold(0.0f32, |m, s| s.map(|s| m.max(s)))
+    });
     if d.has_errors() {
         return None;
     }
     Some(CookedSystem {
+        duration,
+        scalability: crate::scalability::cook(src.scalability.as_ref()),
         format_version: COOKED_FORMAT_VERSION,
         name: src.name.clone(),
         user_params,
@@ -625,6 +645,26 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
         emitters,
         custom_modules,
     })
+}
+
+/// The emitter age after which the emitter stacks never request spawns (see
+/// [`CookedEmitter::spawn_end`]). A burst fires in the step where the age
+/// reaches its Spawn Time, so the latest constant Spawn Time; Spawn Rate (or a
+/// Spawn Time that is not a constant) may spawn at any age. Only spawn modules
+/// count: no spawn modules gives 0.
+fn spawn_end(emitter_spawn: &[CookedModule], emitter_update: &[CookedModule]) -> Option<f32> {
+    let mut end = 0.0f32;
+    for m in emitter_spawn.iter().chain(emitter_update) {
+        match modules::from_id(m.module) {
+            Some(ModuleKind::SpawnRate) => return None,
+            Some(ModuleKind::SpawnBurstInstantaneous) => match m.inputs.get(1) {
+                Some(CookedInput::Const(Value::Float(t))) => end = end.max(*t),
+                _ => return None,
+            },
+            _ => {}
+        }
+    }
+    Some(end)
 }
 
 fn enabled_kinds(calls: &[ModuleCall]) -> impl Iterator<Item = ModuleKind> + '_ {

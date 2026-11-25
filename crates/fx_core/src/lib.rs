@@ -18,6 +18,7 @@ pub mod modules;
 pub mod params;
 pub mod render;
 pub mod ron_parse;
+pub mod scalability;
 pub mod sim;
 pub mod types;
 
@@ -26,6 +27,7 @@ use std::path::Path;
 pub use cook::CookedSystem;
 pub use diag::{Diagnostic, Severity};
 pub use model::SystemSource;
+pub use scalability::{CookedScalability, QualityLevel, ResolvedScalability};
 
 /// Result of checking one source file.
 pub struct Checked {
