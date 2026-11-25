@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fx": {
+      "type": "stdio",
+      "command": "sh",
+      "args": ["crates/fx_mcp/run.sh"]
+    }
+  }
+}

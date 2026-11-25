@@ -30,7 +30,10 @@
 //! uniform writes from fixed-size scratch arrays.
 
 mod mesh_data;
+pub mod stats;
 mod textures;
+
+pub use stats::{EffectStats, EmitterStats, FxStats, FxStatsData, FxStatsPlugin};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

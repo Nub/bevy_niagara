@@ -1,0 +1,16 @@
+[package]
+name = "fx_viewer"
+description = "fxviewer: interactive effect viewer with hot reload, timeline, backdrops and a stats overlay"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx_core = { path = "../fx_core" }
+fx_render = { path = "../fx_render" }
+bevy = { workspace = true, features = ["bevy_winit", "x11", "wayland", "ui_bevy_render", "bevy_text", "default_font"] }
+serde_json = "1"
+
+[[bin]]
+name = "fxviewer"
+path = "src/main.rs"
