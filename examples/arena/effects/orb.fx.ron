@@ -1,0 +1,54 @@
+// Orb: the glowing core of a projectile, attached to it (looping). A bright
+// core sprite and sparkles swirling around it, simulated in the projectile's
+// space so they travel with it; one point light.
+(
+    name: "Orb",
+    user_parameters: { "User.Tint": Color((1.0, 0.55, 0.2, 1.0)) },
+    scalability: (max_distance: 80.0, bounds_radius: 0.6, max_instances: 64),
+    emitters: [
+        (
+            name: "Core",
+            max_particles: 4,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(1000.0),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": Vec2((0.45, 0.45)),
+                }),
+                (module: "Initialize Light", inputs: { "Light Radius": Float(4.0) }),
+            ],
+            particle_update: [(module: "Particle State")],
+            renderers: [
+                Sprite((blend_mode: Additive)),
+                Light((max_lights: 1, intensity: 6000.0)),
+            ],
+        ),
+        (
+            name: "Sparkles",
+            max_particles: 200,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(120.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.25), Float(0.5)),
+                    "Position": RandomRange(Vec3((-0.12, -0.12, -0.12)), Vec3((0.12, 0.12, 0.12))),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": RandomRange(Vec2((0.04, 0.04)), Vec2((0.08, 0.08))),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(180.0), "Velocity Strength": Float(0.6) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: { "Noise Strength": Float(2.0), "Noise Frequency": Float(3.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (4.0, 4.0, 4.0)), (1.0, (1.0, 1.0, 1.0))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

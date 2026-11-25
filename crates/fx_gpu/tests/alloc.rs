@@ -157,3 +157,45 @@ fn warm_frames_allocate_a_fixed_amount_independent_of_particles() {
         base[0]
     );
 }
+
+/// Pooling: reusing an instance (reset, new seed) and building another from
+/// a compiled program. `reset` touches neither the heap nor GPU memory, and
+/// the reused instance's frames allocate what a fresh instance's do.
+#[test]
+fn pooled_reset_allocates_nothing() {
+    let (device, queue, _) = fx_gpu::headless_device().unwrap();
+    let mut fx = GpuEffect::new(&device, &effect(10_000), 3).unwrap();
+    let run = |fx: &mut GpuEffect, frames: usize| -> Vec<u64> {
+        let mut per = Vec::new();
+        for _ in 0..frames {
+            let before = ALLOCS.load(Ordering::Relaxed);
+            let mut enc = device.create_command_encoder(&Default::default());
+            fx.step(&queue, &mut enc, 1.0 / 60.0);
+            queue.submit([enc.finish()]);
+            fx.submitted();
+            per.push(ALLOCS.load(Ordering::Relaxed) - before);
+            device
+                .poll(fx_gpu::wgpu::PollType::wait_indefinitely())
+                .unwrap();
+        }
+        per
+    };
+    run(&mut fx, 40);
+    let bytes = fx.gpu_bytes();
+    // Warm the reset path once (the first clear_buffer may set up wgpu state).
+    fx.reset(4);
+    run(&mut fx, 40);
+    let steady = *run(&mut fx, 10).last().unwrap();
+    for seed in 5..10 {
+        let before = ALLOCS.load(Ordering::Relaxed);
+        fx.reset(seed);
+        assert_eq!(ALLOCS.load(Ordering::Relaxed) - before, 0, "reset allocated");
+        let frames = run(&mut fx, 20);
+        eprintln!("after reset {seed}: allocations per frame {frames:?} (steady {steady})");
+        // The reset frame records three buffer clears; later frames are steady.
+        assert!(frames[1..].iter().all(|&a| a == steady), "{frames:?} vs {steady}");
+    }
+    assert_eq!(fx.gpu_bytes(), bytes, "GPU memory changed");
+    let (count, next_id) = fx.read_counts(&device, &queue)[0];
+    assert!(count > 0 && next_id >= count, "reset instance simulates ({count}, {next_id})");
+}

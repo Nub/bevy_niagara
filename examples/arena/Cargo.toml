@@ -1,0 +1,13 @@
+[package]
+name = "arena"
+description = "Example game scene: a caster and turrets fire projectiles whose impacts are pooled one-shot effects; benchmark of 500 concurrent one-shots"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fx_core = { path = "../../crates/fx_core" }
+fx_render = { path = "../../crates/fx_render" }
+bevy.workspace = true
+png = "0.17"

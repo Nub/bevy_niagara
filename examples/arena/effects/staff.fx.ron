@@ -1,0 +1,40 @@
+// Staff glow: a looping wisp on the caster's staff tip (attached), brighter
+// while casting (User.Intensity, set from code every frame).
+(
+    name: "Staff Glow",
+    user_parameters: { "User.Intensity": Float(1.0) },
+    scalability: (max_distance: 100.0, bounds_radius: 0.5),
+    emitters: [
+        (
+            name: "Wisps",
+            max_particles: 300,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(90.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.4), Float(0.8)),
+                    "Position": RandomRange(Vec3((-0.05, -0.05, -0.05)), Vec3((0.05, 0.05, 0.05))),
+                    "Color": Color((0.4, 0.8, 3.0, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.05, 0.05)), Vec2((0.12, 0.12))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(30.0),
+                    "Velocity Strength": RandomRange(Float(0.2), Float(0.5)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: { "Noise Strength": Float(1.0), "Noise Frequency": Float(2.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": Dynamic("Multiply Vec3 by Float", {
+                        "A": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (1.0, (0.3, 0.2, 1.0))])),
+                        "B": Link(Float, "User.Intensity"),
+                    }),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

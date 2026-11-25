@@ -1,0 +1,110 @@
+// Impact: a projectile hits a surface. The effect's +Y is the surface
+// normal. Hot sparks fly out in a cone, fall and bounce off the scene (depth
+// buffer collisions), plus a short flash and a puff of dust. One-shot: the
+// bursts are at t = 0, so it stops spawning at once and the game despawns it
+// when the last spark dies.
+(
+    name: "Impact",
+    user_parameters: { "User.Tint": Color((1.0, 0.55, 0.2, 1.0)) },
+    scalability: (
+        max_distance: 70.0,
+        spawn_count_scale_by_distance: [(12.0, 1.0), (45.0, 0.25)],
+        bounds_radius: 1.5,
+        max_instances: 600,
+        quality: (
+            Low: (spawn_count_scale: 0.35, max_distance: 35.0, max_instances: 120),
+            Medium: (spawn_count_scale: 0.6, max_instances: 300),
+        ),
+    ),
+    emitters: [
+        (
+            name: "Sparks",
+            max_particles: 96,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(64), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.5), Float(1.1)),
+                    "Position": Vec3((0.0, 0.03, 0.0)),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": RandomRange(Vec2((0.015, 0.05)), Vec2((0.025, 0.09))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(65.0),
+                    "Velocity Strength": RandomRange(Float(2.0), Float(6.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": SceneDepth,
+                    "Particle Radius": Float(0.01),
+                    "Restitution": Float(0.4),
+                    "Friction": Float(0.2),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (6.0, 6.0, 6.0)), (0.4, (3.0, 1.6, 1.0)), (1.0, (0.6, 0.15, 0.05))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.8, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+        (
+            name: "Flash",
+            max_particles: 2,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.15),
+                    "Position": Vec3((0.0, 0.15, 0.0)),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": Vec2((1.1, 1.1)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (5.0, 5.0, 5.0)), (1.0, (1.0, 1.0, 1.0))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (1.4, 1.4))])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Dust",
+            max_particles: 12,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(8), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.8), Float(1.3)),
+                    "Position": RandomRange(Vec3((-0.1, 0.05, -0.1)), Vec3((0.1, 0.15, 0.1))),
+                    "Color": Color((0.35, 0.32, 0.3, 0.5)),
+                    "Sprite Size": RandomRange(Vec2((0.3, 0.3)), Vec2((0.5, 0.5))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(60.0),
+                    "Velocity Strength": RandomRange(Float(0.3), Float(0.8)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(2.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (1.0, (2.0, 2.0))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha))],
+        ),
+    ],
+)
