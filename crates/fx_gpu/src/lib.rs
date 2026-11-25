@@ -9,6 +9,13 @@
 //! arguments of the next kernel, and [`view::ViewDraw`] turns them into
 //! indirect draw arguments.
 //!
+//! Instances of one program are batched ([`GpuBatch`], as Niagara batches
+//! GPU emitters): every buffer holds a 256-byte-aligned part per slot, each
+//! instance's per-step values (`Frame`: user parameters, age, spawn request,
+//! where its parts are) go in one array, and a step of every staged instance
+//! is one dispatch per kernel (`workgroup_id.y` picks the instance). A
+//! [`GpuEffect`] made on its own is a batch of one.
+//!
 //! Nothing is allocated per step once built: the per-step uniforms go to a
 //! preallocated ring of [`MAX_STEPS_PER_SUBMIT`] slots selected with dynamic
 //! offsets, written from a fixed-size scratch array.
