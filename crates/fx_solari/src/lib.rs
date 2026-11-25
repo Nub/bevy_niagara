@@ -502,7 +502,7 @@ fn alignment_index(a: SpriteAlignment) -> u32 {
 /// and words per vertex, if positions and normals are plain `Float32x3`.
 fn vertex_layout(mesh: &RenderMesh) -> Option<(u32, u32, u32)> {
     let layout = mesh.layout.0.layout();
-    if layout.array_stride % 4 != 0 {
+    if !layout.array_stride.is_multiple_of(4) {
         return None;
     }
     let (mut pos, mut normal, mut tangent) = (None, None, u32::MAX);
@@ -642,4 +642,40 @@ fn write_proxies(
         pass.dispatch_workgroups(words[43].div_ceil(64), 1, 1);
     }
     span.end(encoder);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::mesh::VertexAttributeValues;
+
+    #[test]
+    fn proxy_mesh_has_two_quads_per_slot_and_slot_uvs() {
+        let mesh = proxy_mesh(3);
+        assert_eq!(mesh.count_vertices(), 24);
+        let Some(Indices::U32(indices)) = mesh.indices() else { panic!("u32 indices") };
+        assert_eq!(indices.len(), 3 * 12);
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else {
+            panic!("uvs")
+        };
+        // Slot k's vertices have u in [2k, 2k + 1]: floor(u / 2) = k in the hit function.
+        for (v, uv) in uvs.iter().enumerate() {
+            assert_eq!((uv[0] / 2.0).floor() as usize, v / 8);
+        }
+        // Each triangle stays within one quad.
+        for tri in indices.chunks(3) {
+            assert!(tri.iter().all(|&i| i / 4 == tri[0] / 4));
+        }
+        assert_eq!(mesh.raytracing, MeshRaytracingFlags::NON_OPAQUE);
+    }
+
+    #[test]
+    fn data_texture_holds_two_texels_per_slot() {
+        let image = data_image(MAX_SLOTS);
+        let size = image.texture_descriptor.size;
+        assert!(size.width * size.height >= 2 * MAX_SLOTS);
+        assert!(image.texture_descriptor.usage.contains(TextureUsages::STORAGE_BINDING));
+        // Solari indexes an emissive mesh's triangles with 16 bits.
+        assert!(4 * MAX_SLOTS <= u16::MAX as u32);
+    }
 }

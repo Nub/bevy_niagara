@@ -867,13 +867,16 @@ fn rt_mesh(m: impl Into<Mesh>) -> Mesh {
     m.clone().with_generated_tangents().unwrap_or(m)
 }
 
+/// Backdrop parts not yet in the ray-traced scene.
+type NotRayTraced = (With<BackdropPart>, Without<RaytracingMesh3d>);
+
 /// Switches the camera between raster and Solari, and puts backdrop meshes
 /// in the ray-traced scene.
 fn apply_solari(
     mut commands: Commands,
     mut v: ResMut<Viewer>,
     cam: Query<Entity, With<ViewCamera>>,
-    parts: Query<(Entity, &Mesh3d), (With<BackdropPart>, Without<RaytracingMesh3d>)>,
+    parts: Query<(Entity, &Mesh3d), NotRayTraced>,
 ) {
     for (e, mesh) in &parts {
         commands.entity(e).insert(RaytracingMesh3d(mesh.0.clone()));
