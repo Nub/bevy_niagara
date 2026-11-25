@@ -410,6 +410,17 @@ fn stats(args: &Value) -> Result<Value, String> {
             .collect();
         let _ = writeln!(s, "user parameters: {}", names.join(", "));
     }
+    if !sys.data_interfaces.is_empty() {
+        let names: Vec<String> = sys
+            .data_interfaces
+            .iter()
+            .map(|d| match &d.asset {
+                Some(a) => format!("{} = {}(\"{a}\")", d.name, d.ty.name()),
+                None => format!("{} = {}", d.name, d.ty.name()),
+            })
+            .collect();
+        let _ = writeln!(s, "data interfaces: {}", names.join(", "));
+    }
     let mut gpu_bytes = 0u64;
     for e in &sys.emitters {
         // Two ping-pong buffers of 28 words per particle, plus state.

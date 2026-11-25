@@ -67,6 +67,7 @@ fn fields(p: &Particle) -> Vec<(&'static str, f32)> {
     put("sub_image_index", &[p.sub_image_index]);
     put("initial_scale", &p.initial_scale.to_array());
     put("initial_ribbon_width", &[p.initial_ribbon_width]);
+    put("camera_offset", &[p.camera_offset]);
     v
 }
 
@@ -513,4 +514,234 @@ fn gpu_events_and_collisions_match_cpu() {
         );
         assert!(delivered.iter().sum::<usize>() > 0, "{name}: no events");
     }
+}
+
+/// Every data interface: skinned surface and bone sampling of an animated
+/// two-joint tube, a moving static mesh, a texture sampled at a UV built from
+/// the position (Replace in spawn, Multiply in update), a colour curve asset,
+/// the camera (position, forward, scene depth with nothing in the depth
+/// buffer) and Camera Offset.
+const DATA_INTERFACES: &str = r#"(
+    name: "Data interfaces",
+    user_parameters: {
+        "User.Body": SkeletalMesh,
+        "User.Rock": StaticMesh,
+        "User.Picture": Texture,
+        "User.Tint": ColorCurve([(0.0, (1.0, 0.2, 0.1, 1.0)), (0.5, (0.2, 1.0, 0.3, 0.8)), (1.0, (0.1, 0.2, 1.0, 0.0))]),
+        "User.Camera": CameraQuery,
+        "User.Depth": SceneDepth,
+    },
+    emitters: [
+        (
+            name: "Skin",
+            max_particles: 2000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(400.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.3), Float(1.0)) }),
+                (module: "Skeletal Mesh Location", inputs: { "Skeletal Mesh": Link(SkeletalMesh, "User.Body"), "Surface Offset": RandomRange(Float(0.0), Float(0.1)), "Inherit Velocity Scale": Float(0.5) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Color", inputs: { "Color": Dynamic("Color from Curve", { "Curve": Link(ColorCurve, "User.Tint") }) }),
+                (module: "Solve Forces and Velocity"),
+            ],
+        ),
+        (
+            name: "Bones",
+            max_particles: 500,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(100.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(0.5) }),
+                (module: "Skeletal Mesh Location", inputs: { "Skeletal Mesh": Link(SkeletalMesh, "User.Body"), "Sampling Mode": Bones }),
+            ],
+            particle_update: [(module: "Particle State"), (module: "Solve Forces and Velocity")],
+        ),
+        (
+            name: "Rock",
+            max_particles: 1000,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(200.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.3), Float(1.0)) }),
+                (module: "Static Mesh Location", inputs: { "Static Mesh": Link(StaticMesh, "User.Rock"), "Surface Offset": Float(0.05) }),
+            ],
+            particle_update: [(module: "Particle State"), (module: "Gravity Force"), (module: "Solve Forces and Velocity")],
+        ),
+        (
+            name: "Picture",
+            max_particles: 1500,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(300.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.3), Float(1.0)) }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Box, "Box Size": Vec3((2.0, 2.0, 0.5)) }),
+                (module: "Sample Texture", inputs: {
+                    "Texture": Link(Texture, "User.Picture"),
+                    "UV": Dynamic("Make Vec2 from Floats", {
+                        "X": Dynamic("Break Vec3", { "Value": Link(Vec3, "Particles.Position"), "Component": X }),
+                        "Y": Dynamic("Break Vec3", { "Value": Link(Vec3, "Particles.Position"), "Component": Y }),
+                    }),
+                }),
+                (module: "Add Velocity", inputs: { "Velocity": Dynamic("Add Vec3", {
+                    "A": Dynamic("Get Camera Forward Vector", { "Camera": Link(CameraQuery, "User.Camera") }),
+                    "B": Dynamic("Multiply Vec3 by Float", { "A": Dynamic("Get Camera Position", { "Camera": Link(CameraQuery, "User.Camera") }), "B": Float(0.1) }),
+                }) }),
+                (module: "Camera Offset", inputs: { "Camera Offset Amount": RandomRange(Float(0.0), Float(0.3)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sample Texture", inputs: { "Texture": Link(Texture, "User.Picture"), "UV": Vec2((0.3, 0.7)), "Blend": Multiply, "Color Scale": Color((1.0, 1.0, 1.0, 0.98)) }),
+                (module: "Camera Offset", inputs: { "Camera Offset Amount": Float(0.01), "Mode": Additive }),
+                (module: "Dynamic Material Parameters", inputs: { "Dynamic Material Parameter": Dynamic("Make Vec4 from Floats", {
+                    "X": Dynamic("Sample Scene Depth", { "Scene Depth": Link(SceneDepth, "User.Depth") }),
+                    "Y": Dynamic("Vec3 Distance", { "A": Link(Vec3, "Particles.Position"), "B": Dynamic("Get Camera Position", { "Camera": Link(CameraQuery, "User.Camera") }) }),
+                }) }),
+            ],
+        ),
+    ],
+)"#;
+
+/// A tube along +Y from 0 to 2 m: the lower ring follows joint 0, the upper
+/// joint 1 (bind pose at y = 1), blended in between.
+fn tube() -> fx_core::data::MeshData {
+    use bevy_math::{Mat4, Vec3};
+    let (rings, segs) = (9u32, 12u32);
+    let (mut pos, mut nrm, mut joints, mut weights, mut idx) = (vec![], vec![], vec![], vec![], vec![]);
+    for r in 0..rings {
+        let y = 2.0 * r as f32 / (rings - 1) as f32;
+        let w1 = (y - 0.5).clamp(0.0, 1.0);
+        for s in 0..segs {
+            let a = std::f32::consts::TAU * s as f32 / segs as f32;
+            pos.push([0.3 * a.cos(), y, 0.3 * a.sin()]);
+            nrm.push([a.cos(), 0.0, a.sin()]);
+            joints.push([0, 1, 0, 0]);
+            weights.push([1.0 - w1, w1, 0.0, 0.0]);
+        }
+    }
+    for r in 0..rings - 1 {
+        for s in 0..segs {
+            let (a, b) = (r * segs + s, r * segs + (s + 1) % segs);
+            let (c, d) = (a + segs, b + segs);
+            idx.extend([a, c, b, b, c, d]);
+        }
+    }
+    let binds = [Mat4::IDENTITY, Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0))];
+    fx_core::data::MeshData::skinned(pos, nrm, idx, joints, weights, &binds)
+}
+
+/// The tube's joints at time `t`: the whole tube turns, the upper half bends.
+fn tube_pose(t: f32) -> Vec<bevy_math::Mat4> {
+    use bevy_math::{Mat4, Vec3};
+    let j0 = Mat4::from_rotation_y(t * 1.5) * Mat4::from_translation(Vec3::new(0.2 * t, 0.0, 0.0));
+    let j1 = j0 * Mat4::from_translation(Vec3::Y) * Mat4::from_rotation_z((t * 3.0).sin() * 0.8);
+    vec![j0, j1 * Mat4::from_translation(Vec3::NEG_Y)]
+}
+
+fn octahedron() -> fx_core::data::MeshData {
+    let p = vec![
+        [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0],
+    ];
+    let i = vec![0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0, 3];
+    fx_core::data::MeshData::new(p.clone(), p, i)
+}
+
+fn picture() -> fx_core::data::TextureData {
+    let (w, h) = (16u32, 8u32);
+    let texels = (0..w * h)
+        .map(|i| {
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            [x / 15.0, y / 7.0, ((x * 7.0 + y * 3.0) % 5.0) / 4.0, 0.5 + 0.5 * ((x + y) % 2.0)]
+        })
+        .collect();
+    fx_core::data::TextureData::new(w, h, texels)
+}
+
+#[test]
+fn gpu_data_interfaces_match_cpu() {
+    use bevy_math::{Mat4, Vec3};
+    use fx_core::data::MeshPose;
+    use std::sync::Arc;
+    let (device, queue, _) = fx_gpu::headless_device().unwrap();
+    let c = fx_core::check_source("data.fx.ron", DATA_INTERFACES);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    let sys = c.cooked.unwrap_or_else(|| panic!("{errs:?}"));
+    let seed = 9;
+    let mut cpu = Simulation::new(sys.clone(), seed);
+    let mut gpu = GpuEffect::new(&device, &sys, seed).unwrap();
+    assert!(gpu.uses_scene(), "camera and depth read the scene bindings");
+
+    let (tube, rock, pic) = (Arc::new(tube()), Arc::new(octahedron()), Arc::new(picture()));
+    let rock_pose = |t: f32| vec![Mat4::from_translation(Vec3::new(t.sin(), 1.0, 0.0)) * Mat4::from_rotation_x(t)];
+    assert!(cpu.set_mesh("User.Body", tube.clone(), MeshPose::still(tube_pose(0.0))));
+    assert!(gpu.set_mesh(&device, "User.Body", &tube, MeshPose::still(tube_pose(0.0))));
+    assert!(cpu.set_mesh("User.Rock", rock.clone(), MeshPose::still(rock_pose(0.0))));
+    assert!(gpu.set_mesh(&device, "User.Rock", &rock, MeshPose::still(rock_pose(0.0))));
+    assert!(cpu.set_texture("User.Picture", pic.clone()));
+    assert!(gpu.set_texture(&device, "User.Picture", &pic));
+    assert!(!gpu.set_texture(&device, "User.Body", &pic), "wrong type");
+
+    // A camera looking at the effect; no depth texture is bound.
+    let eye = Vec3::new(3.0, 2.0, 6.0);
+    // look_at_rh and perspective_infinite_reverse_rh, written out.
+    let f = (-eye).normalize();
+    let s = f.cross(Vec3::Y).normalize();
+    let u = s.cross(f);
+    let view = Mat4::from_cols(
+        bevy_math::Vec4::new(s.x, u.x, -f.x, 0.0),
+        bevy_math::Vec4::new(s.y, u.y, -f.y, 0.0),
+        bevy_math::Vec4::new(s.z, u.z, -f.z, 0.0),
+        bevy_math::Vec4::new(-s.dot(eye), -u.dot(eye), f.dot(eye), 1.0),
+    );
+    let fl = 1.0 / (0.5f32).tan();
+    let proj = Mat4::from_cols(
+        bevy_math::Vec4::new(fl / (16.0 / 9.0), 0.0, 0.0, 0.0),
+        bevy_math::Vec4::new(0.0, fl, 0.0, 0.0),
+        bevy_math::Vec4::new(0.0, 0.0, 0.0, -1.0),
+        bevy_math::Vec4::new(0.0, 0.0, 0.1, 0.0),
+    );
+    gpu.set_scene_view(
+        &queue,
+        Mat4::IDENTITY,
+        Some(&fx_gpu::SceneView {
+            clip_from_world: proj * view,
+            camera_position: eye,
+            size: [64, 36],
+        }),
+    );
+    cpu.camera = Some(fx_core::data::CameraData {
+        position: eye,
+        forward: (-eye).normalize(),
+    });
+
+    let mut diff = Diff::default();
+    let mut seen = vec![0usize; sys.emitters.len()];
+    for step in 1..=120u32 {
+        let t = step as f32 * DT;
+        cpu.set_mesh_pose("User.Body", &tube_pose(t), DT);
+        gpu.set_mesh_pose(&queue, "User.Body", &tube_pose(t), DT);
+        cpu.set_mesh_pose("User.Rock", &rock_pose(t), DT);
+        gpu.set_mesh_pose(&queue, "User.Rock", &rock_pose(t), DT);
+        cpu.step(DT);
+        let mut enc = device.create_command_encoder(&Default::default());
+        gpu.step(&queue, &mut enc, DT);
+        queue.submit([enc.finish()]);
+        gpu.submitted();
+        if step % 20 == 0 {
+            for (ei, ps) in gpu.read_particles(&device, &queue).iter().enumerate() {
+                seen[ei] = seen[ei].max(ps.len());
+                compare("data interfaces", step, cpu.particles(ei), ps, &mut diff);
+            }
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 20), "every emitter compared: {seen:?}");
+    // The samples really used the data: particles off the origin, coloured.
+    assert!(cpu.particles(0).iter().any(|p| p.position.y > 1.5), "skinned surface");
+    assert!(cpu.particles(3).iter().any(|p| p.color.x > 0.5 && p.color.y < 0.5), "texture");
+    // Nothing in the depth buffer: "nothing there" (0 for particles not yet updated).
+    assert!(cpu.particles(3).iter().all(|p| [0.0, fx_core::data::NO_SCENE_DEPTH].contains(&p.dynamic_material_parameter.x)));
+    assert!(cpu.particles(3).iter().any(|p| p.dynamic_material_parameter.x == fx_core::data::NO_SCENE_DEPTH));
+    eprintln!(
+        "data interfaces: up to {seen:?} particles compared; largest difference {:.2e} ({})",
+        diff.max_abs, diff.worst
+    );
 }

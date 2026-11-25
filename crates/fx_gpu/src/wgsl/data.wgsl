@@ -33,27 +33,27 @@ fn no_mesh_sample() -> MeshSample {
     return MeshSample(false, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
 }
 
-// Matrix `i` of a pose (`set` 0 current, 1 previous); identity past the end.
-fn di_mat(pose: u32, count: u32, set: u32, i: u32) -> mat4x4<f32> {
+// Matrix `i` of a pose (`which` 0 current, 1 previous); identity past the end.
+fn di_mat(pose: u32, count: u32, which: u32, i: u32) -> mat4x4<f32> {
     if (i >= count) {
         return mat4x4<f32>(
             vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0),
         );
     }
-    let b = pose + 1u + (set * count + i) * 4u;
+    let b = pose + 1u + (which * count + i) * 4u;
     return mat4x4<f32>(di_pose[b], di_pose[b + 1u], di_pose[b + 2u], di_pose[b + 3u]);
 }
 
 // The skinning matrix of vertex `v` (fx_core::data::skin).
-fn di_skin(a: vec4<u32>, pose: u32, c: vec4<u32>, set: u32, v: u32) -> mat4x4<f32> {
+fn di_skin(a: vec4<u32>, pose: u32, c: vec4<u32>, which: u32, v: u32) -> mat4x4<f32> {
     if ((c.w & 2u) == 0u) {
-        return di_mat(pose, c.z, set, 0u);
+        return di_mat(pose, c.z, which, 0u);
     }
     let s = a.y + v * 8u;
-    var m = di_mat(pose, c.z, set, di_data[s]) * dif(s + 4u);
+    var m = di_mat(pose, c.z, which, di_data[s]) * dif(s + 4u);
     for (var k = 1u; k < 4u; k++) {
-        m += di_mat(pose, c.z, set, di_data[s + k]) * dif(s + 4u + k);
+        m += di_mat(pose, c.z, which, di_data[s + k]) * dif(s + 4u + k);
     }
     return m;
 }
