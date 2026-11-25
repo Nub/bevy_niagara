@@ -6,7 +6,7 @@ const WG: u32 = 64u;
 // Fixed-point scale of the accumulated values.
 const FIX: f32 = 1024.0;
 // Largest splat radius, in cells.
-const MAX_CELLS: f32 = 4.0;
+const MAX_CELLS: f32 = 3.0;
 
 struct Params {
     bounds_min: vec3<f32>,
