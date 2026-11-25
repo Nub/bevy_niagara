@@ -23,6 +23,9 @@ pub enum SortMode {
     None,
     ViewDepth,
     ViewDistance,
+    /// By particle UniqueID: a draw order independent of GPU scheduling, for
+    /// bit-identical images (headless preview). Costs a sort.
+    UniqueId,
 }
 
 /// What a view needs for culling and sorting.
@@ -71,7 +74,11 @@ pub struct ViewPipelines {
     sort_merge_global: wgpu::ComputePipeline,
 }
 
-fn buffer_entry(binding: u32, ty: wgpu::BufferBindingType, dynamic: bool) -> wgpu::BindGroupLayoutEntry {
+fn buffer_entry(
+    binding: u32,
+    ty: wgpu::BufferBindingType,
+    dynamic: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -162,7 +169,12 @@ pub struct ViewDraw {
 }
 
 impl ViewDraw {
-    pub fn new(device: &wgpu::Device, pipelines: &ViewPipelines, emitter: &GpuEmitter, sort_mode: SortMode) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        pipelines: &ViewPipelines,
+        emitter: &GpuEmitter,
+        sort_mode: SortMode,
+    ) -> Self {
         use wgpu::BufferUsages as U;
         let capacity = emitter.capacity;
         let max_pow2 = capacity.next_power_of_two().max(BLOCK);
@@ -176,11 +188,23 @@ impl ViewDraw {
                 mapped_at_creation: false,
             })
         };
-        let params = buf("fx view params", PARAMS_BYTES as u64, U::UNIFORM | U::COPY_DST);
+        let params = buf(
+            "fx view params",
+            PARAMS_BYTES as u64,
+            U::UNIFORM | U::COPY_DST,
+        );
         let keys = buf("fx view keys", if sorted { len * 4 } else { 4 }, U::STORAGE);
         let indices = buf("fx view indices", len * 4, U::STORAGE | U::COPY_SRC);
-        let draw_args = buf("fx view draw args", 16, U::STORAGE | U::INDIRECT | U::COPY_SRC);
-        let passes = if sorted { sort_passes(max_pow2) } else { Vec::new() };
+        let draw_args = buf(
+            "fx view draw args",
+            16,
+            U::STORAGE | U::INDIRECT | U::COPY_SRC,
+        );
+        let passes = if sorted {
+            sort_passes(max_pow2)
+        } else {
+            Vec::new()
+        };
         let args = buf(
             "fx view dispatch args",
             16 * (1 + passes.len() as u64),
@@ -211,12 +235,30 @@ impl ViewDraw {
                 label: Some("fx view"),
                 layout: &pipelines.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: emitter.particles[s].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: emitter.state.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: keys.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: indices.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: draw_args.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: emitter.particles[s].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: emitter.state.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: keys.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: draw_args.as_entire_binding(),
+                    },
                 ],
             })
         };
@@ -224,7 +266,10 @@ impl ViewDraw {
         let args_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fx view args"),
             layout: &pipelines.args_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: args.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: args.as_entire_binding(),
+            }],
         });
         let pass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fx view sort pass"),
@@ -282,6 +327,7 @@ impl ViewDraw {
                 SortMode::None => 0,
                 SortMode::ViewDepth => 1,
                 SortMode::ViewDistance => 2,
+                SortMode::UniqueId => 3,
             },
         );
         put(34, self.max_pow2);
@@ -310,11 +356,19 @@ impl ViewDraw {
             match p {
                 PassKind::Local => pass.set_pipeline(&pipelines.sort_local),
                 PassKind::MergeGlobal { .. } => {
-                    pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                    pass.set_bind_group(
+                        1,
+                        &self.pass_bind_group,
+                        &[(i as u64 * PASS_STRIDE) as u32],
+                    );
                     pass.set_pipeline(&pipelines.sort_merge_global);
                 }
                 PassKind::MergeLocal { .. } => {
-                    pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                    pass.set_bind_group(
+                        1,
+                        &self.pass_bind_group,
+                        &[(i as u64 * PASS_STRIDE) as u32],
+                    );
                     pass.set_pipeline(&pipelines.sort_merge_local);
                 }
             }

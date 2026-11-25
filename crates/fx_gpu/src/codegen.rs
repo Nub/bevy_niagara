@@ -47,7 +47,13 @@ fn literal(v: &Value) -> String {
         Value::Vec2([x, y]) => format!("vec2<f32>({}, {})", f(x), f(y)),
         Value::Vec3([x, y, z]) => format!("vec3<f32>({}, {}, {})", f(x), f(y), f(z)),
         Value::Vec4(a) | Value::Color(a) | Value::Quat(a) => {
-            format!("vec4<f32>({}, {}, {}, {})", f(a[0]), f(a[1]), f(a[2]), f(a[3]))
+            format!(
+                "vec4<f32>({}, {}, {}, {})",
+                f(a[0]),
+                f(a[1]),
+                f(a[2]),
+                f(a[3])
+            )
         }
     }
 }
@@ -124,7 +130,13 @@ impl Gen<'_> {
             writeln!(h, "    return {}(vec4<f32>(0.0){sw});", ty).unwrap();
         } else {
             writeln!(h, "    if (t <= {}) {{ return {}; }}", f(c.times[0]), v(0)).unwrap();
-            writeln!(h, "    if (t >= {}) {{ return {}; }}", f(c.times[n - 1]), v(n - 1)).unwrap();
+            writeln!(
+                h,
+                "    if (t >= {}) {{ return {}; }}",
+                f(c.times[n - 1]),
+                v(n - 1)
+            )
+            .unwrap();
             for i in 1..n {
                 let (t0, t1) = (c.times[i - 1], c.times[i]);
                 let (a, b) = (c.values[i - 1], c.values[i]);
@@ -280,7 +292,11 @@ impl Gen<'_> {
                 let (rgb, a) = (inp(0, self), inp(1, self));
                 writeln!(o, "    let rgb = {rgb};").unwrap();
                 writeln!(o, "    let a = {a};").unwrap();
-                writeln!(o, "    (*p).color = (*p).initial_color * vec4<f32>(rgb, a);").unwrap();
+                writeln!(
+                    o,
+                    "    (*p).color = (*p).initial_color * vec4<f32>(rgb, a);"
+                )
+                .unwrap();
             }
             ModuleKind::ScaleSpriteSize => {
                 let e = inp(0, self);
@@ -303,8 +319,11 @@ impl Gen<'_> {
     (*p).normalized_age = select(1.0, (*p).age / (*p).lifetime, (*p).lifetime > 0.0);
 ",
                 );
-                writeln!(o, "    if ({e} && (*p).age > (*p).lifetime) {{ (*p).alive = false; }}")
-                    .unwrap();
+                writeln!(
+                    o,
+                    "    if ({e} && (*p).age > (*p).lifetime) {{ (*p).alive = false; }}"
+                )
+                .unwrap();
             }
             ModuleKind::KillParticles => {
                 let e = inp(0, self);
@@ -330,7 +349,8 @@ pub fn emitter_shader(sys: &CookedSystem, emitter: &CookedEmitter) -> EmitterSha
     for (i, m) in emitter.particle_spawn.iter().enumerate() {
         g.module(m, STAGE_PARTICLE_SPAWN, i, "0u");
     }
-    g.out.push_str("}\n\nfn update_particle(p: ptr<function, Particle>) {\n");
+    g.out
+        .push_str("}\n\nfn update_particle(p: ptr<function, Particle>) {\n");
     for (i, m) in emitter.particle_update.iter().enumerate() {
         g.module(m, STAGE_PARTICLE_UPDATE, i, "fr.frame + 1u");
     }

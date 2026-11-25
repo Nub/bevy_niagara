@@ -113,9 +113,7 @@ fn gpu_matches_cpu_reference() {
         assert!(most_alive > 0, "{name}: nothing alive to compare");
         eprintln!(
             "{name}: up to {} particles compared at 12 checkpoints; largest difference {:.2e} ({})",
-            most_alive,
-            diff.max_abs,
-            diff.worst
+            most_alive, diff.max_abs, diff.worst
         );
     }
 }
@@ -147,6 +145,10 @@ fn several_steps_per_submit_match_one_per_submit() {
     assert!(!pa.is_empty());
     assert_eq!(pa.len(), pb.len());
     for (x, y) in pa.iter().zip(&pb) {
-        assert_eq!(x.bits(), y.bits(), "GPU results depend on how steps are submitted");
+        assert_eq!(
+            x.bits(),
+            y.bits(),
+            "GPU results depend on how steps are submitted"
+        );
     }
 }

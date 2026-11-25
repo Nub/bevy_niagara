@@ -1,0 +1,11 @@
+[package]
+name = "fx_render"
+description = "Bevy plugin: GPU-simulated effects and Niagara-style sprite rendering in the raster pipeline"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx_core = { path = "../fx_core" }
+fx_gpu = { path = "../fx_gpu" }
+bevy.workspace = true

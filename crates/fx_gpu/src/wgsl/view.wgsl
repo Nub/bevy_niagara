@@ -13,7 +13,7 @@ struct ViewParams {
     camera_position: vec4<f32>,
     camera_forward: vec4<f32>,
     capacity: u32,
-    sort_mode: u32,               // 0 none, 1 view depth, 2 view distance
+    sort_mode: u32,               // 0 none, 1 view depth, 2 view distance, 3 UniqueID
     max_pow2: u32,                // sort buffer length
     _pad: u32,
 }
@@ -111,6 +111,11 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // Far first: larger distance → smaller key. Non-negative floats order as their bits.
         key = 0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0));
+        if (vp.sort_mode == 3u) {
+            // Deterministic order (headless preview): by UniqueID, independent
+            // of the slot order atomic compaction produced.
+            key = min(bitcast<u32>(pw(27u, i)), 0xFFFFFFFEu);
+        }
         atomicAdd(&draw[1], 1u);
     }
     keys[i] = key;

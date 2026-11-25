@@ -1,0 +1,20 @@
+[package]
+name = "fx_preview"
+description = "fxpreview: headless, deterministic frame strips and MP4s of effects"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx_core = { path = "../fx_core" }
+fx_render = { path = "../fx_render" }
+bevy.workspace = true
+png = "0.17"
+
+[[bin]]
+name = "fxpreview"
+path = "src/main.rs"
+
+[[bin]]
+name = "fxbench"
+path = "src/bench.rs"

@@ -148,7 +148,7 @@ impl GpuEffect {
                 system.user_params.len()
             ));
         }
-        let limit = device.limits().max_storage_buffer_binding_size as u64;
+        let limit = device.limits().max_storage_buffer_binding_size;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx_gpu sim"),
             entries: &[
@@ -201,7 +201,11 @@ impl GpuEffect {
                 let writes_args = entry == "begin" || entry == "spawn_prep";
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
-                    layout: Some(if writes_args { &args_pipeline_layout } else { &pipeline_layout }),
+                    layout: Some(if writes_args {
+                        &args_pipeline_layout
+                    } else {
+                        &pipeline_layout
+                    }),
                     module: &module,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
@@ -217,7 +221,11 @@ impl GpuEffect {
             };
             let particle_buffer = |i: usize| {
                 device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(if i == 0 { "fx particles 0" } else { "fx particles 1" }),
+                    label: Some(if i == 0 {
+                        "fx particles 0"
+                    } else {
+                        "fx particles 1"
+                    }),
                     size: bytes,
                     usage: wgpu::BufferUsages::STORAGE
                         | wgpu::BufferUsages::COPY_SRC
@@ -243,7 +251,10 @@ impl GpuEffect {
             let args_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fx sim args"),
                 layout: &args_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: args.as_entire_binding() }],
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: args.as_entire_binding(),
+                }],
             });
             let frame_ubo = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("fx frame uniforms"),
@@ -450,7 +461,13 @@ impl GpuEffect {
             let words: &[u32] = bytemuck::cast_slice(&state);
             let n = words[STATE_COUNT as usize] as usize;
             let cap = em.capacity as usize;
-            let data = read_buffer(device, queue, &em.particles[em.current], 0, em.particles[0].size());
+            let data = read_buffer(
+                device,
+                queue,
+                &em.particles[em.current],
+                0,
+                em.particles[0].size(),
+            );
             let d: &[f32] = bytemuck::cast_slice(&data);
             let w = |word: usize, i: usize| d[word * cap + i];
             let mut ps = Vec::with_capacity(n);
