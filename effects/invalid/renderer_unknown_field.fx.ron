@@ -1,0 +1,9 @@
+// expect: 7: unknown field `blend` in a Sprite renderer
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Sprite((blend: Additive))],
+    )],
+)

@@ -1,0 +1,9 @@
+// expect: 7: unknown renderer `Sprit`
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Sprit((blend_mode: Additive))],
+    )],
+)

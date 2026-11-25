@@ -3,7 +3,7 @@
 //!
 //! It accepts the RON subset effect files use: structs and tuples (optionally
 //! named, `Name(...)`), lists, maps, strings, numbers, booleans, unit
-//! identifiers, `//` and `/* */` comments, trailing commas and a leading
+//! identifiers (also raw, `r#None`), `//` and `/* */` comments, trailing commas and a leading
 //! `#![enable(...)]` attribute.
 
 use crate::model::Span;
@@ -203,12 +203,22 @@ impl Parser<'_> {
                 self.number()?
             }
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
-                let id = self.ident();
+                let mut id = self.ident();
+                // A raw identifier, e.g. `r#None` (how `ron` writes a variant named `None`).
+                let raw = id == "r"
+                    && self.peek() == Some(b'#')
+                    && self
+                        .peek_at(1)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_');
+                if raw {
+                    self.bump();
+                    id = self.ident();
+                }
                 match id.as_str() {
-                    "true" => SKind::Bool(true),
-                    "false" => SKind::Bool(false),
-                    "inf" => SKind::Number(f64::INFINITY, false),
-                    "NaN" => SKind::Number(f64::NAN, false),
+                    "true" if !raw => SKind::Bool(true),
+                    "false" if !raw => SKind::Bool(false),
+                    "inf" if !raw => SKind::Number(f64::INFINITY, false),
+                    "NaN" if !raw => SKind::Number(f64::NAN, false),
                     _ => {
                         if self.peek() == Some(b'(') {
                             self.compound(Some(id))?

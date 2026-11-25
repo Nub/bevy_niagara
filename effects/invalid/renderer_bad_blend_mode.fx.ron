@@ -1,0 +1,9 @@
+// expect: 7: `blend_mode` must be `Alpha`, `Additive` or `Premultiplied`
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Sprite((blend_mode: Addative))],
+    )],
+)

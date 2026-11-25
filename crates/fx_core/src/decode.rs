@@ -3,6 +3,7 @@
 
 use crate::diag::{Diags, suggest};
 use crate::model::*;
+use crate::render::{IdentEnum, RENDERER_KINDS, sprite_field_names};
 use crate::ron_parse::{Field, SKind, SValue};
 use crate::types::{Curve, Value, ValueType};
 
@@ -22,6 +23,7 @@ pub const EMITTER_FIELDS: &[&str] = &[
     "particle_spawn",
     "particle_update",
     "event_handlers",
+    "renderers",
 ];
 pub const MODULE_FIELDS: &[&str] = &["module", "enabled", "inputs"];
 
@@ -120,6 +122,13 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
             Some("remove `event_handlers` (or leave it as `[]`)".into()),
         );
     }
+    let renderers = match f.take("renderers") {
+        Some(v) => list(v, "`renderers`", d)
+            .iter()
+            .filter_map(|r| decode_renderer(r, d))
+            .collect(),
+        None => Vec::new(),
+    };
     f.finish(d);
     Some(EmitterSource {
         name,
@@ -129,8 +138,254 @@ fn decode_emitter(v: &SValue, d: &mut Diags) -> Option<EmitterSource> {
         emitter_update,
         particle_spawn,
         particle_update,
+        renderers,
         span: v.span,
     })
+}
+
+const RENDERER_HELP: &str = "write a renderer as `Sprite(( field: value, ... ))`, e.g. `Sprite((blend_mode: Additive))`; every field is optional";
+
+fn decode_renderer(v: &SValue, d: &mut Diags) -> Option<RendererSource> {
+    // `Sprite((...))`, `Sprite(...fields...)`, `Sprite(())`, `Sprite()` or bare `Sprite`.
+    let (tag, body): (&str, Option<&SValue>) = match &v.kind {
+        SKind::Tuple(Some(tag), items) => match items.as_slice() {
+            [] => (tag, None),
+            [inner] => (tag, Some(inner)),
+            _ => {
+                d.error(
+                    v.span,
+                    format!("`{tag}(...)` takes one struct of settings"),
+                    Some(RENDERER_HELP.into()),
+                );
+                return None;
+            }
+        },
+        SKind::Struct(Some(tag), _) => (tag, Some(v)),
+        SKind::Ident(tag) => (tag, None),
+        other => {
+            d.error(
+                v.span,
+                format!("expected a renderer, found {}", other.describe()),
+                Some(format!(
+                    "{RENDERER_HELP}. Renderers are: {}",
+                    RENDERER_KINDS.join(", ")
+                )),
+            );
+            return None;
+        }
+    };
+    match tag {
+        "Sprite" => decode_sprite(body, v, d).map(RendererSource::Sprite),
+        _ => {
+            let kinds = RENDERER_KINDS.join(", ");
+            let help = match suggest(tag, RENDERER_KINDS.iter().copied()) {
+                Some(s) => format!("did you mean `{s}`? Renderers are: {kinds}"),
+                None => {
+                    format!("renderers are: {kinds} (Ribbon, Mesh and Light are not supported yet)")
+                }
+            };
+            d.error(v.span, format!("unknown renderer `{tag}`"), Some(help));
+            None
+        }
+    }
+}
+
+fn decode_sprite(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<SpriteSource> {
+    let mut s = SpriteSource {
+        span: whole.span,
+        ..SpriteSource::default()
+    };
+    let Some(body) = body else {
+        return Some(s);
+    };
+    let mut f = Fields::new(body, "a Sprite renderer", sprite_field_names(), d)?;
+    if let Some(v) = f.take("blend_mode") {
+        s.blend_mode = ident_enum(v, "blend_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("lit") {
+        s.lit = boolean(v, "lit", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("facing_mode") {
+        s.facing_mode = ident_enum(v, "facing_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("custom_facing_vector") {
+        s.custom_facing_vector = floats(v, "custom_facing_vector", "(0.0, 0.0, 1.0)", d)
+            .unwrap_or(s.custom_facing_vector);
+    }
+    if let Some(v) = f.take("alignment") {
+        s.alignment = ident_enum(v, "alignment", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("custom_alignment_vector") {
+        s.custom_alignment_vector = floats(v, "custom_alignment_vector", "(0.0, 1.0, 0.0)", d)
+            .unwrap_or(s.custom_alignment_vector);
+    }
+    if let Some(v) = f.take("pivot_in_uv_space") {
+        s.pivot_in_uv_space =
+            floats(v, "pivot_in_uv_space", "(0.5, 0.5)", d).unwrap_or(s.pivot_in_uv_space);
+    }
+    if let Some(v) = f.take("sub_image_size") {
+        s.sub_image_size = sub_image_size(v, d).unwrap_or(s.sub_image_size);
+    }
+    if let Some(v) = f.take("sub_uv_blending") {
+        s.sub_uv_blending = boolean(v, "sub_uv_blending", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("sort_mode") {
+        s.sort_mode = ident_enum(v, "sort_mode", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("soft_particle_fade_distance") {
+        match v.kind {
+            SKind::Number(n, _) if n >= 0.0 && n.is_finite() => {
+                s.soft_particle_fade_distance = n as f32
+            }
+            _ => d.error(
+                v.span,
+                format!(
+                    "`soft_particle_fade_distance` must be a distance of at least 0 metres, found {}",
+                    v.kind.describe()
+                ),
+                Some(
+                    "write e.g. `soft_particle_fade_distance: 0.5` (metres), or `0.0` to turn soft fading off"
+                        .into(),
+                ),
+            ),
+        }
+    }
+    if let Some(v) = f.take("texture") {
+        match &v.kind {
+            SKind::Str(p) => s.texture = Some(p.clone()),
+            other => d.error(
+                v.span,
+                format!(
+                    "`texture` must be an asset path \"string\", found {}",
+                    other.describe()
+                ),
+                Some("write e.g. `texture: \"textures/smoke.png\"`, or leave it out for the built-in soft round sprite".into()),
+            ),
+        }
+    }
+    f.finish(d);
+    Some(s)
+}
+
+fn ident_enum<T: IdentEnum>(v: &SValue, field: &str, d: &mut Diags) -> Option<T> {
+    let name = match &v.kind {
+        SKind::Ident(i) => i.as_str(),
+        SKind::Str(s) => s.as_str(),
+        _ => "",
+    };
+    if let SKind::Ident(_) = v.kind
+        && let Some(x) = T::from_name(name)
+    {
+        return Some(x);
+    }
+    let names = T::VARIANTS.iter().map(|(n, _)| *n);
+    let help = match suggest(name, names).filter(|_| !name.is_empty()) {
+        Some(s) => format!("did you mean `{field}: {s}`? (a bare name, no quotes)"),
+        None => format!("write `{field}: {}` (the default)", T::VARIANTS[0].0),
+    };
+    d.error(
+        v.span,
+        format!(
+            "`{field}` must be {}, found {}",
+            T::list(),
+            v.kind.describe()
+        ),
+        Some(help),
+    );
+    None
+}
+
+fn boolean(v: &SValue, field: &str, d: &mut Diags) -> Option<bool> {
+    match v.kind {
+        SKind::Bool(b) => Some(b),
+        _ => {
+            d.error(
+                v.span,
+                format!(
+                    "`{field}` must be `true` or `false`, found {}",
+                    v.kind.describe()
+                ),
+                Some(format!("write `{field}: true` or `{field}: false`")),
+            );
+            None
+        }
+    }
+}
+
+/// A plain tuple of `N` numbers, e.g. `(0.0, 1.0, 0.0)`.
+fn floats<const N: usize>(
+    v: &SValue,
+    field: &str,
+    example: &str,
+    d: &mut Diags,
+) -> Option<[f32; N]> {
+    let bad = |d: &mut Diags| {
+        d.error(
+            v.span,
+            format!(
+                "`{field}` must be a tuple of {N} numbers, found {}",
+                v.kind.describe()
+            ),
+            Some(format!("write e.g. `{field}: {example}`")),
+        );
+    };
+    let (SKind::Tuple(None, items) | SKind::List(items)) = &v.kind else {
+        bad(d);
+        return None;
+    };
+    if items.len() != N {
+        bad(d);
+        return None;
+    }
+    let mut out = [0.0f32; N];
+    for (o, x) in out.iter_mut().zip(items) {
+        *o = number(x, d)?;
+    }
+    Some(out)
+}
+
+fn sub_image_size(v: &SValue, d: &mut Diags) -> Option<[u32; 2]> {
+    let help = "write `sub_image_size: (columns, rows)` with whole numbers of at least 1, e.g. `(2, 2)`; `(1, 1)` means no flipbook";
+    let (SKind::Tuple(None, items) | SKind::List(items)) = &v.kind else {
+        d.error(
+            v.span,
+            format!(
+                "`sub_image_size` must be `(columns, rows)`, found {}",
+                v.kind.describe()
+            ),
+            Some(help.into()),
+        );
+        return None;
+    };
+    if items.len() != 2 {
+        d.error(
+            v.span,
+            format!(
+                "`sub_image_size` must be `(columns, rows)`, found {} numbers",
+                items.len()
+            ),
+            Some(help.into()),
+        );
+        return None;
+    }
+    let mut out = [1u32; 2];
+    for (o, x) in out.iter_mut().zip(items) {
+        match x.kind {
+            SKind::Number(n, true) if n >= 1.0 && n <= u32::MAX as f64 => *o = n as u32,
+            _ => {
+                d.error(
+                    x.span,
+                    format!(
+                        "`sub_image_size` columns and rows must be whole numbers of at least 1, found {}",
+                        x.kind.describe()
+                    ),
+                    Some(help.into()),
+                );
+                return None;
+            }
+        }
+    }
+    Some(out)
 }
 
 fn decode_stack(v: &SValue, d: &mut Diags) -> Vec<ModuleCall> {

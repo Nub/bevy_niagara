@@ -36,6 +36,7 @@
                     "Scale Factor": CurveOverAge(Vec2([(0.0, (1.0, 1.0)), (1.0, (0.2, 0.2))])),
                 }),
             ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
         ),
     ],
 )

@@ -7,6 +7,7 @@
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 
+pub use crate::render::{BlendMode, FacingMode, SortMode, SpriteAlignment};
 use crate::types::{Curve, Value, ValueType};
 
 /// A 1-based line/column position in a source file.
@@ -100,8 +101,74 @@ pub struct EmitterSource {
     pub emitter_update: Vec<ModuleCall>,
     pub particle_spawn: Vec<ModuleCall>,
     pub particle_update: Vec<ModuleCall>,
+    /// How particles are drawn; empty means the emitter draws nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renderers: Vec<RendererSource>,
     #[serde(skip)]
     pub span: Span,
+}
+
+/// One entry of an emitter's `renderers: [ ... ]`. Ribbon, Mesh and Light
+/// renderers will be further variants.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum RendererSource {
+    /// `Sprite(( ... ))`: camera-facing quads (Niagara's Sprite Renderer).
+    Sprite(SpriteSource),
+}
+
+/// Sprite renderer settings, with Niagara's defaults filled in for fields
+/// the source leaves out.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SpriteSource {
+    pub blend_mode: BlendMode,
+    pub lit: bool,
+    pub facing_mode: FacingMode,
+    pub custom_facing_vector: [f32; 3],
+    pub alignment: SpriteAlignment,
+    pub custom_alignment_vector: [f32; 3],
+    pub pivot_in_uv_space: [f32; 2],
+    /// Flipbook (columns, rows), each at least 1.
+    pub sub_image_size: [u32; 2],
+    pub sub_uv_blending: bool,
+    pub sort_mode: SortMode,
+    /// Metres; 0 disables soft-particle fading.
+    pub soft_particle_fade_distance: f32,
+    /// Asset path; `None` uses the built-in soft round sprite.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_texture"
+    )]
+    pub texture: Option<String>,
+    #[serde(skip)]
+    pub span: Span,
+}
+
+impl Default for SpriteSource {
+    fn default() -> Self {
+        SpriteSource {
+            blend_mode: BlendMode::default(),
+            lit: false,
+            facing_mode: FacingMode::default(),
+            custom_facing_vector: [0.0, 0.0, 1.0],
+            alignment: SpriteAlignment::default(),
+            custom_alignment_vector: [0.0, 1.0, 0.0],
+            pivot_in_uv_space: [0.5, 0.5],
+            sub_image_size: [1, 1],
+            sub_uv_blending: false,
+            sort_mode: SortMode::default(),
+            soft_particle_fade_distance: 0.0,
+            texture: None,
+            span: Span::default(),
+        }
+    }
+}
+
+/// Written as a plain string (the source form), not `Some("...")`.
+fn serialize_texture<S: Serializer>(t: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    match t {
+        Some(p) => s.serialize_str(p),
+        None => s.serialize_none(),
+    }
 }
 
 impl EmitterSource {

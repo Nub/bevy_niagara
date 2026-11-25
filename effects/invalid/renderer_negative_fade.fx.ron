@@ -1,0 +1,9 @@
+// expect: 7: `soft_particle_fade_distance` must be a distance of at least 0 metres
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Sprite((soft_particle_fade_distance: -0.5))],
+    )],
+)

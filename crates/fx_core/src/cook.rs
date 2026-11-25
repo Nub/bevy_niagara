@@ -11,7 +11,7 @@ use crate::params::{self, Namespace, ParamRef};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 1;
+pub const COOKED_FORMAT_VERSION: u32 = 2;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -38,6 +38,81 @@ pub struct CookedEmitter {
     pub emitter_update: Vec<CookedModule>,
     pub particle_spawn: Vec<CookedModule>,
     pub particle_update: Vec<CookedModule>,
+    /// How the particles are drawn, in source order; empty draws nothing.
+    pub renderers: Vec<CookedRenderer>,
+}
+
+/// A renderer with every setting resolved. Ribbon, Mesh and Light renderers
+/// will be further variants.
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum CookedRenderer {
+    Sprite(CookedSprite),
+}
+
+/// Sprite renderer settings (Niagara's Sprite Renderer properties).
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CookedSprite {
+    pub blend_mode: BlendMode,
+    pub lit: bool,
+    pub facing_mode: FacingMode,
+    pub custom_facing_vector: [f32; 3],
+    pub alignment: SpriteAlignment,
+    pub custom_alignment_vector: [f32; 3],
+    pub pivot_in_uv_space: [f32; 2],
+    /// Flipbook (columns, rows), each at least 1.
+    pub sub_image_size: [u32; 2],
+    pub sub_uv_blending: bool,
+    pub sort_mode: SortMode,
+    /// Metres; 0 disables soft-particle fading.
+    pub soft_particle_fade_distance: f32,
+    /// Asset path; `None` uses the built-in soft round sprite.
+    pub texture: Option<String>,
+}
+
+impl Default for CookedSprite {
+    fn default() -> Self {
+        cook_sprite(&SpriteSource::default())
+    }
+}
+
+fn cook_sprite(s: &SpriteSource) -> CookedSprite {
+    CookedSprite {
+        blend_mode: s.blend_mode,
+        lit: s.lit,
+        facing_mode: s.facing_mode,
+        custom_facing_vector: s.custom_facing_vector,
+        alignment: s.alignment,
+        custom_alignment_vector: s.custom_alignment_vector,
+        pivot_in_uv_space: s.pivot_in_uv_space,
+        sub_image_size: s.sub_image_size,
+        sub_uv_blending: s.sub_uv_blending,
+        sort_mode: s.sort_mode,
+        soft_particle_fade_distance: s.soft_particle_fade_distance,
+        texture: s.texture.clone(),
+    }
+}
+
+fn cook_renderer(r: &RendererSource, d: &mut Diags) -> CookedRenderer {
+    match r {
+        RendererSource::Sprite(s) => {
+            // The decoder rejects these; models built in code may still hold them.
+            if s.sub_image_size.contains(&0) {
+                d.error(
+                    s.span,
+                    "`sub_image_size` columns and rows must be at least 1",
+                    Some("write e.g. `sub_image_size: (1, 1)` (no flipbook)".into()),
+                );
+            }
+            if s.soft_particle_fade_distance.is_nan() || s.soft_particle_fade_distance < 0.0 {
+                d.error(
+                    s.span,
+                    "`soft_particle_fade_distance` must be at least 0 metres",
+                    Some("write `soft_particle_fade_distance: 0.0` to turn soft fading off".into()),
+                );
+            }
+            CookedRenderer::Sprite(cook_sprite(s))
+        }
+    }
 }
 
 /// An enabled module with one input per [`ModuleDef::inputs`] slot, in order.
@@ -208,6 +283,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
             emitter_update: eu,
             particle_spawn: ps,
             particle_update: pu,
+            renderers: e.renderers.iter().map(|r| cook_renderer(r, d)).collect(),
         });
     }
     if d.has_errors() {

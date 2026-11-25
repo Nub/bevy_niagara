@@ -41,6 +41,14 @@
                     "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.15, 1.0), (1.0, 0.0)])),
                 }),
             ],
+            renderers: [Sprite((
+                blend_mode: Alpha,
+                lit: true,
+                sort_mode: ViewDepth,
+                soft_particle_fade_distance: 0.5,
+                sub_image_size: (2, 2),
+                sub_uv_blending: true,
+            ))],
         ),
     ],
 )

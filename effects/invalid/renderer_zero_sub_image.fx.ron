@@ -1,0 +1,9 @@
+// expect: 7: `sub_image_size` columns and rows must be whole numbers of at least 1
+(
+    name: "Broken",
+    emitters: [(
+        name: "E",
+        emitter_update: [(module: "Spawn Rate")],
+        renderers: [Sprite((sub_image_size: (4, 0)))],
+    )],
+)

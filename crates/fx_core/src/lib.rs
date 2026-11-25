@@ -11,6 +11,7 @@ pub mod diag;
 pub mod model;
 pub mod modules;
 pub mod params;
+pub mod render;
 pub mod ron_parse;
 pub mod sim;
 pub mod types;

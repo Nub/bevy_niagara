@@ -3,7 +3,7 @@
 //! ```text
 //! fxc check <file.fx.ron>...           validate; prints file:line:col diagnostics
 //! fxc cook  <file.fx.ron> [-o out.fxb] validate and write the cooked binary
-//! fxc modules                          list modules, their stages and inputs
+//! fxc modules                          list modules, their stages and inputs, and renderer settings
 //! ```
 //! Exit status: 0 ok (warnings allowed), 1 errors, 2 bad usage or I/O.
 
@@ -120,5 +120,10 @@ fn list_modules() {
                 i.doc
             );
         }
+    }
+    println!("\nRenderers (emitter field `renderers: [ ... ]`; every field optional):");
+    println!("Sprite(( ... ))");
+    for f in fx_core::render::SPRITE_FIELDS {
+        println!("  - {}: {} = {}  ({})", f.name, f.form, f.default, f.doc);
     }
 }
