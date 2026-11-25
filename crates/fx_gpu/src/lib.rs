@@ -60,6 +60,36 @@ pub const WORDS_PER_PARTICLE: u32 = 28;
 /// DynamicMaterialParameter1 (56..59), RotationalVelocity (60..62),
 /// Physics.RotationalForce (63..65) and Physics.RotationalDrag (66).
 pub const WORDS_PER_PARTICLE_EXTENDED: u32 = 67;
+/// 32-bit words per particle of an emitter that also uses
+/// DynamicMaterialParameter2 and 3
+/// (`fx_core::cook::CookedEmitter::uses_material_parameters_2_3`): the
+/// extended 67, then DynamicMaterialParameter2 (67..70) and 3 (71..74).
+pub const WORDS_PER_PARTICLE_EXTENDED_2: u32 = 75;
+/// Word of `Particles.DynamicMaterialParameter2` (4 words; parameter 3 follows).
+pub const WORD_DYNAMIC_MATERIAL_PARAMETER_2: u32 = 67;
+
+/// Words per particle emitter `e` stores.
+pub fn particle_words(e: &fx_core::cook::CookedEmitter) -> u32 {
+    if e.uses_material_parameters_2_3() {
+        WORDS_PER_PARTICLE_EXTENDED_2
+    } else if e.uses_extended_attributes() {
+        WORDS_PER_PARTICLE_EXTENDED
+    } else {
+        WORDS_PER_PARTICLE
+    }
+}
+
+/// The renderers' `extended` level for an emitter storing `words` words per
+/// particle: 0 base, 1 extended, 2 also DynamicMaterialParameter2 and 3.
+pub fn extended_level(words: u32) -> u32 {
+    if words >= WORDS_PER_PARTICLE_EXTENDED_2 {
+        2
+    } else if words > WORDS_PER_PARTICLE {
+        1
+    } else {
+        0
+    }
+}
 /// Word of `Particles.SpriteFacing` (3 words) in the extended layout.
 pub const WORD_SPRITE_FACING: u32 = 50;
 /// Word of `Particles.SpriteAlignment` (3 words) in the extended layout.
@@ -167,7 +197,7 @@ impl Region {
 pub struct GpuEmitter {
     pub name: String,
     pub capacity: u32,
-    /// Words per particle: [`WORDS_PER_PARTICLE`] or [`WORDS_PER_PARTICLE_EXTENDED`].
+    /// Words per particle: [`WORDS_PER_PARTICLE`], [`WORDS_PER_PARTICLE_EXTENDED`] or [`WORDS_PER_PARTICLE_EXTENDED_2`].
     pub words: u32,
     /// The instance's two particle copies (ping-pong); `particles[current]`
     /// holds the living ones, word `w` of particle `i` at `w * capacity + i`.
@@ -549,11 +579,7 @@ impl GpuProgram {
         let mut emitters = Vec::new();
         for (ei, e) in system.emitters.iter().enumerate() {
             let capacity = e.max_particles.max(1);
-            let words = if e.uses_extended_attributes() {
-                WORDS_PER_PARTICLE_EXTENDED
-            } else {
-                WORDS_PER_PARTICLE
-            };
+            let words = particle_words(e);
             let bytes = capacity as u64 * words as u64 * 4;
             if bytes > limit {
                 return Err(format!(
@@ -1580,7 +1606,7 @@ impl GpuEffect {
                 p.initial_sprite_size = [w(21, i), w(22, i)].into();
                 p.force = [w(23, i), w(24, i), w(25, i)].into();
                 p.drag = w(26, i);
-                if em.words == WORDS_PER_PARTICLE_EXTENDED {
+                if em.words >= WORDS_PER_PARTICLE_EXTENDED {
                     p.scale = [w(28, i), w(29, i), w(30, i)].into();
                     p.mesh_orientation =
                         bevy_math::Quat::from_xyzw(w(31, i), w(32, i), w(33, i), w(34, i));
@@ -1600,6 +1626,10 @@ impl GpuEffect {
                     p.rotational_velocity = [w(60, i), w(61, i), w(62, i)].into();
                     p.rotational_force = [w(63, i), w(64, i), w(65, i)].into();
                     p.rotational_drag = w(66, i);
+                }
+                if em.words >= WORDS_PER_PARTICLE_EXTENDED_2 {
+                    p.dynamic_material_parameter_2 = [w(67, i), w(68, i), w(69, i), w(70, i)].into();
+                    p.dynamic_material_parameter_3 = [w(71, i), w(72, i), w(73, i), w(74, i)].into();
                 }
                 ps.push(p);
             }

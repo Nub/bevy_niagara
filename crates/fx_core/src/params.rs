@@ -133,6 +133,11 @@ pub mod attr {
     pub const ROTATIONAL_VELOCITY: u16 = 29;
     pub const PHYSICS_ROTATIONAL_FORCE: u16 = 30;
     pub const PHYSICS_ROTATIONAL_DRAG: u16 = 31;
+    pub const DYNAMIC_MATERIAL_PARAMETER_2: u16 = 32;
+    pub const DYNAMIC_MATERIAL_PARAMETER_3: u16 = 33;
+    /// Attributes from here on are stored only by emitters that use them
+    /// (see [`crate::cook::CookedEmitter::uses_material_parameters_2_3`]).
+    pub const FIRST_EXTENDED_2: u16 = DYNAMIC_MATERIAL_PARAMETER_2;
     /// Attributes from here on are stored only by emitters that use them
     /// (see [`crate::cook::CookedEmitter::uses_extended_attributes`]).
     pub const FIRST_EXTENDED: u16 = SCALE;
@@ -255,6 +260,16 @@ pub const PARTICLES: &[Builtin] = &[
         "Physics.RotationalDrag",
         ValueType::Float,
         "rotational drag accumulated this step (cleared by Solve Forces and Velocity)",
+    ),
+    b(
+        "DynamicMaterialParameter2",
+        ValueType::Vec4,
+        "third set of free values passed to custom materials",
+    ),
+    b(
+        "DynamicMaterialParameter3",
+        ValueType::Vec4,
+        "fourth set of free values passed to custom materials",
     ),
 ];
 

@@ -166,6 +166,8 @@ impl Gen<'_> {
                 attr::ROTATIONAL_VELOCITY => "(*p).rotational_velocity",
                 attr::PHYSICS_ROTATIONAL_FORCE => "(*p).rotational_force",
                 attr::PHYSICS_ROTATIONAL_DRAG => "(*p).rotational_drag",
+                attr::DYNAMIC_MATERIAL_PARAMETER_2 => "(*p).dynamic_material_parameter_2",
+                attr::DYNAMIC_MATERIAL_PARAMETER_3 => "(*p).dynamic_material_parameter_3",
                 _ => "0.0",
             }
             .into(),
@@ -470,7 +472,7 @@ impl Gen<'_> {
             stage * 256 + index as u32
         )
         .unwrap();
-        let inp = |slot: usize, g: &mut Self| g.input(m, &m.inputs[slot], slot as u32 * 8);
+        let inp = |slot: usize, g: &mut Self| g.input(m, &m.inputs[slot], fx_core::sim::input_salt(slot));
         match kind {
             ModuleKind::InitializeParticle => {
                 let fields = [
@@ -485,6 +487,10 @@ impl Gen<'_> {
                     let e = inp(slot, self);
                     writeln!(o, "    (*p).{field} = {e};").unwrap();
                 }
+                let (h, s, v, a) = (inp(6, self), inp(7, self), inp(8, self), inp(9, self));
+                writeln!(o, "    let hue = {h};\n    let sat = {s};\n    let val = {v};").unwrap();
+                writeln!(o, "    if (hue != 0.0 || sat != 1.0 || val != 1.0) {{ (*p).color = hsv_shift((*p).color, hue, sat, val); }}").unwrap();
+                writeln!(o, "    (*p).color.w *= {a};").unwrap();
                 writeln!(o, "    (*p).initial_color = (*p).color;").unwrap();
                 writeln!(o, "    (*p).initial_sprite_size = (*p).sprite_size;").unwrap();
             }
@@ -508,9 +514,22 @@ impl Gen<'_> {
                 )
                 .unwrap();
                 writeln!(o, "    let strength = {s};").unwrap();
+                let (inner, spread, fall) = (inp(3, self), inp(4, self), inp(5, self));
+                writeln!(o, "    let inner = clamp({inner}, 0.0, 180.0) * {};", f(1.0f32.to_radians())).unwrap();
+                writeln!(o, "    let spread = clamp({spread}, 0.0, 1.0);").unwrap();
+                writeln!(o, "    let falloff = clamp({fall}, 0.0, 1.0);").unwrap();
                 writeln!(o, "    let u1 = rand_unit(k, 128u);").unwrap();
                 writeln!(o, "    let u2 = rand_unit(k, 129u);").unwrap();
-                writeln!(o, "    let cos_t = 1.0 - u1 * (1.0 - cos(angle));").unwrap();
+                writeln!(o, "    var outer = angle;").unwrap();
+                writeln!(
+                    o,
+                    "    if (spread > 0.0) {{ let lo = 1.0 - 1.5 * spread; outer = angle * clamp(lo + (1.0 - lo) * rand_unit(k, 130u), 0.0, 1.0); }}"
+                )
+                .unwrap();
+                writeln!(o, "    var cos_t = 1.0 - u1 * (1.0 - cos(outer));").unwrap();
+                writeln!(o, "    if (inner > 0.0) {{ cos_t = cos(inner) - u1 * (cos(inner) - cos(outer)); }}").unwrap();
+                writeln!(o, "    var speed = strength;").unwrap();
+                writeln!(o, "    if (falloff > 0.0) {{ speed = strength * cone_speed_falloff(cos_t, falloff); }}").unwrap();
                 writeln!(o, "    let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));").unwrap();
                 writeln!(o, "    let phi = {} * u2;", f(std::f32::consts::TAU)).unwrap();
                 writeln!(
@@ -518,7 +537,7 @@ impl Gen<'_> {
                     "    let dir = basis_t1(axis) * (sin_t * cos(phi)) + basis_t2(axis) * (sin_t * sin(phi)) + axis * cos_t;"
                 )
                 .unwrap();
-                writeln!(o, "    (*p).velocity += dir * strength;").unwrap();
+                writeln!(o, "    (*p).velocity += dir * speed;").unwrap();
             }
             ModuleKind::GravityForce => {
                 let e = inp(0, self);
@@ -541,12 +560,13 @@ impl Gen<'_> {
                 .unwrap();
             }
             ModuleKind::ScaleColor => {
-                let (rgb, a) = (inp(0, self), inp(1, self));
+                let (rgb, a, rgba) = (inp(0, self), inp(1, self), inp(2, self));
                 writeln!(o, "    let rgb = {rgb};").unwrap();
                 writeln!(o, "    let a = {a};").unwrap();
+                writeln!(o, "    let rgba = {rgba};").unwrap();
                 writeln!(
                     o,
-                    "    (*p).color = (*p).initial_color * vec4<f32>(rgb, a);"
+                    "    (*p).color = (*p).initial_color * vec4<f32>(rgb, a) * rgba;"
                 )
                 .unwrap();
             }
@@ -639,8 +659,10 @@ impl Gen<'_> {
                 writeln!(o, "    let radius = {r};").unwrap();
                 writeln!(o, "    let exponent = {e};").unwrap();
                 writeln!(o, "    let kill = {kill};").unwrap();
+                let off = inp(5, self);
+                writeln!(o, "    let attracted = (*p).position + {off};").unwrap();
                 o.push_str(
-                    "    let d = center - (*p).position;
+                    "    let d = center - attracted;
     let dist = length(d);
     if (dist < kill) { (*p).alive = false; }
     if (dist > 0.0 && dist < radius) { (*p).force += d * (strength * falloff(dist, radius, exponent) / dist); }
@@ -669,7 +691,15 @@ impl Gen<'_> {
                 writeln!(o, "    let wind = {w};").unwrap();
                 writeln!(o, "    let speed = {s};").unwrap();
                 writeln!(o, "    let resistance = {r};").unwrap();
-                writeln!(o, "    (*p).force += (wind * speed - (*p).velocity) * resistance;").unwrap();
+                writeln!(o, "    var wind_v = wind * speed;").unwrap();
+                let (ts, tf, toff, tpos) = (inp(3, self), inp(4, self), inp(5, self), inp(6, self));
+                writeln!(o, "    let turbulence = {ts};").unwrap();
+                writeln!(o, "    if (turbulence != 0.0) {{").unwrap();
+                writeln!(o, "        let freq = {tf};").unwrap();
+                writeln!(o, "        let at = {tpos} + {toff} * fr.time;").unwrap();
+                writeln!(o, "        wind_v += curl_noise(at * freq) * (length(wind_v) * turbulence);").unwrap();
+                writeln!(o, "    }}").unwrap();
+                writeln!(o, "    (*p).force += (wind_v - (*p).velocity) * resistance;").unwrap();
             }
             ModuleKind::LinearForce => {
                 let e = inp(0, self);
@@ -718,10 +748,17 @@ impl Gen<'_> {
                 )
                 .unwrap();
                 let call = match primitive {
-                    1 => format!("shape_box({}, surface, u)", inp(4, self)),
+                    1 => format!("shape_box_mid({}, {}, surface, u)", inp(4, self), inp(13, self)),
                     2 => format!("shape_cylinder({}, {}, surface, u)", inp(5, self), inp(6, self)),
                     3 => format!("shape_torus({}, {}, surface, u)", inp(7, self), inp(8, self)),
-                    4 => format!("shape_cone({}, {}, surface, u)", inp(9, self), inp(10, self)),
+                    4 => format!(
+                        "shape_cone_ex({}, {}, {}, {}, {}, surface, u)",
+                        inp(9, self),
+                        inp(10, self),
+                        inp(14, self),
+                        inp(15, self),
+                        inp(16, self)
+                    ),
                     5 => format!("shape_ring({}, {}, u)", inp(11, self), inp(12, self)),
                     _ => format!("shape_sphere({}, surface, u)", inp(3, self)),
                 };
@@ -1037,6 +1074,14 @@ impl Gen<'_> {
                 let e = inp(0, self);
                 writeln!(o, "    (*p).dynamic_material_parameter_1 = {e};").unwrap();
             }
+            ModuleKind::DynamicMaterialParameters3 => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).dynamic_material_parameter_2 = {e};").unwrap();
+            }
+            ModuleKind::DynamicMaterialParameters4 => {
+                let e = inp(0, self);
+                writeln!(o, "    (*p).dynamic_material_parameter_3 = {e};").unwrap();
+            }
             ModuleKind::JitterPosition => {
                 let (a, dl) = (inp(0, self), inp(1, self));
                 writeln!(o, "    let amount = {a};").unwrap();
@@ -1179,13 +1224,14 @@ pub fn emitter_shader(
     let (stages_src, stages) = stage_kernels(&mut g, ei);
     let glue = event_glue(sys, ei, events);
     let extended = emitter.uses_extended_attributes();
+    let extended_2 = emitter.uses_material_parameters_2_3();
     let mut source = String::new();
     if g.uses_tlas {
         source.push_str("enable wgpu_ray_query;\n\n");
     }
     write!(
         source,
-        "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..49 of the particle layout are stored when true.\nconst EXT: bool = {extended};\n{}\n{COMMON}\n",
+        "// Emitter \"{}\" of \"{}\" (generated by fx_gpu).\n// Words 28..66 of the particle layout are stored when EXT, 67..74 when EXT2.\nconst EXT: bool = {extended};\nconst EXT2: bool = {extended_2};\n{}\n{COMMON}\n",
         emitter.name, sys.name, fx_core::custom::LIB
     )
     .unwrap();
@@ -1369,7 +1415,7 @@ impl Gen<'_> {
                 Arg::Cell => "cell".into(),
                 Arg::CellPosition => "cellpos".into(),
                 Arg::GridAttribute(i) => format!("ga_{i}"),
-                Arg::Input(i) => g.input(m, &m.inputs[i], i as u32 * 8),
+                Arg::Input(i) => g.input(m, &m.inputs[i], fx_core::sim::input_salt(i)),
             }
         };
         let args: Vec<String> = custom::args(def, ctx).into_iter().map(|(_, _, a)| expr(self, a)).collect();

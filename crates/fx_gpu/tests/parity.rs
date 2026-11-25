@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use fx_core::sim::{Particle, Simulation};
-use fx_gpu::{GpuEffect, WORDS_PER_PARTICLE, WORDS_PER_PARTICLE_EXTENDED};
+use fx_gpu::{GpuEffect, WORDS_PER_PARTICLE, WORDS_PER_PARTICLE_EXTENDED, WORDS_PER_PARTICLE_EXTENDED_2};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -84,6 +84,8 @@ fn fields(p: &Particle) -> Vec<(&'static str, f32)> {
     put("rotational_velocity", &p.rotational_velocity.to_array());
     put("rotational_force", &p.rotational_force.to_array());
     put("rotational_drag", &[p.rotational_drag]);
+    put("dynamic_material_parameter_2", &p.dynamic_material_parameter_2.to_array());
+    put("dynamic_material_parameter_3", &p.dynamic_material_parameter_3.to_array());
     v
 }
 
@@ -329,6 +331,81 @@ const BATCH2: &str = r#"(
     )],
 )"#;
 
+/// Inputs added for Niagara imports: HSV colour, cone inner angle,
+/// distribution and speed falloff, box midpoint, cone shape options (a
+/// random input past slot 16), Scale RGBA, wind turbulence, the attracted
+/// position offset, and Dynamic Material Parameters 3 and 4 (which store 8
+/// more words per particle). A second emitter keeps the base layout.
+const GAPS: &str = r#"(
+    name: "Import gaps",
+    emitters: [(
+        name: "Cone",
+        max_particles: 2000,
+        emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(300.0) })],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: {
+                "Lifetime": RandomRange(Float(0.5), Float(1.5)),
+                "Color": Color((0.8, 0.4, 0.2, 0.9)),
+                "Hue Shift": RandomRange(Float(-36.0), Float(36.0)),
+                "Saturation Scale": RandomRange(Float(0.5), Float(1.0)),
+                "Value Scale": Float(1.5),
+                "Alpha Scale": RandomRange(Float(0.25), Float(1.0)),
+            }),
+            (module: "Shape Location", inputs: {
+                "Shape Primitive": Cone, "Cone Length": Float(2.0), "Cone Angle": Float(40.0),
+                "Cone Inner Angle": Float(15.0), "Cone Radial Angle": Float(270.0),
+                "Cone Surface Distribution": RandomRange(Float(0.0), Float(0.5)),
+            }),
+            (module: "Add Velocity in Cone", inputs: {
+                "Cone Angle": Float(50.0), "Velocity Strength": Float(3.0), "Inner Cone Angle": Float(10.0),
+                "Distribution Along Cone Axis": Float(0.6), "Speed Falloff": Float(0.4),
+            }),
+        ],
+        particle_update: [
+            (module: "Particle State"),
+            (module: "Scale Color", inputs: { "Scale RGB": Vec3((1.0, 0.5, 1.0)), "Scale RGBA": CurveOverAge(Vec4([(0.0, (1.0, 1.0, 1.0, 1.0)), (1.0, (0.5, 2.0, 1.0, 0.0))])) }),
+            (module: "Wind Force", inputs: {
+                "Wind Velocity": Vec3((2.0, 0.0, 1.0)), "Air Resistance": Float(0.5),
+                "Turbulence Scale": Float(0.5), "Turbulence Frequency": Float(0.8),
+                "Turbulence Offset By Time": Vec3((0.0, -1.0, 0.0)), "Turbulence Position": Link(Vec3, "Particles.Position"),
+            }),
+            (module: "Point Attraction Force", inputs: {
+                "Attractor Position": Vec3((0.0, 2.0, 0.0)), "Attraction Strength": Float(2.0), "Attraction Radius": Float(4.0),
+                "Attracted Position Offset": Dynamic("Multiply Vec3 by Float", { "A": Vec3((0.5, 0.0, 0.25)), "B": Dynamic("Sine over Time", { "Frequency": Float(0.5) }) }),
+            }),
+            (module: "Solve Forces and Velocity"),
+            (module: "Dynamic Material Parameters 3", inputs: { "Dynamic Material Parameter 2": Dynamic("Make Vec4 from Floats", { "X": Link(Float, "Particles.NormalizedAge"), "Y": Float(2.0) }) }),
+            (module: "Dynamic Material Parameters 4", inputs: { "Dynamic Material Parameter 3": Link(Vec4, "Particles.DynamicMaterialParameter2") }),
+        ],
+    ), (
+        name: "Box",
+        max_particles: 1000,
+        emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(200.0) })],
+        particle_spawn: [
+            (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.5), Float(1.0)) }),
+            (module: "Shape Location", inputs: {
+                "Shape Primitive": Box, "Surface Only": Bool(true), "Box Size": Vec3((1.0, 2.0, 3.0)),
+                "Box Midpoint": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((1.0, 1.0, 1.0))),
+            }),
+        ],
+        particle_update: [(module: "Particle State"), (module: "Scale Color", inputs: { "Scale RGBA": Vec4((0.5, 0.5, 0.5, 0.5)) })],
+        renderers: [Sprite(())],
+    )],
+)"#;
+
+#[test]
+fn material_parameters_2_3_widen_only_their_emitter() {
+    let (device, _, _) = fx_gpu::headless_device().unwrap();
+    let c = fx_core::check_source("gaps.fx.ron", GAPS);
+    let sys = c.cooked.unwrap();
+    let gpu = GpuEffect::new(&device, &sys, 1).unwrap();
+    assert_eq!(gpu.emitters[0].words, WORDS_PER_PARTICLE_EXTENDED_2);
+    assert_eq!(gpu.emitters[1].words, WORDS_PER_PARTICLE);
+    assert_eq!(fx_gpu::extended_level(gpu.emitters[0].words), 2);
+    assert_eq!(fx_gpu::extended_level(WORDS_PER_PARTICLE_EXTENDED), 1);
+    assert_eq!(fx_gpu::extended_level(gpu.emitters[1].words), 0);
+}
+
 #[test]
 fn gpu_matches_cpu_reference() {
     let (device, queue, info) = match fx_gpu::headless_device() {
@@ -359,6 +436,10 @@ fn gpu_matches_cpu_reference() {
     ] {
         systems.push((n, sample(n), 0));
     }
+    // Inputs added for Niagara imports, and material parameters 2 and 3.
+    let c = fx_core::check_source("gaps.fx.ron", GAPS);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    systems.push(("import gaps", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), 0));
     let c = fx_core::check_source("batch2.fx.ron", BATCH2);
     let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
     systems.push(("batch 2 extras", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), WORDS_PER_PARTICLE_EXTENDED));

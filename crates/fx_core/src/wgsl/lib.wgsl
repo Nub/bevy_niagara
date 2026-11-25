@@ -199,18 +199,23 @@ fn shape_sphere(radius: f32, surface: bool, u: array<f32, 5>) -> vec3<f32> {
 }
 
 fn shape_box(size: vec3<f32>, surface: bool, u: array<f32, 5>) -> vec3<f32> {
-    var p = vec3<f32>(u[0] - 0.5, u[1] - 0.5, u[2] - 0.5) * size;
+    return shape_box_mid(size, vec3<f32>(0.5), surface, u);
+}
+
+// The box with Offset at `mid` (fractions of `size` per axis; 0.5 = centred).
+fn shape_box_mid(size: vec3<f32>, mid: vec3<f32>, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    var p = (vec3<f32>(u[0], u[1], u[2]) - mid) * size;
     if (surface) {
         let ax = size.y * size.z;
         let ay = size.x * size.z;
         let t = u[3] * (ax + ay + size.x * size.y);
-        let side = select(0.5, -0.5, u[4] < 0.5);
+        let face = select(1.0, 0.0, u[4] < 0.5);
         if (t < ax) {
-            p.x = side * size.x;
+            p.x = (face - mid.x) * size.x;
         } else if (t < ax + ay) {
-            p.y = side * size.y;
+            p.y = (face - mid.y) * size.y;
         } else {
-            p.z = side * size.z;
+            p.z = (face - mid.z) * size.z;
         }
     }
     return p;
@@ -232,6 +237,51 @@ fn shape_cone(len: f32, angle: f32, surface: bool, u: array<f32, 5>) -> vec3<f32
     let h = len * select(pow(1.0 - u[0], 1.0 / 3.0), sqrt(1.0 - u[0]), surface);
     let r = h * tan(clamp(angle, 0.0, 89.9) * DEGREES) * select(sqrt(1.0 - u[1]), 1.0, surface);
     return around(r, TAU * u[2], h);
+}
+
+// The cone with a hollow core (`inner` half-angle, degrees), a sweep of
+// `radial` degrees and the fraction `empty` of it left empty at the apex.
+fn shape_cone_ex(len: f32, angle: f32, inner: f32, radial: f32, empty: f32, surface: bool, u: array<f32, 5>) -> vec3<f32> {
+    let w = 1.0 - u[0] * (1.0 - clamp(empty, 0.0, 1.0));
+    let h = len * select(pow(w, 1.0 / 3.0), sqrt(w), surface);
+    let outer = clamp(angle, 0.0, 89.9);
+    let t = tan(outer * DEGREES);
+    let core = clamp(inner, 0.0, 89.9);
+    var r = h * t;
+    if (!surface) {
+        if (core > 0.0) {
+            let ti = tan(min(core, outer) * DEGREES);
+            r = h * sqrt(ti * ti + (t * t - ti * ti) * (1.0 - u[1]));
+        } else {
+            r = h * t * sqrt(1.0 - u[1]);
+        }
+    }
+    return around(r, TAU * u[2] * (clamp(radial, 0.0, 360.0) / 360.0), h);
+}
+
+// Niagara's HSV colour adjustment (fx_core::sim::hsv_shift): a YIQ hue
+// rotation of `hue` degrees scaled by saturation and value; alpha kept.
+fn hsv_shift(c: vec4<f32>, hue: f32, saturation: f32, value: f32) -> vec4<f32> {
+    let s = max(saturation, 0.0);
+    let v = max(value, 0.0);
+    let a = hue * DEGREES;
+    let vc = v * s * cos(a);
+    let vs = v * s * sin(a);
+    let r = (0.299 * v + 0.701 * vc + 0.168 * vs) * c.x
+        + (0.587 * v - 0.587 * vc + 0.330 * vs) * c.y
+        + (0.114 * v - 0.114 * vc - 0.497 * vs) * c.z;
+    let g = (0.299 * v - 0.299 * vc - 0.328 * vs) * c.x
+        + (0.587 * v + 0.413 * vc + 0.035 * vs) * c.y
+        + (0.114 * v - 0.114 * vc + 0.292 * vs) * c.z;
+    let b = (0.299 * v - 0.300 * vc + 1.25 * vs) * c.x
+        + (0.587 * v - 0.588 * vc - 1.05 * vs) * c.y
+        + (0.114 * v + 0.886 * vc - 0.203 * vs) * c.z;
+    return vec4<f32>(r, g, b, c.w);
+}
+
+// Add Velocity in Cone's speed factor (fx_core::sim::cone_speed_falloff).
+fn cone_speed_falloff(cos_t: f32, falloff: f32) -> f32 {
+    return 1.0 + (pow(clamp(cos_t, 0.0, 1.0), 10.0 * falloff) - 1.0) * falloff;
 }
 
 fn shape_ring(radius: f32, coverage: f32, u: array<f32, 5>) -> vec3<f32> {

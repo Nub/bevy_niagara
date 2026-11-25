@@ -214,9 +214,56 @@ pub fn convert(sys: &NSystem, source: &str) -> Conversion {
             ..Report::default()
         },
         custom: Vec::new(),
+        sys_values: HashMap::new(),
+        user_overrides: HashMap::new(),
     };
     for n in &sys.notes {
         cx.report.notes.push(n.clone());
+    }
+    // Set Variables in the system stacks: what emitters can read as constants.
+    let mut sys_status: HashMap<(usize, usize), Status> = HashMap::new();
+    for (si, st) in sys.stacks.iter().enumerate() {
+        for (mi, m) in st.modules.iter().enumerate() {
+            let ModuleKind::Assignment { targets } = &m.kind else { continue };
+            if !m.enabled {
+                continue;
+            }
+            let (mut done, mut failed) = (Vec::new(), Vec::new());
+            for (t, _) in targets {
+                let why = match m.input(t) {
+                    None => Some("no value".to_string()),
+                    Some(NInput::Value(NValue::DataInterface(c))) => Some(format!("a {c} data interface")),
+                    Some(NInput::Value(NValue::Curve(_) | NValue::Enum(_) | NValue::Matrix(_))) => Some("a value of an unsupported type".into()),
+                    Some(NInput::Value(v)) if t.starts_with("User.") => {
+                        cx.user_overrides.insert(t.clone(), v);
+                        None
+                    }
+                    Some(i @ NInput::Value(_)) if t.starts_with("System.") => {
+                        cx.sys_values.insert(t.clone(), i);
+                        None
+                    }
+                    Some(i @ NInput::Link(l)) if t.starts_with("System.") && (l.starts_with("User.") || l.starts_with("Engine.")) => {
+                        cx.sys_values.insert(t.clone(), i);
+                        None
+                    }
+                    Some(NInput::Link(l)) => Some(format!("links {l}")),
+                    Some(_) if !(t.starts_with("User.") || t.starts_with("System.")) => Some("not a User or System parameter".into()),
+                    Some(_) => Some("computed per frame (not a constant)".into()),
+                };
+                match why {
+                    None => done.push(t.clone()),
+                    Some(w) => failed.push(format!("{t}: {w}")),
+                }
+            }
+            let status = if done.is_empty() {
+                Status::Unmapped(format!("Set Variables of {}", failed.join(", ")))
+            } else if failed.is_empty() {
+                Status::Folded(format!("{} folded into the emitters' inputs and user parameter defaults", done.join(", ")))
+            } else {
+                Status::Partial(failed.into_iter().map(|f| format!("not set: {f}")).collect())
+            };
+            sys_status.insert((si, mi), status);
+        }
     }
     let loops = system_loops(sys);
     let mut emitters = Vec::new();
@@ -227,10 +274,12 @@ pub fn convert(sys: &NSystem, source: &str) -> Conversion {
         }
         emitters.push(cx.emitter(e, &loops));
     }
-    for st in &sys.stacks {
-        for m in &st.modules {
+    for (si, st) in sys.stacks.iter().enumerate() {
+        for (mi, m) in st.modules.iter().enumerate() {
             let status = if !m.enabled {
                 Status::Disabled
+            } else if let Some(s) = sys_status.remove(&(si, mi)) {
+                s
             } else if m.script_name() == "SystemState" {
                 Status::Folded("system loop settings go to emitters whose Life Cycle Mode is System".into())
             } else {
@@ -325,6 +374,11 @@ struct Cx<'a> {
     report: Report,
     /// Custom WGSL modules (source text) for the system's `custom_modules`.
     custom: Vec<(String, String)>,
+    /// `System.` parameters the system stacks set to a constant or a user
+    /// or engine parameter: links to them read that instead.
+    sys_values: HashMap<String, &'a NInput>,
+    /// `User.` parameters the system stacks set to a constant: their defaults.
+    user_overrides: HashMap<String, &'a NValue>,
 }
 
 /// One module's conversion in progress: the outputs and what was dropped.
@@ -370,6 +424,18 @@ const IGNORED: &[&str] = &[
     "Index1Param1Write",
     "Index1Param2Write",
     "Index1Param3Write",
+    "Index2Param0Write",
+    "Index2Param1Write",
+    "Index2Param2Write",
+    "Index2Param3Write",
+    "Index3Param0Write",
+    "Index3Param1Write",
+    "Index3Param2Write",
+    "Index3Param3Write",
+    "Debug Attractor Radius Color",
+    "Debug Every N Particles",
+    "Debug Force Line Color",
+    "Debug Force Line Length",
     "Default Position",
     "Position Offset",
     "Age",
@@ -518,6 +584,9 @@ impl<'a> Cx<'a> {
 
     /// The user parameter's value, by full name.
     fn user(&self, name: &str) -> Option<&'a NValue> {
+        if let Some(v) = self.user_overrides.get(name) {
+            return Some(*v);
+        }
         self.sys.user_parameters.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
@@ -545,6 +614,14 @@ impl<'a> Cx<'a> {
     }
 
     fn link(&mut self, name: &str, unit: Unit) -> Result<Fx, String> {
+        if let Some(i) = self.sys_values.get(name).copied() {
+            // Set by a system stack: its constant, or the parameter it reads.
+            return match i {
+                NInput::Value(v) => value_fx(v, unit),
+                NInput::Link(l) if l != name => self.link(l, unit),
+                _ => Err(format!("links {name}, set by the system stack")),
+            };
+        }
         if name.starts_with("User.") {
             let Some(v) = self.user(name) else {
                 return Err(format!("links {name}, which is not a user parameter"));
@@ -1018,7 +1095,9 @@ impl<'a> Cx<'a> {
             .sys
             .user_parameters
             .iter()
-            .filter_map(|(n, v)| self.user_decl(n, v).map(|d| (n.as_str(), d)))
+            .map(|(n, _)| n.as_str())
+            .chain(self.user_overrides.keys().map(String::as_str))
+            .filter_map(|n| self.user(n).and_then(|v| self.user_decl(n, v)).map(|d| (n, d)))
             .collect();
         if !users.is_empty() {
             let _ = writeln!(o, "    user_parameters: {{");
@@ -1265,12 +1344,27 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                     used.push(k.as_str());
                 }
             }
+            // U / V / Surface Distribution place points directly in the
+            // Direct distribution modes; the default Random one (0) ignores them.
+            let dist_switch = match shape {
+                "Sphere" => Some("Sphere Distribution"),
+                "Cylinder" => Some("Cylinder Distribution"),
+                "Torus" => Some("Torus Distribution Mode"),
+                "Ring" => Some("Ring / Disc Distribution Mode"),
+                _ => None,
+            };
+            if dist_switch.is_none_or(|s| mode(m, s).unwrap_or(0) == 0) {
+                used.extend(["U Distribution", "V Distribution", "Surface Distribution"]);
+            }
+            // The torus knot inputs matter only for a torus with Enable Torus Knot Radius.
+            if shape != "Torus" || m.switch("Enable Torus Knot Radius") != Some("true") {
+                used.extend(["Knot Helix Loops", "Knot Ring Loops", "Torus Knot Tube Radius"]);
+            }
             match shape {
                 "Sphere" => put!(x, "Sphere Radius", "Sphere Radius", Unit::Len),
                 "Box" => {
-                    if matches!(m.input("Box Midpoint"), Some(NInput::Value(NValue::Vec3([a, b, c]))) if [*a, *b, *c] == [0.5; 3]) {
-                        used.push("Box Midpoint");
-                    }
+                    // Niagara: (random - Box Midpoint) * Box Size, as ours.
+                    put!(x, "Box Midpoint", "Box Midpoint", Unit::Dir);
                     put!(x, "Box Size", "Box Size", Unit::Len)
                 }
                 "Cylinder" => {
@@ -1287,8 +1381,30 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                     put!(x, "Handle Radius", "Handle Radius", Unit::Len);
                 }
                 "Cone" => {
+                    // Niagara's cone angles are full openings (its cone helper
+                    // halves them); ours are half-angles. Cone Surface
+                    // Distribution: the distance from the apex is cbrt(random
+                    // in Distribution..1) of Cone Length, as ours.
                     put!(x, "Cone Length", "Cone Length", Unit::Len);
-                    put!(x, "Cone Angle", "Cone Angle", Unit::None);
+                    put!(x, "Cone Surface Distribution", "Cone Surface Distribution", Unit::None);
+                    if mode(m, "Cone Mode") == Some(1) {
+                        // Wedge: random yaw and pitch within ± half the
+                        // horizontal and vertical angles; drawn as a cone of
+                        // their mean.
+                        used.extend(["Cone Angle", "Cone Inner Angle", "Cone Radial Angle", "Wedge Horizontal Angle", "Wedge Vertical Angle"]);
+                        let h = lit_f(m.input("Wedge Horizontal Angle")).unwrap_or(90.0);
+                        let v = lit_f(m.input("Wedge Vertical Angle")).unwrap_or(90.0);
+                        x.set("Cone Angle", Fx::Lit(Lit::Float((h + v) * 0.25)));
+                        o.changes.push(format!("Cone Mode Wedge ({h}° x {v}°): drawn as a cone of half-angle {}°", (h + v) * 0.25));
+                    } else {
+                        used.extend(["Cone Angle", "Cone Inner Angle"]);
+                        for (from, to) in [("Cone Angle", "Cone Angle"), ("Cone Inner Angle", "Cone Inner Angle")] {
+                            if let Some(v) = cx.input(e, m, from, Unit::None, Ty::Float, o) {
+                                x.set(to, scale_fx(v, 0.5));
+                            }
+                        }
+                        put!(x, "Cone Radial Angle", "Cone Radial Angle", Unit::None);
+                    }
                 }
                 _ => {
                     put!(x, "Ring Radius", "Ring Radius", Unit::Len);
@@ -1347,12 +1463,28 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                     }
                 }
                 used.push("Velocity");
-                for n in ["Inner Cone Angle", "Distribution Along Cone Axis", "Speed Falloff From Cone Axis"] {
-                    used.push(n);
+                // The compiled AddVelocity (In Cone): cos θ uniform between the
+                // halves of Cone Angle and Inner Cone Angle (full openings), the
+                // cone angle scaled by a random saturate(lerp(1, -0.5,
+                // Distribution)..1) when UseVelDistribution, the speed by
+                // lerp(1, saturate(cos θ) ^ (10 * Falloff), Falloff) when UseConeFalloff.
+                let off = |k: &str| matches!(m.input(k), Some(NInput::Value(NValue::Bool(false))));
+                used.push("Inner Cone Angle");
+                if let Some(v) = cx.input(e, m, "Inner Cone Angle", Unit::None, Ty::Float, o) {
+                    x.set("Inner Cone Angle", scale_fx(v, 0.5));
                 }
-                if m.has("Inner Cone Angle") || m.has("Speed Falloff From Cone Axis") {
-                    o.changes.push("cone falloffs (Inner Cone Angle, Distribution Along Cone Axis, Speed Falloff) not kept: uniform over the cone".into());
+                if off("UseVelDistribution") {
+                    used.push("Distribution Along Cone Axis");
+                } else {
+                    put!(x, "Distribution Along Cone Axis", "Distribution Along Cone Axis", Unit::None);
                 }
+                if off("UseConeFalloff") {
+                    used.push("Speed Falloff From Cone Axis");
+                } else {
+                    put!(x, "Speed Falloff From Cone Axis", "Speed Falloff", Unit::None);
+                }
+                // Origin Offset moves the point of the From Point mode only.
+                used.push("Origin Offset");
                 o.mods.push(x);
             } else if vmode == 1 {
                 let mut x = FxModule::new("Add Velocity from Point");
@@ -1361,10 +1493,18 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                     x.set("Velocity Strength", scale_fx(v, speed_scale));
                 }
                 put!(x, "Velocity Origin", "Velocity Origin", Unit::Len);
+                // The compiled From Point mode measures from Velocity Origin + Origin Offset.
+                used.push("Origin Offset");
+                if let Some(v) = cx.input(e, m, "Origin Offset", Unit::Len, Ty::Vec3, o) {
+                    if v != Fx::Lit(Lit::Vec3([0.0; 3])) {
+                        let base = x.get("Velocity Origin").cloned().unwrap_or(Fx::Lit(Lit::Vec3([0.0; 3])));
+                        x.set("Velocity Origin", add_vec3(base, v));
+                    }
+                }
                 o.mods.push(x);
             } else {
                 let mut x = FxModule::new("Add Velocity");
-                used.push("Velocity");
+                used.extend(["Velocity", "Origin Offset"]);
                 if let Some(v) = cx.input(e, m, "Velocity", Unit::Len, Ty::Vec3, o) {
                     x.set("Velocity", scale_fx(v, speed_scale));
                 }
@@ -1416,6 +1556,32 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             put!(x, "Wind Speed", "Wind Velocity", Unit::Len);
             put!(x, "Wind Speed Scale", "Wind Speed", Unit::None);
             put!(x, "Air Resistance", "Air Resistance", Unit::None);
+            // Friction and surface alignment act near the landscape / scene
+            // depth (CollisionQuery, Landscape Sample); with no surface in
+            // reach, as here, they leave the wind as it is.
+            used.extend([
+                "Friction",
+                "Friction Distance Limit",
+                "Normal Friction Mask",
+                "Alignment Falloff Start / End",
+                "Turbulence Flow Loop Duration",
+            ]);
+            // Turbulence (Turbulence Mode 0 = none): Niagara samples a 32³
+            // wind vector field at Position * 0.125 * Frequency per cm, about
+            // one tile every 2.56 m / Frequency, with a strength of the wind's
+            // speed * Scale; here curl noise of 0.4 * Frequency cells per metre.
+            if mode(m, "Turbulence Mode") == Some(0) {
+                used.extend(["Scale", "Frequency", "Offset By Time", "Position"]);
+            } else if m.has("Scale") {
+                put!(x, "Scale", "Turbulence Scale", Unit::None);
+                used.push("Frequency");
+                if let Some(v) = cx.input(e, m, "Frequency", Unit::None, Ty::Float, o) {
+                    x.set("Turbulence Frequency", scale_fx(v, 0.4));
+                }
+                put!(x, "Offset By Time", "Turbulence Offset By Time", Unit::Len);
+                put!(x, "Position", "Turbulence Position", Unit::Len);
+                o.changes.push("turbulence: Niagara's wind vector field (advected over Turbulence Flow Loop Duration) is curl noise here".into());
+            }
             o.mods.push(x);
         }
         "PointForce" => {
@@ -1441,6 +1607,40 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                     x.set("Attractor Position", add_vec3(base, off));
                 } else {
                     o.drop_input("Attractor Position Offset", "not readable");
+                }
+            }
+            // Position To Attract (default Particles.Position): ours measures
+            // from Particles.Position + Attracted Position Offset.
+            used.push("Position To Attract");
+            if let Some(i) = m.input("Position To Attract") {
+                match cx.conv(e, i, Unit::Len, Ty::Vec3) {
+                    Ok(v) => {
+                        let is_pos = |f: &Fx| matches!(f, Fx::Link(_, n) if n == "Particles.Position");
+                        let offset = match v {
+                            ref p if is_pos(p) => None,
+                            Fx::Dyn(ref n, ref args) if n == "Add Vec3" && args.len() == 2 && is_pos(&args[0].1) => Some(args[1].1.clone()),
+                            other => Some(Fx::Dyn(
+                                "Add Vec3".into(),
+                                vec![
+                                    ("A".into(), other),
+                                    (
+                                        "B".into(),
+                                        Fx::Dyn(
+                                            "Multiply Vec3 by Float".into(),
+                                            vec![
+                                                ("A".into(), Fx::Link("Vec3".into(), "Particles.Position".into())),
+                                                ("B".into(), Fx::Lit(Lit::Float(-1.0))),
+                                            ],
+                                        ),
+                                    ),
+                                ],
+                            )),
+                        };
+                        if let Some(off) = offset {
+                            x.set("Attracted Position Offset", off);
+                        }
+                    }
+                    Err(why) => o.drop_input("Position To Attract", &why),
                 }
             }
             o.mods.push(x);
@@ -1489,18 +1689,16 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
         }
         "ScaleColor" => {
             let mut x = FxModule::new("Scale Color");
-            put!(x, "Scale RGB", "Scale RGB", Unit::None);
-            put!(x, "Scale Alpha", "Scale Alpha", Unit::None);
-            if m.has("Scale RGBA") && !m.has("Scale RGB") {
+            // Scale Mode as saved: 0 RGB and alpha separately (Scale RGBA is
+            // then a stale constant, as in NS_Fire), 1 RGBA.
+            let rgba = mode(m, "Scale Mode") == Some(1) || (m.has("Scale RGBA") && !m.has("Scale RGB") && !m.has("Scale Alpha"));
+            if rgba {
+                used.extend(["Scale RGB", "Scale Alpha"]);
+                put!(x, "Scale RGBA", "Scale RGBA", Unit::None);
+            } else {
                 used.push("Scale RGBA");
-                if let Some(NInput::Value(v)) = m.input("Scale RGBA") {
-                    if let Some(f) = v.floats() {
-                        x.set("Scale RGB", Fx::Lit(Lit::Vec3([f[0], f[1], f[2]])));
-                        x.set("Scale Alpha", Fx::Lit(Lit::Float(f[3])));
-                    }
-                } else {
-                    o.drop_input("Scale RGBA", "only a constant RGBA scale is mapped");
-                }
+                put!(x, "Scale RGB", "Scale RGB", Unit::None);
+                put!(x, "Scale Alpha", "Scale Alpha", Unit::None);
             }
             o.mods.push(x);
         }
@@ -1571,29 +1769,46 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             o.mods.push(x);
         }
         "DynamicMaterialParameters" => {
-            let mut x = FxModule::new("Dynamic Material Parameters");
-            let names = ["Index 0 Param 1", "Index 0 Param 2", "Index 0 Param 3", "Index 0 Param 4"];
-            let mut comps = Vec::new();
-            for n in names {
-                used.push(n);
-                comps.push(cx.input(e, m, n, Unit::None, Ty::Float, o).unwrap_or(Fx::Lit(Lit::Float(0.0))));
-            }
+            // Parameter index N goes to our module of index N (Particles.
+            // DynamicMaterialParameter, ...1, ...2, ...3); indices 1..3 only
+            // when their Write Parameter Index switch is on (else the inputs
+            // are stale). Index 0 is written unless its switch is off.
+            let targets = [
+                ("Dynamic Material Parameters", "Dynamic Material Parameter"),
+                ("Dynamic Material Parameters 2", "Dynamic Material Parameter 1"),
+                ("Dynamic Material Parameters 3", "Dynamic Material Parameter 2"),
+                ("Dynamic Material Parameters 4", "Dynamic Material Parameter 3"),
+            ];
             for (k, _) in &m.inputs {
-                if k.starts_with("Index 1") || k.starts_with("Index 2") || k.starts_with("Index 3") {
+                if k.starts_with("Index ") {
                     used.push(k.as_str());
                 }
             }
-            let v = if comps.iter().all(|c| matches!(c, Fx::Lit(_))) {
-                let f: Vec<f32> = comps.iter().map(|c| if let Fx::Lit(l) = c { l.floats()[0] } else { 0.0 }).collect();
-                Fx::Lit(Lit::Vec4([f[0], f[1], f[2], f[3]]))
-            } else {
-                Fx::Dyn(
-                    "Make Vec4 from Floats".into(),
-                    ["X", "Y", "Z", "W"].iter().zip(comps).map(|(k, v)| (k.to_string(), v)).collect(),
-                )
-            };
-            x.set("Dynamic Material Parameter", v);
-            o.mods.push(x);
+            for (idx, (module, input)) in targets.iter().enumerate() {
+                let on = match m.switch(&format!("Write Parameter Index {idx}")) {
+                    Some(s) => s == "true",
+                    None => idx == 0,
+                };
+                if !on {
+                    continue;
+                }
+                let mut comps = Vec::new();
+                for c in 1..=4 {
+                    comps.push(cx.input(e, m, &format!("Index {idx} Param {c}"), Unit::None, Ty::Float, o).unwrap_or(Fx::Lit(Lit::Float(0.0))));
+                }
+                let v = if comps.iter().all(|c| matches!(c, Fx::Lit(_))) {
+                    let f: Vec<f32> = comps.iter().map(|c| if let Fx::Lit(l) = c { l.floats()[0] } else { 0.0 }).collect();
+                    Fx::Lit(Lit::Vec4([f[0], f[1], f[2], f[3]]))
+                } else {
+                    Fx::Dyn(
+                        "Make Vec4 from Floats".into(),
+                        ["X", "Y", "Z", "W"].iter().zip(comps).map(|(k, v)| (k.to_string(), v)).collect(),
+                    )
+                };
+                let mut x = FxModule::new(module);
+                x.set(input, v);
+                o.mods.push(x);
+            }
         }
         "CameraOffset" => {
             let mut x = FxModule::new("Camera Offset");
@@ -1695,8 +1910,31 @@ fn init_particle<'m>(cx: &mut Cx, e: &NEmitter, m: &'m NModule, o: &mut Out, use
         Some(0) => None,
         Some(2) => pair(cx, o, "Color Minimum", "Color Maximum", Unit::None, Ty::Color).map(|(a, b)| range_of(a, b, Ty::Color)),
         Some(3) => {
-            if m.has("Hue Shift Range") || m.has("Saturation Range") || m.has("Value Range") {
-                o.changes.push("Color: random hue / saturation / value shifts not kept (base colour used)".into());
+            // The compiled module turns the hue by random(Hue Shift Range) *
+            // 360° and scales saturation, value and alpha by random draws of
+            // their ranges, each when its Adjust switch is on (Hue's default on).
+            for (switch, range, input, scale, default_on) in [
+                ("AdjustHue", "Hue Shift Range", "Hue Shift", 360.0, true),
+                ("AdjustSaturation", "Saturation Range", "Saturation Scale", 1.0, false),
+                ("AdjustValue", "Value Range", "Value Scale", 1.0, false),
+                ("AdjustAlpha", "Alpha Scale Range", "Alpha Scale", 1.0, false),
+            ] {
+                let on = m.switch(switch).map_or(default_on, |s| s == "true");
+                if !on || !m.has(range) {
+                    continue;
+                }
+                match m.input(range) {
+                    Some(NInput::Value(NValue::Vec2([lo, hi]))) => {
+                        x.set(input, Fx::Range(Lit::Float(lo * scale), Lit::Float(hi * scale)));
+                    }
+                    _ => match cx.input(e, m, range, Unit::None, Ty::Vec2, o) {
+                        Some(v) => {
+                            let part = |c: &str| Fx::Dyn("Break Vec2".into(), vec![("Value".into(), v.clone()), ("Component".into(), Fx::Choice(c.into()))]);
+                            x.set(input, scale_fx(range_of(part("X"), part("Y"), Ty::Float), scale));
+                        }
+                        None => o.changes.push(format!("Color: {range} not kept")),
+                    },
+                }
             }
             cx.input(e, m, "Color", Unit::None, Ty::Color, o)
         }

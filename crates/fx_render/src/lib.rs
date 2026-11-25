@@ -1405,7 +1405,7 @@ fn prepare_effects(
             }
             let em = &inst.gpu.emitters[rd.emitter];
             let sub_index = inst.gpu.system.emitters[rd.emitter].sets_sub_image_index();
-            write_uniform(&rd.settings, &mut rd.scratch, &inst.world_from_local, em.capacity, em.words > fx_gpu::WORDS_PER_PARTICLE, 1.0, sub_index, None);
+            write_uniform(&rd.settings, &mut rd.scratch, &inst.world_from_local, em.capacity, fx_gpu::extended_level(em.words), 1.0, sub_index, None);
             queue.write_buffer(&rd.uniform, 0, &rd.scratch);
             let loaded = rd.assets.texture.as_ref().and_then(|h| images.get(h));
             match &rd.settings {
@@ -1605,7 +1605,7 @@ fn prepare_effects(
                 &mut rd.scratch,
                 &Mat4::IDENTITY,
                 program.emitter_capacity(rd.emitter),
-                program.system.emitters[rd.emitter].uses_extended_attributes(),
+                fx_gpu::extended_level(fx_gpu::particle_words(&program.system.emitters[rd.emitter])),
                 mesh.map_or(1.0, |m| m.radius),
                 sub_index,
                 Some(batch.gpu.region_words(rd.emitter)),
@@ -1854,7 +1854,7 @@ fn write_uniform(
     b: &mut [u8; UNIFORM_BYTES],
     world_from_local: &Mat4,
     capacity: u32,
-    extended: bool,
+    extended: u32,
     mesh_radius: f32,
     sub_image_from_index: bool,
     batched: Option<u32>,
@@ -1866,7 +1866,7 @@ fn write_uniform(
     put(26, 1.0f32.to_bits());
     put(27, 1.0f32.to_bits());
     put(28, capacity);
-    put(33, extended as u32);
+    put(33, extended);
     put(38, mesh_radius.to_bits());
     put(40, batched.is_some() as u32);
     put(41, batched.unwrap_or(0));

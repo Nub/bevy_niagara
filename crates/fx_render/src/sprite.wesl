@@ -5,7 +5,7 @@
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::prepass::utils;
 import fx_render::particle_io::{
-    FxVertexOutput, fx, indices, pw, particle_world_from_local, particle_color, particle_dynamic_param, particle_dynamic_param_1, set_sprite_sub_uv,
+    FxVertexOutput, fx, indices, pw, particle_world_from_local, particle_color, particle_dynamic_param, particle_dynamic_param_1, particle_dynamic_param_2, particle_dynamic_param_3, set_sprite_sub_uv,
     particle_custom_facing, particle_custom_alignment,
     sample_particle_texture, scene_light, finish_faded, camera_offset,
 };
@@ -44,6 +44,8 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
     out.world_position = corner.world;
     out.dynamic_param = particle_dynamic_param(i);
     out.dynamic_param_1 = particle_dynamic_param_1(i);
+    out.dynamic_param_2 = particle_dynamic_param_2(i);
+    out.dynamic_param_3 = particle_dynamic_param_3(i);
     set_sprite_sub_uv(&out, i, nage, uv);
     return out;
 }

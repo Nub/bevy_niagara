@@ -190,6 +190,7 @@ fn shape() -> ShapeInputs {
         cone_angle: 45.0,
         ring_radius: 2.0,
         disc_coverage: 0.0,
+        ..ShapeInputs::default()
     }
 }
 

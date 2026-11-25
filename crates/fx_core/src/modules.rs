@@ -92,6 +92,8 @@ pub enum ModuleKind {
     ScaleVelocity = 78,
     RibbonTwistRate = 79,
     ScaleRibbonWidthBySpeed = 80,
+    DynamicMaterialParameters3 = 81,
+    DynamicMaterialParameters4 = 82,
 }
 
 pub struct InputDef {
@@ -237,8 +239,27 @@ pub static MODULES: &[ModuleDef] = &[
             i("Sprite Size", T::Vec2, Value::Vec2([0.1, 0.1]), "metres"),
             i("Sprite Rotation", T::Float, Value::Float(0.0), "degrees"),
             i("Mass", T::Float, Value::Float(1.0), "kilograms"),
+            i(
+                "Hue Shift",
+                T::Float,
+                Value::Float(0.0),
+                "degrees the colour's hue turns (Niagara's HSV colour randomisation; give it a random range)",
+            ),
+            i(
+                "Saturation Scale",
+                T::Float,
+                Value::Float(1.0),
+                "multiplies the colour's saturation (negative counts as 0)",
+            ),
+            i(
+                "Value Scale",
+                T::Float,
+                Value::Float(1.0),
+                "multiplies the colour's value (brightness; negative counts as 0)",
+            ),
+            i("Alpha Scale", T::Float, Value::Float(1.0), "multiplies the colour's alpha"),
         ],
-        doc: "Sets the particle's starting attributes.",
+        doc: "Sets the particle's starting attributes. Hue Shift, Saturation Scale and Value Scale adjust Color as Niagara's HSV randomisation does (a YIQ hue rotation scaled by saturation and value; skipped at 0, 1, 1), then Alpha Scale multiplies its alpha.",
     },
     ModuleDef {
         kind: ModuleKind::AddVelocity,
@@ -275,8 +296,26 @@ pub static MODULES: &[ModuleDef] = &[
                 Value::Float(1.0),
                 "speed in metres per second",
             ),
+            i(
+                "Inner Cone Angle",
+                T::Float,
+                Value::Float(0.0),
+                "half-angle in degrees of a hollow centre: no directions closer to the axis",
+            ),
+            i(
+                "Distribution Along Cone Axis",
+                T::Float,
+                Value::Float(0.0),
+                "0..1: 0 = uniform over the cone; higher draws each particle's cone angle smaller (Cone Angle * a random factor in 1 - 1.5 * this .. 1, at least 0), gathering directions towards the axis",
+            ),
+            i(
+                "Speed Falloff",
+                T::Float,
+                Value::Float(0.0),
+                "0..1: 0 = the same speed in every direction; higher slows directions away from the axis (speed * lerp(1, cos(angle from axis) ^ (10 * this), this))",
+            ),
         ],
-        doc: "Adds a velocity in a random direction, uniform over the cone's solid angle.",
+        doc: "Adds a velocity in a random direction, uniform over the cone's solid angle (between Inner Cone Angle and Cone Angle), shaped by Niagara's Distribution Along Cone Axis and Speed Falloff From Cone Axis.",
     },
     ModuleDef {
         kind: ModuleKind::GravityForce,
@@ -351,8 +390,14 @@ pub static MODULES: &[ModuleDef] = &[
                 Value::Float(1.0),
                 "multiplies the initial alpha",
             ),
+            i(
+                "Scale RGBA",
+                T::Vec4,
+                Value::Vec4([1.0; 4]),
+                "multiplies RGB and alpha together (Niagara's RGBA scale mode)",
+            ),
         ],
-        doc: "Particles.Color = Particles.Initial.Color * (Scale RGB, Scale Alpha).",
+        doc: "Particles.Color = Particles.Initial.Color * (Scale RGB, Scale Alpha) * Scale RGBA.",
     },
     ModuleDef {
         kind: ModuleKind::ScaleSpriteSize,
@@ -510,8 +555,14 @@ pub static MODULES: &[ModuleDef] = &[
                 Value::Float(0.0),
                 "particles closer than this are killed; 0 = never",
             ),
+            i(
+                "Attracted Position Offset",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "added to the particle's position where the pull is measured (metres; Niagara's Position To Attract minus Particles.Position)",
+            ),
         ],
-        doc: "Pulls particles towards Attractor Position: Physics.Force += direction * Attraction Strength * (1 - distance / Attraction Radius) ^ Falloff Exponent, within the radius. Kills particles inside Kill Radius.",
+        doc: "Pulls particles towards Attractor Position: Physics.Force += direction * Attraction Strength * (1 - distance / Attraction Radius) ^ Falloff Exponent, within the radius, measured from Particles.Position + Attracted Position Offset. Kills particles inside Kill Radius.",
     },
     ModuleDef {
         kind: ModuleKind::VortexVelocity,
@@ -594,8 +645,32 @@ pub static MODULES: &[ModuleDef] = &[
                 Value::Float(1.0),
                 "how strongly particles are pulled to the wind's velocity (per second, per kg)",
             ),
+            i(
+                "Turbulence Scale",
+                T::Float,
+                Value::Float(0.0),
+                "turbulence speed as a fraction of the wind's speed; 0 = steady wind",
+            ),
+            i(
+                "Turbulence Frequency",
+                T::Float,
+                Value::Float(1.0),
+                "turbulence noise cells per metre",
+            ),
+            i(
+                "Turbulence Offset By Time",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "metres per second the turbulence field moves (its sample point shifts by this * Engine.Time)",
+            ),
+            i(
+                "Turbulence Position",
+                T::Vec3,
+                Value::Vec3([0.0; 3]),
+                "where the turbulence is sampled (metres); link Particles.Position for turbulence that varies over space",
+            ),
         ],
-        doc: "Physics.Force += (Wind Velocity * Wind Speed - Velocity) * Air Resistance: particles approach the wind's velocity.",
+        doc: "Physics.Force += (wind - Velocity) * Air Resistance: particles approach the wind's velocity, Wind Velocity * Wind Speed plus, with a Turbulence Scale, curl noise at (Turbulence Position + Turbulence Offset By Time * Engine.Time) * Turbulence Frequency times the wind's speed * Turbulence Scale.",
     },
     ModuleDef {
         kind: ModuleKind::LinearForce,
@@ -749,6 +824,30 @@ pub static MODULES: &[ModuleDef] = &[
                 T::Float,
                 Value::Float(0.0),
                 "ring: 0 = on the circle, 1 = anywhere on the disc",
+            ),
+            i(
+                "Box Midpoint",
+                T::Vec3,
+                Value::Vec3([0.5; 3]),
+                "box: where Offset sits in the box, as a fraction of Box Size per axis (0.5 = centred, 0 = the box extends from Offset towards +axis)",
+            ),
+            i(
+                "Cone Inner Angle",
+                T::Float,
+                Value::Float(0.0),
+                "cone: half-angle in degrees of a hollow core around the axis (inside only)",
+            ),
+            i(
+                "Cone Radial Angle",
+                T::Float,
+                Value::Float(360.0),
+                "cone: degrees of the sweep around the axis (360 = all the way round)",
+            ),
+            i(
+                "Cone Surface Distribution",
+                T::Float,
+                Value::Float(0.0),
+                "cone: 0..1, the fraction (of the volume, or of the side's area with Surface Only) left empty at the apex; 1 = only at the base",
             ),
         ],
         doc: "Sets Particles.Position to a uniformly random point in (or on) a shape centred at Offset. Place it after Initialize Particle, which also sets Position.",
@@ -1499,6 +1598,30 @@ pub static MODULES: &[ModuleDef] = &[
             i("Max Scale Factor", T::Float, Value::Float(0.25), "scale at Velocity Threshold and above"),
         ],
         doc: "Particles.RibbonWidth = Particles.Initial.RibbonWidth * lerp(Min Scale Factor, Max Scale Factor, clamp(speed / Velocity Threshold, 0, 1)).",
+    },
+    ModuleDef {
+        kind: ModuleKind::DynamicMaterialParameters3,
+        name: "Dynamic Material Parameters 3",
+        stages: PARTICLE,
+        inputs: &[i(
+            "Dynamic Material Parameter 2",
+            T::Vec4,
+            Value::Vec4([0.0; 4]),
+            "four free values for custom materials",
+        )],
+        doc: "Sets Particles.DynamicMaterialParameter2, the third Dynamic Parameter custom materials read (`dynamic_param_2` in particle_io). Only emitters that use parameter 2 or 3 store them (8 more words per particle).",
+    },
+    ModuleDef {
+        kind: ModuleKind::DynamicMaterialParameters4,
+        name: "Dynamic Material Parameters 4",
+        stages: PARTICLE,
+        inputs: &[i(
+            "Dynamic Material Parameter 3",
+            T::Vec4,
+            Value::Vec4([0.0; 4]),
+            "four free values for custom materials",
+        )],
+        doc: "Sets Particles.DynamicMaterialParameter3, the fourth Dynamic Parameter custom materials read (`dynamic_param_3` in particle_io). Only emitters that use parameter 2 or 3 store them (8 more words per particle).",
     },
 ];
 

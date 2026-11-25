@@ -87,6 +87,10 @@ pub struct Particle {
     pub rotational_force: Vec3,
     /// `Particles.Physics.RotationalDrag`.
     pub rotational_drag: f32,
+    /// `Particles.DynamicMaterialParameter2`.
+    pub dynamic_material_parameter_2: Vec4,
+    /// `Particles.DynamicMaterialParameter3`.
+    pub dynamic_material_parameter_3: Vec4,
     pub alive: bool,
 }
 
@@ -126,6 +130,8 @@ impl Particle {
             rotational_velocity: Vec3::ZERO,
             rotational_force: Vec3::ZERO,
             rotational_drag: 0.0,
+            dynamic_material_parameter_2: Vec4::ZERO,
+            dynamic_material_parameter_3: Vec4::ZERO,
             alive: true,
         }
     }
@@ -169,6 +175,8 @@ impl Particle {
             attr::ROTATIONAL_VELOCITY => Value::Vec3(self.rotational_velocity.to_array()),
             attr::PHYSICS_ROTATIONAL_FORCE => Value::Vec3(self.rotational_force.to_array()),
             attr::PHYSICS_ROTATIONAL_DRAG => Value::Float(self.rotational_drag),
+            attr::DYNAMIC_MATERIAL_PARAMETER_2 => Value::Vec4(self.dynamic_material_parameter_2.to_array()),
+            attr::DYNAMIC_MATERIAL_PARAMETER_3 => Value::Vec4(self.dynamic_material_parameter_3.to_array()),
             _ => Value::Float(0.0),
         }
     }
@@ -211,6 +219,8 @@ impl Particle {
         f(&self.rotational_velocity.to_array());
         f(&self.rotational_force.to_array());
         f(&[self.rotational_drag]);
+        f(&self.dynamic_material_parameter_2.to_array());
+        f(&self.dynamic_material_parameter_3.to_array());
         v.push(self.unique_id);
         v.push(self.alive as u32);
         v
@@ -772,9 +782,17 @@ impl InputEnv for ParticleEnv<'_, '_> {
     }
 }
 
+/// The random-draw salt of module input `slot`: slot * 8 for the first 16
+/// inputs (0..128), then 256 + 8 * (slot - 16), past the modules' own draws
+/// (128..256). fx_gpu's codegen uses the same salts.
+pub fn input_salt(slot: usize) -> u32 {
+    let s = slot as u32;
+    if s < 16 { s * 8 } else { 256 + 8 * (s - 16) }
+}
+
 /// Evaluates input `slot` of module `m`.
 pub fn eval_input(m: &CookedModule, slot: usize, env: &dyn InputEnv, key: &RandKey) -> Value {
-    eval_at(m, &m.inputs[slot], slot as u32 * 8, env, key)
+    eval_at(m, &m.inputs[slot], input_salt(slot), env, key)
 }
 
 /// Uniform per component of `ty` between `lo` and `hi` (Int: whole numbers,
@@ -1099,6 +1117,33 @@ fn falloff(dist: f32, radius: f32, exponent: f32) -> f32 {
     (1.0 - dist / radius).powf(exponent)
 }
 
+/// Colour `c` with its hue turned `hue` degrees and its saturation and value
+/// scaled (negative scales count as 0): Niagara's HSV adjustment of
+/// Initialize Particle, a YIQ hue rotation. Alpha is kept. `hsv_shift` in
+/// `wgsl/lib.wgsl` is the same code.
+pub fn hsv_shift(c: Vec4, hue: f32, saturation: f32, value: f32) -> Vec4 {
+    let (s, v) = (saturation.max(0.0), value.max(0.0));
+    let a = hue * DEGREES;
+    let (vc, vs) = (v * s * a.cos(), v * s * a.sin());
+    let r = (0.299 * v + 0.701 * vc + 0.168 * vs) * c.x
+        + (0.587 * v - 0.587 * vc + 0.330 * vs) * c.y
+        + (0.114 * v - 0.114 * vc - 0.497 * vs) * c.z;
+    let g = (0.299 * v - 0.299 * vc - 0.328 * vs) * c.x
+        + (0.587 * v + 0.413 * vc + 0.035 * vs) * c.y
+        + (0.114 * v - 0.114 * vc + 0.292 * vs) * c.z;
+    let b = (0.299 * v - 0.300 * vc + 1.25 * vs) * c.x
+        + (0.587 * v - 0.588 * vc - 1.05 * vs) * c.y
+        + (0.114 * v + 0.886 * vc - 0.203 * vs) * c.z;
+    Vec4::new(r, g, b, c.w)
+}
+
+/// Add Velocity in Cone's speed factor for a direction at `cos_t` from the
+/// axis with Speed Falloff `falloff` (0..1): Niagara's
+/// `lerp(1, saturate(cos) ^ (10 * falloff), falloff)`.
+pub fn cone_speed_falloff(cos_t: f32, falloff: f32) -> f32 {
+    1.0 + (cos_t.clamp(0.0, 1.0).powf(10.0 * falloff) - 1.0) * falloff
+}
+
 /// `v` normalised, or +Y if it has no direction.
 fn unit_or_y(v: Vec3) -> Vec3 {
     let rl = 1.0 / v.length();
@@ -1145,6 +1190,36 @@ pub struct ShapeInputs {
     pub cone_angle: f32,
     pub ring_radius: f32,
     pub disc_coverage: f32,
+    /// Where Offset sits in the box, per axis (0.5 = centred).
+    pub box_midpoint: Vec3,
+    /// Degrees: hollow core half-angle, sweep around the axis.
+    pub cone_inner_angle: f32,
+    pub cone_radial_angle: f32,
+    /// 0..1: the fraction left empty at the apex.
+    pub cone_surface_distribution: f32,
+}
+
+impl Default for ShapeInputs {
+    /// Shape Location's defaults.
+    fn default() -> Self {
+        ShapeInputs {
+            surface: false,
+            sphere_radius: 0.5,
+            box_size: Vec3::ONE,
+            cylinder_height: 1.0,
+            cylinder_radius: 0.5,
+            large_radius: 0.5,
+            handle_radius: 0.1,
+            cone_length: 1.0,
+            cone_angle: 30.0,
+            ring_radius: 0.5,
+            disc_coverage: 0.0,
+            box_midpoint: Vec3::splat(0.5),
+            cone_inner_angle: 0.0,
+            cone_radial_angle: 360.0,
+            cone_surface_distribution: 0.0,
+        }
+    }
 }
 
 /// A point of shape `primitive` (Shape Location's "Shape Primitive" index)
@@ -1158,17 +1233,18 @@ pub fn shape_point(primitive: i32, s: &ShapeInputs, u: [f32; 5]) -> Vec3 {
         // Box: a face chosen by area, then a point on it.
         1 => {
             let size = s.box_size;
-            let mut p = Vec3::new(u[0] - 0.5, u[1] - 0.5, u[2] - 0.5) * size;
+            let mid = s.box_midpoint;
+            let mut p = (Vec3::new(u[0], u[1], u[2]) - mid) * size;
             if s.surface {
                 let (ax, ay) = (size.y * size.z, size.x * size.z);
                 let t = u[3] * (ax + ay + size.x * size.y);
-                let side = if u[4] < 0.5 { -0.5 } else { 0.5 };
+                let face = if u[4] < 0.5 { 0.0 } else { 1.0 };
                 if t < ax {
-                    p.x = side * size.x;
+                    p.x = (face - mid.x) * size.x;
                 } else if t < ax + ay {
-                    p.y = side * size.y;
+                    p.y = (face - mid.y) * size.y;
                 } else {
-                    p.z = side * size.z;
+                    p.z = (face - mid.z) * size.z;
                 }
             }
             p
@@ -1190,17 +1266,23 @@ pub fn shape_point(primitive: i32, s: &ShapeInputs, u: [f32; 5]) -> Vec3 {
             around(s.large_radius + rho * psi.cos(), theta, rho * psi.sin())
         }
         // Cone: apex at the origin, opening along +Y.
+        // Cone Surface Distribution keeps the first part of the volume (or
+        // side) empty; Cone Inner Angle hollows the core; Cone Radial Angle
+        // limits the sweep.
         4 => {
-            let h = s.cone_length
-                * if s.surface {
-                    (1.0 - u[0]).sqrt()
-                } else {
-                    (1.0 - u[0]).powf(1.0 / 3.0)
-                };
-            let r = h
-                * (s.cone_angle.clamp(0.0, 89.9) * DEGREES).tan()
-                * if s.surface { 1.0 } else { (1.0 - u[1]).sqrt() };
-            around(r, TAU * u[2], h)
+            let w = 1.0 - u[0] * (1.0 - s.cone_surface_distribution.clamp(0.0, 1.0));
+            let h = s.cone_length * if s.surface { w.sqrt() } else { w.powf(1.0 / 3.0) };
+            let t = (s.cone_angle.clamp(0.0, 89.9) * DEGREES).tan();
+            let inner = s.cone_inner_angle.clamp(0.0, 89.9);
+            let r = if s.surface {
+                h * t
+            } else if inner > 0.0 {
+                let ti = (inner.min(s.cone_angle.clamp(0.0, 89.9)) * DEGREES).tan();
+                h * (ti * ti + (t * t - ti * ti) * (1.0 - u[1])).sqrt()
+            } else {
+                h * t * (1.0 - u[1]).sqrt()
+            };
+            around(r, TAU * u[2] * (s.cone_radial_angle.clamp(0.0, 360.0) / 360.0), h)
         }
         // Ring in the XZ plane; Disc Coverage fills it inwards, uniform by area.
         5 => around(
@@ -1371,6 +1453,11 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             p.sprite_size = input(3, p).as_vec2();
             p.sprite_rotation = input(4, p).as_f32();
             p.mass = input(5, p).as_f32();
+            let (hue, sat, val) = (input(6, p).as_f32(), input(7, p).as_f32(), input(8, p).as_f32());
+            if hue != 0.0 || sat != 1.0 || val != 1.0 {
+                p.color = hsv_shift(p.color, hue, sat, val);
+            }
+            p.color.w *= input(9, p).as_f32();
             p.initial_color = p.color;
             p.initial_sprite_size = p.sprite_size;
         }
@@ -1381,14 +1468,33 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             let axis = input(0, p).as_vec3().try_normalize().unwrap_or(Vec3::Y);
             let angle = input(1, p).as_f32().clamp(0.0, 180.0).to_radians();
             let strength = input(2, p).as_f32();
+            let inner = input(3, p).as_f32().clamp(0.0, 180.0).to_radians();
+            let spread = input(4, p).as_f32().clamp(0.0, 1.0);
+            let falloff = input(5, p).as_f32().clamp(0.0, 1.0);
             let (u1, u2) = (key.unit(128), key.unit(129));
-            // Uniform over the spherical cap: cos θ uniform in [cos angle, 1].
-            let cos_t = 1.0 - u1 * (1.0 - angle.cos());
+            let outer = if spread > 0.0 {
+                // Niagara: the cone angle times a random factor in lerp(1, -0.5, d)..1, saturated.
+                let lo = 1.0 - 1.5 * spread;
+                angle * (lo + (1.0 - lo) * key.unit(130)).clamp(0.0, 1.0)
+            } else {
+                angle
+            };
+            // Uniform over the spherical cap (or band): cos θ uniform in [cos outer, cos inner].
+            let cos_t = if inner > 0.0 {
+                inner.cos() - u1 * (inner.cos() - outer.cos())
+            } else {
+                1.0 - u1 * (1.0 - outer.cos())
+            };
             let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
             let phi = std::f32::consts::TAU * u2;
             let (t1, t2) = basis(axis);
             let dir = t1 * (sin_t * phi.cos()) + t2 * (sin_t * phi.sin()) + axis * cos_t;
-            p.velocity += dir * strength;
+            let speed = if falloff > 0.0 {
+                strength * cone_speed_falloff(cos_t, falloff)
+            } else {
+                strength
+            };
+            p.velocity += dir * speed;
         }
         ModuleKind::GravityForce => {
             p.force += input(0, p).as_vec3() * p.mass;
@@ -1406,7 +1512,7 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
         ModuleKind::ScaleColor => {
             let rgb = input(0, p).as_vec3();
             let a = input(1, p).as_f32();
-            p.color = p.initial_color * rgb.extend(a);
+            p.color = p.initial_color * rgb.extend(a) * input(2, p).as_vec4();
         }
         ModuleKind::ScaleSpriteSize => {
             p.sprite_size = p.initial_sprite_size * input(0, p).as_vec2();
@@ -1479,7 +1585,7 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             let radius = input(2, p).as_f32();
             let exponent = input(3, p).as_f32();
             let kill = input(4, p).as_f32();
-            let d = center - p.position;
+            let d = center - (p.position + input(5, p).as_vec3());
             let dist = d.length();
             if dist < kill {
                 p.alive = false;
@@ -1507,7 +1613,14 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             let wind = input(0, p).as_vec3();
             let speed = input(1, p).as_f32();
             let resistance = input(2, p).as_f32();
-            p.force += (wind * speed - p.velocity) * resistance;
+            let mut target = wind * speed;
+            let turbulence = input(3, p).as_f32();
+            if turbulence != 0.0 {
+                let freq = input(4, p).as_f32();
+                let at = input(6, p).as_vec3() + input(5, p).as_vec3() * env.time;
+                target += noise::curl_noise(at * freq) * (target.length() * turbulence);
+            }
+            p.force += (target - p.velocity) * resistance;
         }
         ModuleKind::LinearForce => {
             p.force += input(0, p).as_vec3();
@@ -1549,6 +1662,10 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
                 cone_angle: input(10, p).as_f32(),
                 ring_radius: input(11, p).as_f32(),
                 disc_coverage: input(12, p).as_f32(),
+                box_midpoint: input(13, p).as_vec3(),
+                cone_inner_angle: input(14, p).as_f32(),
+                cone_radial_angle: input(15, p).as_f32(),
+                cone_surface_distribution: input(16, p).as_f32(),
             };
             let u: [f32; 5] = std::array::from_fn(|k| key.unit(128 + k as u32));
             p.position = input(2, p).as_vec3() + shape_point(input(0, p).as_i32(), &s, u);
@@ -1752,6 +1869,12 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
         }
         ModuleKind::DynamicMaterialParameters2 => {
             p.dynamic_material_parameter_1 = input(0, p).as_vec4();
+        }
+        ModuleKind::DynamicMaterialParameters3 => {
+            p.dynamic_material_parameter_2 = input(0, p).as_vec4();
+        }
+        ModuleKind::DynamicMaterialParameters4 => {
+            p.dynamic_material_parameter_3 = input(0, p).as_vec4();
         }
         ModuleKind::JitterPosition => {
             let amount = input(0, p).as_vec3();
