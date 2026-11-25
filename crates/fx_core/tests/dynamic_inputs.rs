@@ -469,7 +469,7 @@ fn nested_dynamic_inputs_in_update_and_emitter_stages() {
 
 #[test]
 fn every_dynamic_input_is_covered_by_a_test() {
-    let me = include_str!("dynamic_inputs.rs");
+    let me = [include_str!("dynamic_inputs.rs"), include_str!("data_interfaces.rs")].concat();
     for d in DYNAMIC_INPUTS.iter() {
         let n = &d.name;
         let covered = me.contains(&format!("\"{n}\""))

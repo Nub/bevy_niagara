@@ -6,6 +6,7 @@
 //! [`sim::Simulation`] runs a [`cook::CookedSystem`] on the CPU.
 
 pub mod cook;
+pub mod data;
 pub mod decode;
 pub mod diag;
 pub mod docs;

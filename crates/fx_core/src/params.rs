@@ -113,6 +113,7 @@ pub mod attr {
     pub const SUB_IMAGE_INDEX: u16 = 22;
     pub const INITIAL_SCALE: u16 = 23;
     pub const INITIAL_RIBBON_WIDTH: u16 = 24;
+    pub const CAMERA_OFFSET: u16 = 25;
     /// Attributes from here on are stored only by emitters that use them
     /// (see [`crate::cook::CookedEmitter::uses_extended_attributes`]).
     pub const FIRST_EXTENDED: u16 = SCALE;
@@ -200,6 +201,11 @@ pub const PARTICLES: &[Builtin] = &[
         "Initial.RibbonWidth",
         ValueType::Float,
         "RibbonWidth as set by Initialize Ribbon",
+    ),
+    b(
+        "CameraOffset",
+        ValueType::Float,
+        "metres the sprite or mesh is drawn towards the camera (set by Camera Offset)",
     ),
 ];
 

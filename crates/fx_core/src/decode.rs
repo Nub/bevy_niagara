@@ -741,6 +741,12 @@ fn decode_params(v: &SValue, d: &mut Diags) -> ParamMap {
         let Some(name) = key_string(k, d) else {
             continue;
         };
+        if let Some(di) = data_interface_tag(val) {
+            if let Some(src) = decode_data_interface(di, val, &name, k.span, d) {
+                out.1.push(src);
+            }
+            continue;
+        }
         match decode_input(val, &name, d) {
             Some(Input::Literal(value)) => out.0.push(ParamEntry { name, value, span: k.span }),
             Some(_) => d.error(
@@ -781,6 +787,9 @@ fn decode_input(v: &SValue, name: &str, d: &mut Diags) -> Option<Input> {
                         );
                         return None;
                     };
+                    if let Some(di) = crate::data::DiType::from_name(ty) {
+                        return Some(Input::DataInterface(di, target.clone()));
+                    }
                     let Some(t) = ValueType::from_name(ty) else {
                         d.error(
                             *ty_span,
@@ -1302,4 +1311,84 @@ fn decode_handler(v: &SValue, d: &mut Diags) -> Option<crate::events::EventHandl
         modules,
         span: v.span,
     })
+}
+
+/// The data interface type a `user_parameters` value declares, if it is one
+/// (`SkeletalMesh("...")`, `ColorCurve([...])`, `CameraQuery`).
+fn data_interface_tag(v: &SValue) -> Option<crate::data::DiType> {
+    match &v.kind {
+        SKind::Tuple(Some(tag), _) | SKind::Ident(tag) => crate::data::DiType::from_name(tag),
+        _ => None,
+    }
+}
+
+/// A data interface declaration in `user_parameters`.
+fn decode_data_interface(
+    ty: crate::data::DiType,
+    v: &SValue,
+    name: &str,
+    span: Span,
+    d: &mut Diags,
+) -> Option<crate::data::DataInterfaceSource> {
+    let mut src = crate::data::DataInterfaceSource {
+        name: name.to_string(),
+        ty,
+        asset: None,
+        curve: None,
+        span,
+    };
+    let items: &[SValue] = match &v.kind {
+        SKind::Tuple(_, items) => items,
+        _ => &[],
+    };
+    if let Some(t) = ty.curve_type() {
+        let [keys] = items else {
+            d.error(
+                v.span,
+                format!("`{}` for \"{name}\" holds one list of `(time, value)` keys", ty.name()),
+                Some(format!("e.g. `\"{name}\": {}`", ty.example())),
+            );
+            return None;
+        };
+        // Same keys as an inline curve: `FloatCurve([...])` is `Float([...])`.
+        let inline = SValue {
+            kind: SKind::Tuple(Some(t.name().to_string()), vec![keys.clone()]),
+            span: v.span,
+        };
+        src.curve = Some(decode_curve(&inline, d)?);
+        return Some(src);
+    }
+    match (ty.has_asset(), items) {
+        (_, []) => {}
+        (
+            true,
+            [SValue {
+                kind: SKind::Str(path),
+                ..
+            }],
+        ) => src.asset = Some(path.clone()),
+        _ => {
+            d.error(
+                v.span,
+                format!(
+                    "`{}` for \"{name}\" is written {}",
+                    ty.name(),
+                    if ty.has_asset() {
+                        "with one asset path, or bare when the host binds it"
+                    } else {
+                        "bare, with no values"
+                    }
+                ),
+                Some(format!("e.g. `\"{name}\": {}`", ty.example())),
+            );
+            return None;
+        }
+    }
+    if ty == crate::data::DiType::StaticMesh {
+        if let Some((msg, help)) = src.asset.as_deref().and_then(mesh_name_error) {
+            d.error(v.span, msg, Some(help));
+            return None;
+        }
+    }
+    Some(src)
 }

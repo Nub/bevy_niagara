@@ -36,7 +36,9 @@ pub fn ron_value(v: &Value) -> String {
 
 /// "Float", or "one of Sphere | Box" for a static switch.
 pub fn input_type(i: &InputDef) -> String {
-    if i.choices.is_empty() {
+    if let Some(t) = i.di {
+        format!("{} data interface", t.name())
+    } else if i.choices.is_empty() {
         i.ty.name().into()
     } else {
         format!("one of {}", i.choices.join(" | "))
@@ -45,6 +47,9 @@ pub fn input_type(i: &InputDef) -> String {
 
 /// The default in source form: a value, or a static switch's bare name.
 pub fn input_default(i: &InputDef) -> String {
+    if i.di.is_some() {
+        return "required".into();
+    }
     match (i.choices.is_empty(), i.default) {
         (false, Value::Int(n)) => i.choices.get(n as usize).copied().unwrap_or("?").into(),
         _ => ron_value(&i.default),
@@ -215,6 +220,7 @@ pub fn dynamic_doc(d: &DynamicDef) -> String {
                 comps(t, 1.0)
             ),
             ArgKind::List(t) => format!("\"{}\": [{}, {}]", a.name, t.example(), t.example()),
+            ArgKind::DataInterface(t) => format!("\"{}\": Link({}, \"User.Name\")", a.name, t.name()),
             _ => String::new(),
         })
         .collect::<Vec<_>>()
@@ -261,6 +267,41 @@ pub fn reference() -> String {
         s.push('\n');
     }
     s.push_str(&event_handler_doc());
+    s.push_str(&data_interface_doc());
+    s
+}
+
+/// The data interface types and how they are declared and read.
+pub fn data_interface_doc() -> String {
+    let mut s = String::from(
+        "# Data interfaces\n\nDeclared in `user_parameters` beside the value parameters, read by module inputs of their type written `Link(Type, \"User.Name\")`. Meshes and textures name a default asset (what previews show); the host can bind its own (fx_render: `ParticleEffect::bind_entity` / `bind_texture`). Curves are baked in and read through the \"... from Curve\" dynamic inputs (`\"Curve\": Link(ColorCurve, \"User.Tint\")`).\n\n| Type | Niagara | Declaration | Read by |\n|---|---|---|---|\n",
+    );
+    for t in crate::data::DiType::ALL {
+        let readers: Vec<String> = MODULES
+            .iter()
+            .filter(|m| m.inputs.iter().any(|i| i.di == Some(t)))
+            .map(|m| format!("\"{}\"", m.name))
+            .chain(
+                DYNAMIC_INPUTS
+                    .iter()
+                    .filter(|d| {
+                        d.args.iter().any(|a| {
+                            a.kind == ArgKind::DataInterface(t)
+                                || (t.curve_type().is_some() && a.kind == ArgKind::Curve(t.curve_type().unwrap()))
+                        })
+                    })
+                    .map(|d| format!("\"{}\"", d.name)),
+            )
+            .collect();
+        let _ = writeln!(
+            s,
+            "| {} | {} | `{}` | {} |",
+            t.name(),
+            t.niagara_name(),
+            t.example(),
+            readers.join(", ")
+        );
+    }
     s
 }
 

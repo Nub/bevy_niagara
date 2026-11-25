@@ -59,6 +59,12 @@ pub enum Op {
     NormalizedAge,
     /// A <op> B as a Bool.
     Compare,
+    /// The camera position (Camera Query).
+    CameraPosition,
+    /// The camera view direction (Camera Query).
+    CameraForward,
+    /// Distance from the camera to the scene surface seen through a point (Scene Depth).
+    SceneDepth,
 }
 
 /// The kind of value an input of a dynamic input takes.
@@ -72,6 +78,8 @@ pub enum ArgKind {
     Curve(ValueType),
     /// A list `[input, input, ...]` of inputs of this type; always the last input.
     List(ValueType),
+    /// A data interface of this type: `Link(CameraQuery, "User.Camera")`.
+    DataInterface(crate::data::DiType),
 }
 
 /// What an input left out of the source becomes.
@@ -128,6 +136,7 @@ pub fn arg_type(a: &ArgDef) -> String {
         ArgKind::Choice(c) => format!("one of {}", c.join(" | ")),
         ArgKind::Curve(t) => format!("{} curve", t.name()),
         ArgKind::List(t) => format!("list of {}", t.name()),
+        ArgKind::DataInterface(t) => format!("{} data interface", t.name()),
     }
 }
 
@@ -487,6 +496,35 @@ fn build() -> Vec<DynamicDef> {
         ],
         "A compared with B, as a Bool (for Select ... by Bool or Kill Particles).".into(),
         "Compare Float".into(),
+    );
+    use crate::data::DiType;
+    let camera = || arg("Camera", K::DataInterface(DiType::CameraQuery), D::Required, "the camera: `Link(CameraQuery, \"User.Camera\")`");
+    add(
+        "Get Camera Position".into(),
+        Op::CameraPosition,
+        T::Vec3,
+        vec![camera()],
+        "Where the camera the effect is drawn for is, in the effect's space (the origin while no camera is known).".into(),
+        "Camera Query: Get Camera Properties (Camera Position World)".into(),
+    );
+    add(
+        "Get Camera Forward Vector".into(),
+        Op::CameraForward,
+        T::Vec3,
+        vec![camera()],
+        "The unit direction the camera looks in, in the effect's space (0, 0, -1 while no camera is known).".into(),
+        "Camera Query: Get Camera Properties (Forward Vector World)".into(),
+    );
+    add(
+        "Sample Scene Depth".into(),
+        Op::SceneDepth,
+        T::Float,
+        vec![
+            arg("Scene Depth", K::DataInterface(DiType::SceneDepth), D::Required, "the depth buffer: `Link(SceneDepth, \"User.Depth\")`"),
+            arg("Position", K::Value(T::Vec3), D::Link("Particles.Position"), "the point whose pixel is read (metres, effect space)"),
+        ],
+        "Distance (metres) from the camera to the scene surface seen through Position, from the previous frame's depth buffer; 1e30 off screen, on the sky or with no depth. Compare it with the distance to Get Camera Position to tell whether a point is hidden. On the CPU, the host's colliders stand in for the depth buffer.".into(),
+        "Collision Query: Query Scene Depth GPU".into(),
     );
     v
 }

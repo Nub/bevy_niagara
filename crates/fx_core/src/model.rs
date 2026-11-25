@@ -377,9 +377,11 @@ impl Serialize for InputMap {
     }
 }
 
-/// `User.` parameter declarations; serialises as a RON map of name → literal.
+/// `User.` parameter declarations: value parameters (`.0`) and data
+/// interfaces (`.1`, see [`crate::data`]); serialises as one RON map of
+/// name → literal or data interface.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ParamMap(pub Vec<ParamEntry>);
+pub struct ParamMap(pub Vec<ParamEntry>, pub Vec<crate::data::DataInterfaceSource>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamEntry {
@@ -390,9 +392,12 @@ pub struct ParamEntry {
 
 impl Serialize for ParamMap {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut m = s.serialize_map(Some(self.0.len()))?;
+        let mut m = s.serialize_map(Some(self.0.len() + self.1.len()))?;
         for e in &self.0 {
             m.serialize_entry(&e.name, &e.value)?;
+        }
+        for di in &self.1 {
+            m.serialize_entry(&di.name, di)?;
         }
         m.end()
     }
@@ -416,6 +421,9 @@ pub enum Input {
     /// `Dynamic("Multiply Vec3 by Float", { "A": ..., "B": ... })`: a Niagara
     /// dynamic input from [`crate::dynamic::DYNAMIC_INPUTS`]; its inputs nest.
     Dynamic(DynamicCall),
+    /// `Link(SkeletalMesh, "User.Character")`: a data interface declared in
+    /// `user_parameters`, given to a module input of that type.
+    DataInterface(crate::data::DiType, String),
     /// `[Float(1.0), Float(2.0)]`: the list input of a dynamic input
     /// (Select ... by Int, Random ... from List).
     List(Vec<InputEntry>),
@@ -440,6 +448,7 @@ impl Input {
             Input::RandomRange(a, _) => a.ty(),
             Input::CurveOverAge(c) => c.ty(),
             Input::Choice(_) => ValueType::Int,
+            Input::DataInterface(..) => ValueType::Int,
             Input::Dynamic(c) => crate::dynamic::by_name(&c.name).map_or(ValueType::Float, |(_, d)| d.ty),
             Input::List(items) => items.first().map_or(ValueType::Float, |e| e.input.ty()),
             Input::Curve(c) => c.ty(),
@@ -474,6 +483,12 @@ impl Serialize for Input {
                 let mut tv = s.serialize_tuple_variant("Input", 5, "Dynamic", 2)?;
                 tv.serialize_field(&c.name)?;
                 tv.serialize_field(&c.inputs)?;
+                tv.end()
+            }
+            Input::DataInterface(t, p) => {
+                let mut tv = s.serialize_tuple_variant("Input", 1, "Link", 2)?;
+                tv.serialize_field(t)?;
+                tv.serialize_field(p)?;
                 tv.end()
             }
             Input::List(items) => s.collect_seq(items.iter().map(|e| &e.input)),

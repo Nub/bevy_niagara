@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 6;
+pub const COOKED_FORMAT_VERSION: u32 = 7;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -22,6 +22,9 @@ pub struct CookedSystem {
     pub format_version: u32,
     pub name: String,
     pub user_params: Vec<CookedParam>,
+    /// Data interfaces (`crate::data`), in declaration order; modules refer to
+    /// them by index.
+    pub data_interfaces: Vec<crate::data::CookedDataInterface>,
     pub emitters: Vec<CookedEmitter>,
 }
 
@@ -91,6 +94,7 @@ impl CookedEmitter {
                         | ModuleKind::SubUvAnimation
                         | ModuleKind::ScaleMeshSize
                         | ModuleKind::ScaleRibbonWidth
+                        | ModuleKind::CameraOffset
                 )
             ) || m.all_inputs().any(|i| {
                 matches!(i, CookedInput::Link(r)
@@ -516,7 +520,11 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
         });
     }
 
-    let cx = Ctx { user: &user_params };
+    let data_interfaces = cook_data_interfaces(src, &user_params, d);
+    let cx = Ctx {
+        user: &user_params,
+        dis: &data_interfaces,
+    };
     if src.name.trim().is_empty() {
         d.error(
             src.span,
@@ -590,6 +598,7 @@ pub fn compile(src: &SystemSource, d: &mut Diags) -> Option<CookedSystem> {
         format_version: COOKED_FORMAT_VERSION,
         name: src.name.clone(),
         user_params,
+        data_interfaces,
         emitters,
     })
 }
@@ -843,11 +852,52 @@ fn cook_curve(c: &crate::types::Curve, span: Span, d: &mut Diags) -> Option<Cook
     })
 }
 
+/// Checks the data interfaces declared in `user_parameters` and cooks them.
+fn cook_data_interfaces(
+    src: &SystemSource,
+    user: &[CookedParam],
+    d: &mut Diags,
+) -> Vec<crate::data::CookedDataInterface> {
+    let mut out: Vec<crate::data::CookedDataInterface> = Vec::new();
+    for di in &src.user_parameters.1 {
+        match params::split_namespace(&di.name) {
+            Some((Namespace::User, _)) => {}
+            _ => {
+                let rest = di.name.split_once('.').map_or(di.name.as_str(), |(_, r)| r);
+                d.error(
+                    di.span,
+                    format!("data interface \"{}\" must be in the User namespace", di.name),
+                    Some(format!(
+                        "rename it to \"User.{rest}\" (and link it as `Link({}, \"User.{rest}\")`)",
+                        di.ty.name()
+                    )),
+                );
+            }
+        }
+        if out.iter().any(|o| o.name == di.name) || user.iter().any(|p| p.name == di.name) {
+            d.error(
+                di.span,
+                format!("user parameter \"{}\" is declared twice", di.name),
+                Some("keep one declaration".into()),
+            );
+        }
+        let curve = di.curve.as_ref().and_then(|c| cook_curve(c, di.span, d));
+        out.push(crate::data::CookedDataInterface {
+            name: di.name.clone(),
+            ty: di.ty,
+            asset: di.asset.clone(),
+            curve,
+        });
+    }
+    out
+}
+
 /// Most dynamic inputs one module may hold (their random salts must stay apart).
 const MAX_DYNAMICS: usize = 4096;
 
 struct Ctx<'a> {
     user: &'a [CookedParam],
+    dis: &'a [crate::data::CookedDataInterface],
 }
 
 impl Ctx<'_> {
@@ -951,6 +1001,12 @@ impl Ctx<'_> {
                     );
                     continue;
                 };
+                if let Some(want) = idef.di {
+                    if let Some(i) = self.data_interface(def.name, idef.name, want, entry, d) {
+                        inputs[slot] = CookedInput::Const(Value::Int(i as i32));
+                    }
+                    continue;
+                }
                 if !idef.choices.is_empty() || matches!(entry.input, Input::Choice(_)) {
                     if let Some(c) =
                         choice_input(def.name, idef.name, idef.ty, idef.choices, entry, d)
@@ -963,6 +1019,37 @@ impl Ctx<'_> {
                     self.input(stage, def.name, idef.name, idef.ty, entry, &mut dynamics, d)
                 {
                     inputs[slot] = c;
+                }
+            }
+            for (idef, c) in def.inputs.iter().zip(&inputs) {
+                if let (Some(t), CookedInput::Const(Value::Int(-1))) = (idef.di, c) {
+                    let declared: Vec<_> = self
+                        .dis
+                        .iter()
+                        .filter(|x| x.ty == t)
+                        .map(|x| x.name.as_str())
+                        .collect();
+                    let example = declared.first().copied().unwrap_or("User.Name");
+                    let help = if declared.is_empty() {
+                        format!(
+                            "declare one in `user_parameters` (e.g. `\"User.Name\": {}`) and add `\"{}\": Link({}, \"User.Name\")`",
+                            t.example(),
+                            idef.name,
+                            t.name()
+                        )
+                    } else {
+                        format!("add `\"{}\": Link({}, \"{example}\")`", idef.name, t.name())
+                    };
+                    d.error(
+                        call.span,
+                        format!(
+                            "module \"{}\" needs its \"{}\" input: a {} data interface",
+                            def.name,
+                            idef.name,
+                            t.name()
+                        ),
+                        Some(help),
+                    );
                 }
             }
             if dynamics.len() > MAX_DYNAMICS {
@@ -1049,6 +1136,31 @@ impl Ctx<'_> {
     ) -> Option<CookedInput> {
         match &e.input {
             Input::Dynamic(call) => return self.dynamic(stage, owner, iname, want, call, e.span, dyns, d),
+            Input::DataInterface(t, _) => {
+                let help = match t.curve_type() {
+                    Some(ct) => format!(
+                        "a {} curve is read with `Dynamic(\"{} from Curve\", {{ \"Curve\": Link({}, ...) }})`",
+                        ct.name(),
+                        ct.name(),
+                        t.name()
+                    ),
+                    None => format!(
+                        "give a {} value, e.g. `\"{iname}\": {}`; data interfaces go in the inputs of the modules that read them (Skeletal Mesh Location, Static Mesh Location, Sample Texture) or of the camera dynamic inputs",
+                        want.name(),
+                        want.example()
+                    ),
+                };
+                d.error(
+                    e.span,
+                    format!(
+                        "input \"{iname}\" of \"{owner}\" is {}, but a {} data interface is given",
+                        want.name(),
+                        t.name()
+                    ),
+                    Some(help),
+                );
+                return None;
+            }
             Input::List(_) => {
                 d.error(
                     e.span,
@@ -1090,7 +1202,11 @@ impl Ctx<'_> {
         }
         match &e.input {
             // Handled by `choice_input` or above.
-            Input::Choice(_) | Input::Dynamic(_) | Input::List(_) | Input::Curve(_) => None,
+            Input::Choice(_)
+            | Input::Dynamic(_)
+            | Input::List(_)
+            | Input::Curve(_)
+            | Input::DataInterface(..) => None,
             Input::Literal(v) => Some(CookedInput::Const(*v)),
             Input::Link(ty, target) => self
                 .link(stage, *ty, target, e.span, d)
@@ -1253,6 +1369,13 @@ impl Ctx<'_> {
                 }
                 (ArgKind::Curve(t), Some(g)) => match &g.input {
                     Input::Curve(c) if c.ty() == t => cook_curve(c, g.span, d).map(|c| vec![CookedInput::Curve(c)]),
+                    // A curve data interface: its keys, baked in like a curve literal.
+                    Input::DataInterface(dt, _) if dt.curve_type().is_some() => {
+                        let want = crate::data::DiType::for_curve(t).expect("every curve type has a data interface");
+                        self.data_interface(&def.name, a.name, want, g, d)
+                            .and_then(|i| self.dis[i].curve.clone())
+                            .map(|c| vec![CookedInput::Curve(c)])
+                    }
                     Input::Curve(c) => {
                         d.error(
                             g.span,
@@ -1270,6 +1393,19 @@ impl Ctx<'_> {
                         None
                     }
                 },
+                (ArgKind::DataInterface(t), Some(g)) => {
+                    if !stage.is_particle() {
+                        d.error(
+                            g.span,
+                            format!("\"{}\" reads the camera, which `{}` does not have", def.name, stage.field()),
+                            Some("use camera and scene depth dynamic inputs only in `particle_spawn`, `particle_update` or event handlers".into()),
+                        );
+                        None
+                    } else {
+                        self.data_interface(&def.name, a.name, t, g, d)
+                            .map(|i| vec![CookedInput::Const(Value::Int(i as i32))])
+                    }
+                }
                 (ArgKind::List(t), Some(g)) => match &g.input {
                     Input::List(items) if items.is_empty() => {
                         d.error(
@@ -1306,6 +1442,84 @@ impl Ctx<'_> {
         }
         dyns[index].args = args;
         Some(CookedInput::Dynamic(index as u16))
+    }
+
+    /// The data interface input `e` (of `owner`'s input `iname`) names, which
+    /// must be a declared data interface of type `want`: its index.
+    fn data_interface(
+        &self,
+        owner: &str,
+        iname: &str,
+        want: crate::data::DiType,
+        e: &InputEntry,
+        d: &mut Diags,
+    ) -> Option<usize> {
+        let declared = || {
+            let names: Vec<_> = self
+                .dis
+                .iter()
+                .filter(|x| x.ty == want)
+                .map(|x| format!("\"{}\"", x.name))
+                .collect();
+            if names.is_empty() {
+                format!(
+                    "declare one in `user_parameters`, e.g. `\"User.Name\": {}`",
+                    want.example()
+                )
+            } else {
+                format!("declared {} data interfaces: {}", want.name(), names.join(", "))
+            }
+        };
+        let Input::DataInterface(t, target) = &e.input else {
+            d.error(
+                e.span,
+                format!(
+                    "input \"{iname}\" of \"{owner}\" takes a {} data interface",
+                    want.name()
+                ),
+                Some(format!(
+                    "write `\"{iname}\": Link({}, \"User.Name\")`; {}",
+                    want.name(),
+                    declared()
+                )),
+            );
+            return None;
+        };
+        let Some(i) = self.dis.iter().position(|x| &x.name == target) else {
+            let names = self.dis.iter().map(|x| x.name.as_str());
+            let help = match suggest(target, names) {
+                Some(s) => format!("did you mean \"{s}\"? {}", declared()),
+                None => declared(),
+            };
+            d.error(
+                e.span,
+                format!("data interface \"{target}\" is not declared"),
+                Some(help),
+            );
+            return None;
+        };
+        let found = self.dis[i].ty;
+        if found != *t {
+            d.error(
+                e.span,
+                format!("\"{target}\" is a {}, but the link says {}", found.name(), t.name()),
+                Some(format!("write `Link({}, \"{target}\")`", found.name())),
+            );
+            return None;
+        }
+        if found != want {
+            d.error(
+                e.span,
+                format!(
+                    "input \"{iname}\" of \"{owner}\" takes a {} data interface, but \"{target}\" is a {}",
+                    want.name(),
+                    found.name()
+                ),
+                Some(declared()),
+            );
+            return None;
+        }
+        Some(i)
     }
 
     fn link(

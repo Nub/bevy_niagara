@@ -27,6 +27,7 @@ pub mod rng;
 use bevy_math::{Quat, Vec2, Vec3, Vec4};
 
 use crate::cook::{CookedInput, CookedModule, CookedSystem};
+use crate::data::{self, CameraData, DiBinding, MeshData, MeshPose, NO_SCENE_DEPTH, TextureData};
 use crate::events::{self as fx_events, Event, EventKind};
 use crate::modules::{self, ModuleKind};
 use crate::params::{Namespace, ParamRef, attr};
@@ -71,6 +72,8 @@ pub struct Particle {
     pub initial_scale: Vec3,
     /// `Particles.Initial.RibbonWidth`.
     pub initial_ribbon_width: f32,
+    /// `Particles.CameraOffset`, metres towards the camera (Camera Offset).
+    pub camera_offset: f32,
     pub alive: bool,
 }
 
@@ -103,6 +106,7 @@ impl Particle {
             sub_image_index: 0.0,
             initial_scale: Vec3::ONE,
             initial_ribbon_width: 0.1,
+            camera_offset: 0.0,
             alive: true,
         }
     }
@@ -137,6 +141,7 @@ impl Particle {
             attr::SUB_IMAGE_INDEX => Value::Float(self.sub_image_index),
             attr::INITIAL_SCALE => Value::Vec3(self.initial_scale.to_array()),
             attr::INITIAL_RIBBON_WIDTH => Value::Float(self.initial_ribbon_width),
+            attr::CAMERA_OFFSET => Value::Float(self.camera_offset),
             _ => Value::Float(0.0),
         }
     }
@@ -172,7 +177,7 @@ impl Particle {
         f(&self.dynamic_material_parameter.to_array());
         f(&[self.sub_image_index]);
         f(&self.initial_scale.to_array());
-        f(&[self.initial_ribbon_width]);
+        f(&[self.initial_ribbon_width, self.camera_offset]);
         v.push(self.unique_id);
         v.push(self.alive as u32);
         v
@@ -204,6 +209,47 @@ pub enum Collider {
 }
 
 impl Collider {
+    /// Distance along the unit ray from `origin` in `dir` to the shape's
+    /// surface, if the ray meets it in front of the origin.
+    pub fn ray_distance(&self, origin: Vec3, dir: Vec3) -> Option<f32> {
+        match *self {
+            Collider::Plane { normal, origin: o } => {
+                let n = unit_or_y(normal);
+                let denom = dir.dot(n);
+                if denom == 0.0 {
+                    return None;
+                }
+                let t = (o - origin).dot(n) / denom;
+                (t >= 0.0).then_some(t)
+            }
+            Collider::Sphere { center, radius } => {
+                let oc = origin - center;
+                let b = oc.dot(dir);
+                let c = oc.length_squared() - radius * radius;
+                let disc = b * b - c;
+                if disc < 0.0 {
+                    return None;
+                }
+                let s = disc.sqrt();
+                [-b - s, -b + s].into_iter().find(|t| *t >= 0.0)
+            }
+            Collider::Box {
+                center,
+                half_extents: h,
+            } => {
+                let inv = dir.recip();
+                let t0 = (center - h - origin) * inv;
+                let t1 = (center + h - origin) * inv;
+                let near = t0.min(t1).max_element();
+                let far = t0.max(t1).min_element();
+                if near > far || far < 0.0 {
+                    return None;
+                }
+                Some(if near >= 0.0 { near } else { far })
+            }
+        }
+    }
+
     /// The plane a particle at `pos` (radius `r`) is pushed out through, if
     /// it is inside the shape: `(normal, point on the surface)`.
     pub fn contact(&self, pos: Vec3, r: f32) -> Option<(Vec3, Vec3)> {
@@ -257,6 +303,10 @@ pub struct Simulation {
     pub owner_velocity: Vec3,
     /// What SceneDepth and RayTraced collisions hit on the CPU (set by the host).
     pub colliders: Vec<Collider>,
+    /// The camera the effect is seen from (Camera Query, Scene Depth), set by the host.
+    pub camera: Option<CameraData>,
+    /// What each data interface of `system.data_interfaces` is bound to.
+    pub data: Vec<DiBinding>,
     pub emitters: Vec<EmitterState>,
 }
 
@@ -275,6 +325,8 @@ struct Env<'a> {
     /// Flipbook frames of the emitter's sprite renderer (SubUV Animation).
     sub_image_frames: u32,
     colliders: &'a [Collider],
+    camera: Option<CameraData>,
+    data: &'a [DiBinding],
 }
 
 /// Per-particle state of one pass over a module stack that is not a
@@ -315,6 +367,7 @@ impl Simulation {
     pub fn new(system: CookedSystem, seed: u32) -> Self {
         let user = system.user_params.iter().map(|p| p.value).collect();
         let emitters = vec![EmitterState::default(); system.emitters.len()];
+        let data = vec![DiBinding::None; system.data_interfaces.len()];
         Simulation {
             system,
             seed,
@@ -323,6 +376,8 @@ impl Simulation {
             user,
             owner_velocity: Vec3::ZERO,
             colliders: Vec::new(),
+            camera: None,
+            data,
             emitters,
         }
     }
@@ -335,6 +390,48 @@ impl Simulation {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn data_index(&self, name: &str, ok: impl Fn(data::DiType) -> bool) -> Option<usize> {
+        self.system
+            .data_interfaces
+            .iter()
+            .position(|d| d.name == name && ok(d.ty))
+    }
+
+    /// Binds mesh data interface `name` (SkeletalMesh or StaticMesh) to
+    /// `mesh`, posed by `pose`. Returns false if no such data interface is declared.
+    pub fn set_mesh(&mut self, name: &str, mesh: std::sync::Arc<MeshData>, pose: MeshPose) -> bool {
+        match self.data_index(name, data::DiType::is_mesh) {
+            Some(i) => {
+                self.data[i] = DiBinding::Mesh(mesh, pose);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Moves a bound mesh to a new pose, `interval` seconds after its last one
+    /// (see [`MeshPose`]). Returns false if `name` is not a bound mesh.
+    pub fn set_mesh_pose(&mut self, name: &str, matrices: &[bevy_math::Mat4], interval: f32) -> bool {
+        match self.data_index(name, data::DiType::is_mesh).map(|i| &mut self.data[i]) {
+            Some(DiBinding::Mesh(_, pose)) => {
+                pose.advance(matrices, interval);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Binds texture data interface `name`. Returns false if it is not declared.
+    pub fn set_texture(&mut self, name: &str, texture: std::sync::Arc<TextureData>) -> bool {
+        match self.data_index(name, |t| t == data::DiType::Texture) {
+            Some(i) => {
+                self.data[i] = DiBinding::Texture(texture);
+                true
+            }
+            None => false,
         }
     }
 
@@ -406,6 +503,8 @@ impl Simulation {
             owner_velocity: self.owner_velocity,
             sub_image_frames: emitter.sub_image_frames(),
             colliders: &self.colliders,
+            camera: self.camera,
+            data: &self.data,
         };
         let (seed, frame) = (self.seed, self.frame);
         let key = |stage: u32, module: usize, particle: u32, frame: u32| RandKey {
@@ -528,6 +627,14 @@ pub trait InputEnv {
     fn param(&self, r: ParamRef) -> Value;
     /// `Particles.NormalizedAge` where there is a particle, else 0.
     fn normalized_age(&self) -> f32;
+    /// The camera (Camera Query), if known.
+    fn camera(&self) -> Option<CameraData> {
+        None
+    }
+    /// Distance from the camera to the scene seen through `pos` (Scene Depth).
+    fn scene_depth(&self, _pos: Vec3) -> f32 {
+        NO_SCENE_DEPTH
+    }
 }
 
 struct ParticleEnv<'a, 'b> {
@@ -542,6 +649,22 @@ impl InputEnv for ParticleEnv<'_, '_> {
     }
     fn normalized_age(&self) -> f32 {
         self.p.map_or(0.0, |p| p.normalized_age)
+    }
+    fn camera(&self) -> Option<CameraData> {
+        self.env.camera
+    }
+    fn scene_depth(&self, pos: Vec3) -> f32 {
+        let Some(cam) = self.env.camera else {
+            return NO_SCENE_DEPTH;
+        };
+        let Some(dir) = (pos - cam.position).try_normalize() else {
+            return NO_SCENE_DEPTH;
+        };
+        self.env
+            .colliders
+            .iter()
+            .filter_map(|c| c.ray_distance(cam.position, dir))
+            .fold(NO_SCENE_DEPTH, f32::min)
     }
 }
 
@@ -687,6 +810,11 @@ fn eval_dynamic(m: &CookedModule, index: usize, env: &dyn InputEnv, key: &RandKe
             let (age, dur) = (arg(0).as_f32(), arg(1).as_f32());
             Value::Float(if dur > 0.0 { (age / dur).clamp(0.0, 1.0) } else { 1.0 })
         }
+        Op::CameraPosition => Value::Vec3(env.camera().map_or(Vec3::ZERO, |c| c.position).to_array()),
+        Op::CameraForward => {
+            Value::Vec3(env.camera().map_or(Vec3::NEG_Z, |c| c.forward).to_array())
+        }
+        Op::SceneDepth => Value::Float(env.scene_depth(arg(1).as_vec3())),
         Op::Compare => {
             let (a, b) = (arg(0).as_f32(), arg(1).as_f32());
             Value::Bool(match arg(2).as_i32() {
@@ -1284,6 +1412,48 @@ fn run_particle_module(m: &CookedModule, env: &Env, p: &mut Particle, key: RandK
             let e = cx.event.copied().unwrap_or_default();
             p.position = Vec3::from_array(e.position) + input(0, p).as_vec3();
             p.velocity += Vec3::from_array(e.velocity) * input(1, p).as_f32();
+        }
+        ModuleKind::SkeletalMeshLocation | ModuleKind::StaticMeshLocation => {
+            let skeletal = kind == ModuleKind::SkeletalMeshLocation;
+            let di = input(0, p).as_i32();
+            let (mode, offset, inherit) = if skeletal {
+                (input(1, p).as_i32(), input(2, p).as_f32(), input(3, p).as_f32())
+            } else {
+                (data::SAMPLE_SURFACE, input(1, p).as_f32(), input(2, p).as_f32())
+            };
+            let Some(DiBinding::Mesh(mesh, pose)) = env.data.get(di.max(0) as usize) else {
+                return;
+            };
+            let u: [f32; 3] = std::array::from_fn(|k| key.unit(128 + k as u32));
+            let s = if mode == data::SAMPLE_BONES {
+                data::sample_bone(mesh, pose, u[0])
+            } else {
+                data::sample_surface(mesh, pose, u)
+            };
+            if let Some(s) = s {
+                p.position = s.position + s.normal * offset;
+                p.velocity += s.velocity * inherit;
+            }
+        }
+        ModuleKind::SampleTexture => {
+            let uv = input(1, p).as_vec2().to_array();
+            let c = match env.data.get(input(0, p).as_i32().max(0) as usize) {
+                Some(DiBinding::Texture(t)) => Vec4::from(data::sample_texture(t, uv)),
+                _ => Vec4::ONE,
+            } * input(2, p).as_vec4();
+            if input(3, p).as_i32() == 1 {
+                p.color *= c;
+            } else {
+                p.color = c;
+            }
+        }
+        ModuleKind::CameraOffset => {
+            let amount = input(0, p).as_f32();
+            if input(1, p).as_i32() == 1 {
+                p.camera_offset += amount;
+            } else {
+                p.camera_offset = amount;
+            }
         }
         ModuleKind::SpawnRate | ModuleKind::SpawnBurstInstantaneous => {}
     }

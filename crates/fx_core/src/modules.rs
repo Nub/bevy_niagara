@@ -55,6 +55,10 @@ pub enum ModuleKind {
     ReceiveDeathEvent = 41,
     ReceiveCollisionEvent = 42,
     ReceiveLocationEvent = 43,
+    SkeletalMeshLocation = 44,
+    StaticMeshLocation = 45,
+    SampleTexture = 46,
+    CameraOffset = 47,
 }
 
 pub struct InputDef {
@@ -66,6 +70,9 @@ pub struct InputDef {
     /// the effect is written): the names of its values, written bare in
     /// source (`"Shape Primitive": Box`) and cooked to their index.
     pub choices: &'static [&'static str],
+    /// For a data interface input: the type of data interface it takes
+    /// (`Link(SkeletalMesh, "User.Character")`), cooked to its index (an Int).
+    pub di: Option<crate::data::DiType>,
 }
 
 pub struct ModuleDef {
@@ -116,6 +123,7 @@ const fn i(name: &'static str, ty: ValueType, default: Value, doc: &'static str)
         default,
         doc,
         choices: &[],
+        di: None,
     }
 }
 
@@ -132,6 +140,7 @@ const fn e(
         default: Value::Int(default),
         doc,
         choices,
+        di: None,
     }
 }
 
@@ -991,7 +1000,116 @@ pub static MODULES: &[ModuleDef] = &[
         inputs: &RECEIVE_INPUTS,
         doc: "In a Location event handler: Particles.Position = Event.Position + Position Offset; Particles.Velocity += Event.Velocity * Inherit Velocity Scale.",
     },
+    ModuleDef {
+        kind: ModuleKind::SkeletalMeshLocation,
+        name: "Skeletal Mesh Location",
+        stages: &[ParticleSpawn],
+        inputs: &[
+            di("Skeletal Mesh", DiType::SkeletalMesh, "the animated mesh: `Link(SkeletalMesh, \"User.Character\")`"),
+            e(
+                "Sampling Mode",
+                &["Surface", "Bones"],
+                0,
+                "Surface: a point on the skinned triangles, spread evenly by area; Bones: a joint's position",
+            ),
+            i(
+                "Surface Offset",
+                T::Float,
+                Value::Float(0.0),
+                "metres along the surface normal (Surface only)",
+            ),
+            i(
+                "Inherit Velocity Scale",
+                T::Float,
+                Value::Float(1.0),
+                "fraction of the sampled point's own velocity (from the animation) added to Particles.Velocity",
+            ),
+        ],
+        doc: "Places the particle on an animated skinned mesh, as it is posed this step: Particles.Position = the sampled point + normal * Surface Offset; Particles.Velocity += the point's velocity * Inherit Velocity Scale. Leaves the particle unchanged while no mesh is bound.",
+    },
+    ModuleDef {
+        kind: ModuleKind::StaticMeshLocation,
+        name: "Static Mesh Location",
+        stages: &[ParticleSpawn],
+        inputs: &[
+            di("Static Mesh", DiType::StaticMesh, "the mesh: `Link(StaticMesh, \"User.Rock\")`"),
+            i(
+                "Surface Offset",
+                T::Float,
+                Value::Float(0.0),
+                "metres along the surface normal",
+            ),
+            i(
+                "Inherit Velocity Scale",
+                T::Float,
+                Value::Float(1.0),
+                "fraction of the mesh's own velocity (when the host moves it) added to Particles.Velocity",
+            ),
+        ],
+        doc: "Places the particle on a static mesh's surface, spread evenly by area: Particles.Position = the sampled point + normal * Surface Offset, in the mesh's placement (the effect's space unless the host binds a moving mesh); Particles.Velocity += its velocity * Inherit Velocity Scale.",
+    },
+    ModuleDef {
+        kind: ModuleKind::SampleTexture,
+        name: "Sample Texture",
+        stages: PARTICLE,
+        inputs: &[
+            di("Texture", DiType::Texture, "the texture: `Link(Texture, \"User.Pattern\")`"),
+            i(
+                "UV",
+                T::Vec2,
+                Value::Vec2([0.5, 0.5]),
+                "where to sample: (0, 0) top left, (1, 1) bottom right; wraps outside",
+            ),
+            i(
+                "Color Scale",
+                T::Color,
+                Value::Color([1.0; 4]),
+                "multiplies the sampled colour",
+            ),
+            e(
+                "Blend",
+                &["Replace", "Multiply"],
+                0,
+                "Replace sets Particles.Color; Multiply multiplies it",
+            ),
+        ],
+        doc: "Samples a texture (bilinear, linear colour) at UV and writes Particles.Color = sample * Color Scale (Replace) or Particles.Color *= sample * Color Scale (Multiply). White while no texture is bound.",
+    },
+    ModuleDef {
+        kind: ModuleKind::CameraOffset,
+        name: "Camera Offset",
+        stages: PARTICLE,
+        inputs: &[
+            i(
+                "Camera Offset Amount",
+                T::Float,
+                Value::Float(0.5),
+                "metres towards the camera (negative: away)",
+            ),
+            e(
+                "Mode",
+                &["DirectSet", "Additive"],
+                0,
+                "DirectSet sets Particles.CameraOffset; Additive adds to it",
+            ),
+        ],
+        doc: "Sets Particles.CameraOffset: sprite and mesh renderers draw the particle that many metres closer to the camera they render for, without moving it in the simulation (e.g. fire drawn in front of the logs it sits in).",
+    },
 ];
+
+use crate::data::DiType;
+
+/// A data interface input of type `ty` (cooked to the data interface's index).
+const fn di(name: &'static str, ty: DiType, doc: &'static str) -> InputDef {
+    InputDef {
+        name,
+        ty: ValueType::Int,
+        default: Value::Int(-1),
+        doc,
+        choices: &[],
+        di: Some(ty),
+    }
+}
 
 /// Inputs of the Receive ... Event modules.
 const RECEIVE_INPUTS: [InputDef; 2] = [
