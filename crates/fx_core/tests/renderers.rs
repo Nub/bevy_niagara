@@ -110,6 +110,7 @@ fn every_field_decodes_and_cooks() {
             pivot_in_uv_space: [0.5, 1.0],
             sub_image_size: [8, 4],
             sub_uv_blending: true,
+            distortion: false,
             sort_mode: SortMode::ViewDistance,
             soft_particle_fade_distance: 0.25,
             ray_tracing: true,
@@ -147,7 +148,7 @@ fn renderers_survive_the_cooked_binary() {
     ));
     let bytes = cook::to_bytes(&sys);
     assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
-    assert_eq!(cook::COOKED_FORMAT_VERSION, 13);
+    assert_eq!(cook::COOKED_FORMAT_VERSION, 14);
 }
 
 #[test]
