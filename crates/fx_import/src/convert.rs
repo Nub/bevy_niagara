@@ -837,14 +837,24 @@ impl<'a> Cx<'a> {
                     Some(i @ (NInput::Link(_) | NInput::Dynamic(_))) => Some(self.conv(e, i, Unit::None, Ty::Float)?),
                     _ => None,
                 };
-                Ok(match (curve, index) {
+                let out = match (curve, index) {
                     (Fx::Curve(c), None) => Fx::CurveOverAge(c),
                     (c, None) => Fx::Dyn(format!("{} from Curve", ty.name()), vec![("Curve".into(), c)]),
                     (c, Some(i)) => Fx::Dyn(
                         format!("{} from Curve", ty.name()),
                         vec![("Curve".into(), c), ("Curve Index".into(), i)],
                     ),
-                })
+                };
+                // A Scale Curve that is not a constant (a random range, a
+                // link) multiplies the curve's value.
+                match d.input("Scale Curve") {
+                    Some(i @ (NInput::Link(_) | NInput::Dynamic(_))) if ty == Ty::Float => {
+                        let s = self.conv(e, i, Unit::None, Ty::Float)?;
+                        Ok(Fx::Dyn("Multiply Float".into(), vec![("A".into(), out), ("B".into(), s)]))
+                    }
+                    Some(NInput::Link(_) | NInput::Dynamic(_)) => Err("a non-constant Scale Curve on a vector curve".into()),
+                    _ => Ok(out),
+                }
             }
             "VectorFromFloat" => {
                 let v = get(self, "Value", unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0)));
@@ -2008,8 +2018,9 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             put!(x, "Noise Strength", "Noise Strength", Unit::Len);
             used.push("Noise Frequency");
             if let Some(v) = lit_f(m.input("Noise Frequency")) {
-                // Niagara's frequency is per centimetre... per 100 units.
-                x.set("Noise Frequency", Fx::Lit(Lit::Float(v * 100.0)));
+                // Niagara samples the field at Position (cm) * Frequency / 1000
+                // (CurlNoiseForce V2, NoiseFrequencyScaled): per metre, F / 10.
+                x.set("Noise Frequency", Fx::Lit(Lit::Float(v / 10.0)));
             }
             o.mods.push(x);
         }

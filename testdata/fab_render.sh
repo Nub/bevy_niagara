@@ -22,17 +22,19 @@ packs=${*:-perfect_fire arrow_trail}
 # above the floor, seen from above and to the side.
 view() {
 	case $1 in
-	perfect_fire) echo "--camera 0,1.7,4.2 --target 0,0.55,0 --fov 50 --duration 3" ;;
-	arrow_trail) echo "--camera 0,3.2,5.5 --target 0,0,0 --fov 55 --duration 1.6 --fly 14,0,0 --ground -0.4" ;;
+	perfect_fire) echo "--camera 0,2.0,5.75 --target 0,0.7,0 --fov 59 --duration 3" ;;
+	arrow_trail) echo "--camera -7,3,-3.5 --target -1,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -0.3" ;;
 	esac
 }
-# The Unreal-like look; BEFORE=1 renders with the plain default look (and an
+# The Unreal-like look. Exposure matched by eye to the listings (Unreal's
+# auto exposure brightens the arrow demo's dark map by about 1.5 stops); arrows
+# fly at 20 m/s, the demo blueprint's Speed. BEFORE=1 renders with the plain default look (and an
 # older fxpreview via BIN) for before/after shots.
 look() {
 	[ -n "${BEFORE:-}" ] && return
 	case $1 in
-	perfect_fire) echo "--look ue --exposure -1" ;;
-	arrow_trail) echo "--look ue --exposure -0.5" ;;
+	perfect_fire) echo "--look ue" ;;
+	arrow_trail) echo "--look ue --bloom 0.35 --exposure 1.5" ;;
 	esac
 }
 src() {
@@ -88,11 +90,11 @@ for pack in $packs; do
 	case $pack in
 	perfect_fire)
 		order="NS_Fire_Big NS_Fire_Big_Simple NS_Fire_Big_Smoke NS_Fire_Medium NS_Fire_Medium_Smoke NS_Fire_Simple NS_Fire_Small NS_Fire_Small_Simple NS_Fire_Small_Smoke NS_Fire_Floor_01 NS_Fire_Floor_01_Simple NS_Fire_Floor_01_Smoke NS_Fire_Floor_02 NS_Fire_Floor_02_Simple NS_Fire_Floor_02_Smoke"
-		lview="--camera 0,7,11 --target 0,0,-1.5 --fov 50 --duration 3"
+		lview="--camera 0,7,11 --target 0,0,-1.5 --fov 59 --duration 3"
 		pos() { echo "$(((($1 % 5) - 2) * 3)),0,$((2 - ($1 / 5) * 4))"; } ;;
 	arrow_trail)
 		order="NS_ArrowTrail_Basic NS_ArrowTrail_Basic_02 NS_ArrowTrail_Fire NS_ArrowTrail_Fire_02 NS_ArrowTrail_Holy NS_ArrowTrail_Ice NS_ArrowTrail_Magic NS_ArrowTrail_Magic_2 NS_ArrowTrail_Nature NS_ArrowTrail_Water"
-		lview="--camera -2,6,9 --target 1,0,-1 --fov 55 --duration 1.6 --fly 14,0,0 --ground -0.4"
+		lview="--camera -7,4,-5 --target 0,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -0.3"
 		pos() { echo "0,0,$(echo "$1" | awk '{print 2.7 - $1 * 0.6}')"; } ;;
 	esac
 	first="" also="" i=0
