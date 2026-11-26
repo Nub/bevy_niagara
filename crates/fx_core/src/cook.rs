@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 13;
+pub const COOKED_FORMAT_VERSION: u32 = 14;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -275,6 +275,10 @@ pub struct CookedSprite {
     /// Flipbook (columns, rows), each at least 1.
     pub sub_image_size: [u32; 2],
     pub sub_uv_blending: bool,
+    /// Drawn after the opaque scene with a copy of it bound
+    /// (`view_transmission_texture`): heat haze and other refraction
+    /// materials. Needs a custom `material`.
+    pub distortion: bool,
     pub sort_mode: SortMode,
     /// Metres; 0 disables soft-particle fading.
     pub soft_particle_fade_distance: f32,
@@ -304,6 +308,7 @@ fn cook_sprite(s: &SpriteSource) -> CookedSprite {
         pivot_in_uv_space: s.pivot_in_uv_space,
         sub_image_size: s.sub_image_size,
         sub_uv_blending: s.sub_uv_blending,
+        distortion: s.distortion,
         sort_mode: s.sort_mode,
         soft_particle_fade_distance: s.soft_particle_fade_distance,
         ray_tracing: s.ray_tracing,

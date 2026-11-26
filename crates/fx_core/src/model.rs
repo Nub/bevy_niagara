@@ -228,6 +228,10 @@ pub struct SpriteSource {
     /// Flipbook (columns, rows), each at least 1.
     pub sub_image_size: [u32; 2],
     pub sub_uv_blending: bool,
+    /// Drawn after the opaque scene with a copy of it bound
+    /// (`view_transmission_texture`): heat haze and other refraction
+    /// materials. Needs a custom `material`.
+    pub distortion: bool,
     pub sort_mode: SortMode,
     /// Metres; 0 disables soft-particle fading.
     pub soft_particle_fade_distance: f32,
@@ -262,6 +266,7 @@ impl Default for SpriteSource {
             pivot_in_uv_space: [0.5, 0.5],
             sub_image_size: [1, 1],
             sub_uv_blending: false,
+            distortion: false,
             sort_mode: SortMode::default(),
             soft_particle_fade_distance: 0.0,
             ray_tracing: false,

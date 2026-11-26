@@ -1083,10 +1083,13 @@ impl<'a> Cx<'a> {
         // colour; sprites a soft round falloff).
         let engine_default = material.as_deref().is_some_and(|m| m.starts_with("/Niagara/DefaultAssets/"));
         let mat = if engine_default { None } else { material.as_deref().map(|m| self.material_asset(m, is_mesh, written)) };
+        // A pure distortion material: a sprite drawn after the opaque scene,
+        // refracting it (the material samples the scene copy); others drop.
+        let distortion = matches!(&mat, Some(Ok(m)) if m.refraction);
         if let Some(Ok(m)) = &mat {
-            if m.refraction {
+            if m.refraction && r.class != "NiagaraSpriteRendererProperties" {
                 self.report.renderers.push(format!(
-                    "{}: {} with a distortion (refraction) material `{}`: no refraction renderer here, left out (the heat haze is missing)",
+                    "{}: {} with a distortion (refraction) material `{}`: refraction is drawn by sprites only, left out (the heat haze is missing)",
                     e.name, r.class, m.name
                 ));
                 return None;
@@ -1104,6 +1107,8 @@ impl<'a> Cx<'a> {
             return None;
         }
         let blend = match &mat {
+            // The refracted scene replaces what is behind, faded by opacity.
+            Some(Ok(_)) if distortion => "Alpha".to_string(),
             Some(Ok(m)) => m.blend.ours(is_mesh).to_string(),
             _ if engine_default => "Alpha".to_string(),
             _ => guess_blend(material.as_deref().unwrap_or(""), &e.name).to_string(),
@@ -1133,6 +1138,9 @@ impl<'a> Cx<'a> {
         let what = match r.class.as_str() {
             "NiagaraSpriteRendererProperties" => {
                 fields.push(format!("blend_mode: {blend}"));
+                if distortion {
+                    fields.push("distortion: true".into());
+                }
                 match enum_tail("Alignment").as_deref() {
                     Some("VelocityAligned") => fields.push("alignment: VelocityAligned".into()),
                     Some("CustomAlignment") => fields.push("alignment: CustomAlignment".into()),

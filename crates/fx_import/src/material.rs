@@ -596,6 +596,9 @@ pub struct Compiled {
     pub dynamic_read: [bool; 4],
     /// The graph moves vertices (World Position Offset): not carried over.
     pub world_position_offset: bool,
+    /// A pure distortion material: draws the scene behind it, shifted; its
+    /// renderer must set `distortion: true` (fx_render gives it the scene).
+    pub distortion: bool,
 }
 
 #[derive(Clone)]
@@ -1520,6 +1523,17 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
         x
     });
     let base = if m.unlit { None } else { g.material_input(*editor, "BaseColor").map(|x| cast(&x, 3)) };
+    // A pure distortion material (Refraction wired, no colour): drawn as a
+    // shifted copy of the scene behind it (the renderer's `distortion`).
+    let distortion = if emissive.is_none() && base.is_none() {
+        g.material_input(*editor, "Refraction").map(|r| {
+            let r = cast(&r, 1);
+            let n = g.material_input(*editor, "Normal").map(|x| cast(&x, 3)).map(|x| x.code).unwrap_or("vec3<f32>(0.0, 0.0, 1.0)".into());
+            (r.code, n)
+        })
+    } else {
+        None
+    };
     let alpha = match m.blend {
         Blend::Opaque => None,
         Blend::Masked => g.material_input(*editor, "OpacityMask").map(|x| cast(&x, 1)),
@@ -1547,6 +1561,12 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
             None => e,
         }
     };
+    // Unreal (index of refraction): the screen offset follows the
+    // tangent-space normal times IOR - 1 (V runs down the screen).
+    let rgb = match &distortion {
+        Some((ior, n)) => format!("scene_behind(in, ({n}).xy * vec2<f32>(1.0, -1.0) * (({ior}) - 1.0) * DISTORTION_SCALE)"),
+        None => rgb,
+    };
     let a = match (m.blend, alpha) {
         (Blend::Masked, Some(x)) => {
             body.push(format!("    if ({} < {}) {{ discard; }}", x.code, lit(m.clip)));
@@ -1564,6 +1584,11 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
     let _ = writeln!(w);
     let _ = writeln!(w, "import fx_render::particle_io::{{FxVertexOutput, finish, scene_light, fx, particle_texture, particle_sampler}};");
     let _ = writeln!(w, "import bevy_pbr::render::mesh_view_bindings::{{view, globals}};");
+    if distortion.is_some() {
+        let _ = writeln!(w, "import bevy_pbr::render::mesh_view_bindings::{{view_transmission_texture, linear_sampler}};");
+        let _ = writeln!(w);
+        let _ = writeln!(w, "{}", DISTORTION_HELPERS);
+    }
     let _ = writeln!(w);
     let _ = writeln!(w, "{}", HELPERS);
     let _ = writeln!(w, "@fragment");
@@ -1575,6 +1600,7 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
     let _ = writeln!(w, "}}");
     Ok(Compiled {
         wesl: w,
+        distortion: distortion.is_some(),
         textures,
         notes,
         dynamic_read: g.dynamic_read,
@@ -1598,6 +1624,17 @@ pub fn with_rects(wesl: &str, rects: &[[f32; 4]]) -> String {
     table.push_str(");");
     wesl.replace("// TEX_RECTS", &table)
 }
+
+/// For distortion materials: the opaque scene behind the fragment, shifted by
+/// `offset` (screen UV), from Bevy's transmission copy.
+const DISTORTION_HELPERS: &str = r#"// Screen offset per unit of (IOR - 1); matched by eye to Unreal's heat haze.
+const DISTORTION_SCALE: f32 = 0.9;
+
+fn scene_behind(in: FxVertexOutput, offset: vec2<f32>) -> vec3<f32> {
+    let uv = (in.position.xy - view.viewport.xy) / view.viewport.zw;
+    return textureSampleLevel(view_transmission_texture, linear_sampler, clamp(uv + offset, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+}
+"#;
 
 const HELPERS: &str = r#"// TEX_RECTS
 

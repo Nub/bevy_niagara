@@ -332,6 +332,8 @@ fn setup(
         Hdr,
         DepthPrepass,
         Msaa::Off,
+        // Gives `distortion` sprites (heat haze) a copy of the scene to refract.
+        bevy::pbr::ScreenSpaceTransmission::default(),
         Projection::Perspective(PerspectiveProjection { fov: o.fov.to_radians(), ..default() }),
         Transform::from_translation(o.camera).looking_at(o.target, Vec3::Y),
     ));
@@ -371,11 +373,21 @@ fn setup(
         }
     };
     let size = if ue { FLOOR_SIZE } else { 30.0 };
+    let floor = materials.add(floor);
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(size, size))),
-        MeshMaterial3d(materials.add(floor)),
+        MeshMaterial3d(floor.clone()),
         Transform::from_xyz(0.0, o.ground, 0.0),
     ));
+    if ue {
+        // A grid wall far behind, as in showcase levels: something for heat
+        // haze to bend and for bloom to glow against.
+        commands.spawn((
+            Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(FLOOR_SIZE * 0.5)).mesh())),
+            MeshMaterial3d(floor),
+            Transform::from_xyz(0.0, o.ground, -WALL_DISTANCE),
+        ));
+    }
     commands.spawn((
         DirectionalLight {
             illuminance: if ue { 800.0 } else { 3000.0 },
@@ -420,6 +432,8 @@ fn setup(
 
 /// Side of the `--look ue` floor (metres): one grid cell per metre.
 const FLOOR_SIZE: f32 = 80.0;
+/// How far behind the origin the `--look ue` grid wall stands (metres).
+const WALL_DISTANCE: f32 = 12.0;
 
 /// One 1 m cell of the `--look ue` floor: dark tile, light border lines,
 /// with a full mip chain (box filtered) so the grid does not shimmer or

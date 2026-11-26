@@ -265,6 +265,12 @@ pub const SPRITE_FIELDS: &[RendererField] = &[
         doc: "blend between flipbook frames",
     },
     RendererField {
+        name: "distortion",
+        form: "bool",
+        default: "false",
+        doc: "draw after the opaque scene; the material can sample it (view_transmission_texture) to refract it",
+    },
+    RendererField {
         name: "sort_mode",
         form: "None | ViewDepth | ViewDistance",
         default: "None",

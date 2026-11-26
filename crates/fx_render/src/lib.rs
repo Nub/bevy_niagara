@@ -27,7 +27,8 @@
 //! Render world, each frame:
 //! - `prepare_effects` builds an [`fx_gpu::GpuEffect`] per effect and the
 //!   per-renderer GPU state (per view for sprites and meshes);
-//! - `queue_particles` adds one Transparent3d item per drawn renderer and view;
+//! - `queue_particles` adds one Transparent3d item per drawn renderer and view
+//!   (Transmissive3d for `distortion` sprites, on cameras with ScreenSpaceTransmission);
 //! - `simulate` (in the `RenderGraph` schedule, before the cameras) records
 //!   the sim steps, the per-view cull/sort, the ribbon builds and the light
 //!   gathers into the frame's encoder;
@@ -70,7 +71,8 @@ use bevy::ecs::system::SystemParamItem;
 use bevy::ecs::system::lifetimeless::{Read, SRes};
 use bevy::math::{Mat4, Vec3, Vec4};
 use bevy::pbr::{
-    MeshPipeline, MeshPipelineKey, MeshPipelineSystems, SetMeshViewBindGroup, ViewKeyCache,
+    MeshPipeline, MeshPipelineKey, MeshPipelineSystems, ScreenSpaceTransmission, SetMeshViewBindGroup, Transmissive3d,
+    ViewKeyCache,
 };
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
@@ -379,6 +381,7 @@ impl Plugin for FxPlugin {
             .init_resource::<RendererAssetsCache>()
             .init_resource::<PendingMeshes>()
             .add_render_command::<Transparent3d, DrawParticlesCommands>()
+            .add_render_command::<Transmissive3d, DrawParticlesCommands>()
             .init_gpu_resource::<SpecializedRenderPipelines<ParticlePipeline>>()
             .add_systems(RenderStartup, init_render.after(MeshPipelineSystems))
             .add_systems(ExtractSchedule, extract_effects)
@@ -770,6 +773,10 @@ impl SpecializedRenderPipeline for ParticlePipeline {
         }
         if key.view_key.contains(MeshPipelineKey::DEPTH_PREPASS) {
             defs.push("DEPTH_PREPASS".into());
+        }
+        // The view layout then binds the scene copy (distortion materials).
+        if key.view_key.contains(MeshPipelineKey::VIEW_TRANSMISSION_TEXTURE) {
+            defs.push("VIEW_TRANSMISSION_TEXTURE".into());
         }
         if key.soft {
             defs.push("SOFT".into());
@@ -1976,22 +1983,30 @@ fn write_uniform(
 #[allow(clippy::too_many_arguments)]
 fn queue_particles(
     draw_functions: Res<DrawFunctions<Transparent3d>>,
+    transmissive_draw_functions: Res<DrawFunctions<Transmissive3d>>,
+    mut transmissive_phases: ResMut<ViewSortedRenderPhases<Transmissive3d>>,
     pipeline: Res<ParticlePipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<ParticlePipeline>>,
     cache: Res<PipelineCache>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<&ExtractedView>,
+    views: Query<(&ExtractedView, Option<&ScreenSpaceTransmission>)>,
     view_keys: Res<ViewKeyCache>,
     state: Res<FxState>,
     extracted: Res<ExtractedEffects>,
     ready: Res<FxReady>,
 ) {
     let draw = draw_functions.read().id::<DrawParticlesCommands>();
+    let transmissive_draw = transmissive_draw_functions.read().id::<DrawParticlesCommands>();
     let mut all_ready = extracted
         .effects
         .iter()
         .all(|e| state.effects.contains_key(&e.main) && !e.data_pending);
-    for view in &views {
+    for (view, transmission) in &views {
+        // Distortion sprites draw in the transmissive pass, which only runs
+        // (and copies the scene for them) on cameras with
+        // ScreenSpaceTransmission; elsewhere they are left out.
+        let can_distort = transmission.is_some_and(|t| t.steps > 0);
+        let mut transmissive = transmissive_phases.get_mut(&view.retained_view_entity);
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -2079,9 +2094,31 @@ fn queue_particles(
                     },
                     Settings::Light(_) | Settings::Component(_) => continue,
                 };
+                let distortion = matches!(settings, Settings::Sprite(s) if s.distortion);
+                if distortion && !(can_distort && transmissive.is_some()) {
+                    continue;
+                }
                 let id = pipelines.specialize(&cache, &pipeline, key);
                 if cache.get_render_pipeline(id).is_none() {
                     all_ready = false;
+                }
+                if distortion {
+                    if let Some(t) = transmissive.as_deref_mut() {
+                        t.add_transient(Transmissive3d {
+                            sorting_info: TransparentSortingInfo3d::Sorted {
+                                mesh_center: center,
+                                depth_bias: 0.0,
+                            },
+                            distance: 0.0,
+                            pipeline: id,
+                            entity: (renderer_entity(i), MainEntity::from(main)),
+                            draw_function: transmissive_draw,
+                            batch_range: i as u32..i as u32 + 1,
+                            extra_index: PhaseItemExtraIndex::None,
+                            indexed: false,
+                        });
+                    }
+                    continue;
                 }
                 phase.add_transient(Transparent3d {
                     sorting_info: TransparentSortingInfo3d::Sorted {

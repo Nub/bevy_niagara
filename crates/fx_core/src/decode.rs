@@ -302,6 +302,9 @@ fn decode_sprite(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option
     if let Some(v) = f.take("sub_uv_blending") {
         s.sub_uv_blending = boolean(v, "sub_uv_blending", d).unwrap_or_default();
     }
+    if let Some(v) = f.take("distortion") {
+        s.distortion = boolean(v, "distortion", d).unwrap_or_default();
+    }
     if let Some(v) = f.take("sort_mode") {
         s.sort_mode = ident_enum(v, "sort_mode", d).unwrap_or_default();
     }
