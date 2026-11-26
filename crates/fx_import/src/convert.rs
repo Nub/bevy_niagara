@@ -849,7 +849,12 @@ impl<'a> Cx<'a> {
                 // link) multiplies the curve's value.
                 match d.input("Scale Curve") {
                     Some(i @ (NInput::Link(_) | NInput::Dynamic(_))) if ty == Ty::Float => {
-                        let s = self.conv(e, i, Unit::None, Ty::Float)?;
+                        let s = match self.conv(e, i, Unit::None, Ty::Float)? {
+                            // A random range here would be drawn again every
+                            // update and flicker: its mean stands in.
+                            Fx::Range(Lit::Float(a), Lit::Float(b)) => Fx::Lit(Lit::Float((a + b) * 0.5)),
+                            s => s,
+                        };
                         Ok(Fx::Dyn("Multiply Float".into(), vec![("A".into(), out), ("B".into(), s)]))
                     }
                     Some(NInput::Link(_) | NInput::Dynamic(_)) => Err("a non-constant Scale Curve on a vector curve".into()),
@@ -1223,7 +1228,21 @@ impl<'a> Cx<'a> {
             }
             "NiagaraLightRendererProperties" => {
                 let radius = find(&r.properties, "RadiusScale").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                format!("Light((radius_scale: {}))", f(radius as f32))
+                let mut fields = vec![format!("radius_scale: {}", f(radius as f32))];
+                // Niagara light colour (particle colour + ColorAdd) is a
+                // brightness in candela-like units: 4π lumens per unit here.
+                // Fire packs put all of it in ColorAdd (e.g. 10000, 4000, 0).
+                if let Some(v) = find(&r.properties, "ColorAdd") {
+                    let c = ["X", "Y", "Z"].map(|k| v.field(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32);
+                    if c.iter().any(|x| *x != 0.0) {
+                        fields.push(format!("color_add: ({}, {}, {})", f(c[0]), f(c[1]), f(c[2])));
+                    }
+                }
+                fields.push(format!("intensity: {}", f(4.0 * std::f32::consts::PI)));
+                // Off unless the renderer turns it on (Niagara's default).
+                let alpha = matches!(find(&r.properties, "bAlphaScalesBrightness"), Some(crate::property::Value::Bool(true)));
+                fields.push(format!("alpha_scales_brightness: {alpha}"));
+                format!("Light(({}))", fields.join(", "))
             }
             other => {
                 self.report.renderers.push(format!("{}: {other}: no equivalent renderer, left out", e.name));
