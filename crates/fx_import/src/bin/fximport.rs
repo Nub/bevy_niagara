@@ -5,6 +5,7 @@
 //!   fximport niagara <file.uasset>
 //!   fximport convert <file.uasset> --out DIR
 //!   fximport mesh <file.uasset> --out FILE.glb
+//!   fximport texture <file.uasset> --out FILE.png
 //!
 //! `convert` writes DIR/<name>.fx.ron and DIR/<name>.report.md and exits
 //! with 3 when the written effect does not validate. `mesh` reads a static
@@ -21,7 +22,7 @@ use fx_import::{dump, DumpOptions, Package};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)\n       fximport mesh <file.uasset> --out FILE.glb  (a static mesh as glTF binary, metres, Y up)"
+        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)\n       fximport mesh <file.uasset> --out FILE.glb  (a static mesh as glTF binary, metres, Y up)\n       fximport texture <file.uasset> --out FILE.png  (a texture's source art, decoded; under a Content folder)"
     );
     ExitCode::from(64)
 }
@@ -128,6 +129,37 @@ fn main() -> ExitCode {
             }
         }
         return ExitCode::SUCCESS;
+    }
+    if cmd == "texture" {
+        // A Texture2D's decoded source art as PNG (to check colours and
+        // channel order): FILE must sit under a project's Content folder.
+        let (Some(file), Some("--out"), Some(out)) = (args.get(1), args.get(2).map(|s| s.as_str()), args.get(3)) else { return usage() };
+        let path = std::path::Path::new(file);
+        let Some(content) = path.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "Content")) else {
+            eprintln!("{file}: not under a Content folder");
+            return ExitCode::from(1);
+        };
+        let rel = path.strip_prefix(content).unwrap_or(path).with_extension("");
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let mut store = fx_import::material::Store::new(vec![]);
+        store.content_roots.push(content.to_path_buf());
+        return match fx_import::material::read_texture(&mut store, &format!("/Game/{rel}.{name}")) {
+            Ok(img) => match std::fs::write(out, fx_import::material::encode_png(&img)) {
+                Ok(()) => {
+                    println!("{out}: {}x{}, {}", img.width, img.height, if img.srgb { "sRGB" } else { "linear" });
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{out}: {e}");
+                    ExitCode::from(1)
+                }
+            },
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
     if cmd == "mesh" {
         let (Some(file), Some("--out"), Some(out)) = (args.get(1), args.get(2).map(|s| s.as_str()), args.get(3)) else { return usage() };

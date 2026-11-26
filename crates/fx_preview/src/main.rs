@@ -9,13 +9,14 @@
 //! fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.25,0.5,1,2] [--duration S]
 //!           [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey]
 //!           [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--no-mp4] [--test-scene]
-//!           [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--look default|ue] [--exposure EV] [--bloom I]
+//!           [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--look default|ue] [--exposure EV] [--bloom I] [--floor grid|proto]
 //! ```
 //!
 //! `--look ue` matches Unreal's default look for side-by-side comparisons
 //! with Unreal footage: ACES filmic tonemapping (Unreal's tone curve is ACES
 //! based), bloom, and a dark floor with a 1 m grid (like the editor's
-//! showcase floors). `--exposure` shifts everything by stops (Unreal's
+//! showcase floors). `--floor proto` swaps it for the blue-grey 2 m prototype grid of the
+//! arrow trail demo map. `--exposure` shifts everything by stops (Unreal's
 //! exposure compensation), `--bloom` sets the bloom intensity.
 //!
 //! `--fly` moves the effect in a straight line, turned to face its velocity
@@ -87,6 +88,10 @@ struct Options {
     /// `default` (Bevy's look) or `ue` (Unreal-like: ACES tonemap, bloom,
     /// dark grid floor), for fair comparisons with Unreal footage.
     look: String,
+    /// `--look ue` floor: `grid` (dark, 1 m cells, a grid wall behind) or
+    /// `proto` (blue-grey prototype grid: 2 m cells of 4 x 4, no wall; the
+    /// arrow trail demo map).
+    floor: String,
     /// Exposure in stops (ColorGrading), applied to everything drawn.
     exposure: f32,
     /// Bloom intensity (`--look ue`; 0 turns it off).
@@ -127,6 +132,7 @@ fn parse_args() -> Result<Options, String> {
         fov: 45.0,
         ground: 0.0,
         look: "default".into(),
+        floor: "grid".into(),
         exposure: 0.0,
         bloom: 0.2,
     };
@@ -156,6 +162,7 @@ fn parse_args() -> Result<Options, String> {
             "--fov" => o.fov = val()?.parse::<f32>().map_err(|e| format!("--fov: {e}"))?,
             "--target" => o.target = parse_vec3(&val()?)?,
             "--look" => o.look = val()?,
+            "--floor" => o.floor = val()?,
             "--exposure" => o.exposure = val()?.parse::<f32>().map_err(|e| format!("--exposure: {e}"))?,
             "--bloom" => o.bloom = val()?.parse::<f32>().map_err(|e| format!("--bloom: {e}"))?,
             "--no-mp4" => o.mp4 = false,
@@ -197,7 +204,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--look default|ue] [--exposure EV] [--bloom I] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--at X,Y,Z] [--also FILE@X,Y,Z ...]";
+const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--look default|ue] [--exposure EV] [--bloom I] [--floor grid|proto] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--at X,Y,Z] [--also FILE@X,Y,Z ...]";
 
 fn main() -> ExitCode {
     let o = match parse_args() {
@@ -321,7 +328,17 @@ fn setup(
         ),
     };
     let ue = o.look == "ue";
-    let clear = if ue { Color::srgb(0.008, 0.009, 0.012) } else { clear };
+    let proto = ue && o.floor == "proto";
+    // `--floor proto` brightness: the floor (and backdrop) shown the same
+    // whatever `--exposure`, which then only sets the effects against it.
+    let proto_k = PROTO_GAIN * 2f32.powf(-o.exposure);
+    let clear = if proto {
+        Color::LinearRgba(Color::srgb_u8(16, 22, 32).to_linear() * proto_k)
+    } else if ue {
+        Color::srgb(0.008, 0.009, 0.012)
+    } else {
+        clear
+    };
     let mut camera = commands.spawn((
         Camera3d::default(),
         Camera {
@@ -357,7 +374,25 @@ fn setup(
             });
         }
     }
-    let floor = if ue {
+    if proto {
+        // The demo map's height fog: the floor fades to the backdrop with distance.
+        camera.insert(DistanceFog {
+            color: clear,
+            falloff: FogFalloff::Linear { start: PROTO_FOG.0, end: PROTO_FOG.1 },
+            ..default()
+        });
+    }
+    let floor = if proto {
+        // Unlit: the demo map's grid reads as a flat blue-grey under its
+        // sky light and fog, whatever the view angle.
+        StandardMaterial {
+            base_color_texture: Some(images.add(proto_grid_image())),
+            base_color: Color::linear_rgb(proto_k, proto_k, proto_k),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(PROTO_FLOOR_SIZE / PROTO_CELL)),
+            unlit: true,
+            ..default()
+        }
+    } else if ue {
         StandardMaterial {
             base_color_texture: Some(images.add(grid_image())),
             uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(FLOOR_SIZE)),
@@ -372,14 +407,20 @@ fn setup(
             ..default()
         }
     };
-    let size = if ue { FLOOR_SIZE } else { 30.0 };
+    let size = if proto {
+        PROTO_FLOOR_SIZE
+    } else if ue {
+        FLOOR_SIZE
+    } else {
+        30.0
+    };
     let floor = materials.add(floor);
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(size, size))),
         MeshMaterial3d(floor.clone()),
         Transform::from_xyz(0.0, o.ground, 0.0),
     ));
-    if ue {
+    if ue && !proto {
         // A grid wall far behind, as in showcase levels: something for heat
         // haze to bend and for bloom to glow against.
         commands.spawn((
@@ -439,22 +480,63 @@ const WALL_DISTANCE: f32 = 12.0;
 /// with a full mip chain (box filtered) so the grid does not shimmer or
 /// moiré towards the horizon.
 fn grid_image() -> Image {
-    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-    use bevy::render::render_resource::{Extent3d, TextureDimension};
     const N: usize = 256;
     let tile = [0.15f32, 0.155, 0.17];
     let line = [0.7f32, 0.72, 0.78];
-    // Linear values, encoded to sRGB per mip.
-    let mut level: Vec<[f32; 3]> = (0..N * N)
-        .map(|i| {
-            let (x, y) = ((i % N) as f32 + 0.5, (i / N) as f32 + 0.5);
-            // Distance to the nearest cell edge in texels; ~5 texel (2 cm) lines.
-            let d = x.min(N as f32 - x).min(y).min(N as f32 - y);
-            let w = (1.0 - (d - 2.5).max(0.0)).clamp(0.0, 1.0);
-            let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-            [0, 1, 2].map(|k| lin(tile[k]) * (1.0 - w) + lin(line[k]) * w)
+    mipped_tile(N, |x, y| {
+        // Distance to the nearest cell edge in texels; ~5 texel (2 cm) lines.
+        let d = x.min(N as f32 - x).min(y).min(N as f32 - y);
+        let w = (1.0 - (d - 2.5).max(0.0)).clamp(0.0, 1.0);
+        [0, 1, 2].map(|k| srgb_to_linear(tile[k]) * (1.0 - w) + srgb_to_linear(line[k]) * w)
+    })
+}
+
+/// Side of the `--floor proto` floor (metres) and of one major cell.
+const PROTO_FLOOR_SIZE: f32 = 160.0;
+const PROTO_CELL: f32 = 2.0;
+/// Linear gain of the `--floor proto` floor before ACES, matched to the
+/// listing shots (ACES darkens dark values).
+const PROTO_GAIN: f32 = 3.0;
+/// Start and end distance (metres) of the `--floor proto` fog.
+const PROTO_FOG: (f32, f32) = (8.0, 45.0);
+
+/// One 2 m cell of the `--floor proto` floor, after the arrow trail demo's
+/// prototype grid (MI_PrototypeGrid: 200 cm cells): blue-grey tile, 4 x 4
+/// minor cells with thin lines, lighter major lines. Colours matched to
+/// the listing shots (the map's sky light and fog tint its grey grid blue).
+fn proto_grid_image() -> Image {
+    const N: usize = 512;
+    let tile = [40.0f32 / 255.0, 47.0 / 255.0, 58.0 / 255.0];
+    let minor = [62.0f32 / 255.0, 72.0 / 255.0, 88.0 / 255.0];
+    let major = [84.0f32 / 255.0, 96.0 / 255.0, 114.0 / 255.0];
+    let sub = N as f32 / 4.0;
+    mipped_tile(N, |x, y| {
+        let edge = |v: f32, n: f32| v.min(n - v);
+        let d_major = edge(x, N as f32).min(edge(y, N as f32));
+        let d_minor = edge(x % sub, sub).min(edge(y % sub, sub));
+        // ~4 cm major and ~1.5 cm minor lines.
+        let wm = (1.0 - (d_major - 4.5).max(0.0)).clamp(0.0, 1.0);
+        let wn = (1.0 - (d_minor - 1.5).max(0.0)).clamp(0.0, 1.0);
+        [0, 1, 2].map(|k| {
+            let c = srgb_to_linear(tile[k]) * (1.0 - wn) + srgb_to_linear(minor[k]) * wn;
+            c * (1.0 - wm) + srgb_to_linear(major[k]) * wm
         })
-        .collect();
+    })
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// A repeating N x N sRGB texture from linear texel colours at texel
+/// centres, with a full box-filtered mip chain.
+#[allow(non_snake_case)]
+fn mipped_tile(n0: usize, texel: impl Fn(f32, f32) -> [f32; 3]) -> Image {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension};
+    let N = n0;
+    // Linear values, encoded to sRGB per mip.
+    let mut level: Vec<[f32; 3]> = (0..N * N).map(|i| texel((i % N) as f32 + 0.5, (i / N) as f32 + 0.5)).collect();
     let enc = |c: f32| {
         let s = if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
         (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8

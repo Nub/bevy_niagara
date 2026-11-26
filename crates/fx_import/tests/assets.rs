@@ -54,20 +54,34 @@ fn png_round_trips_and_atlases_pack_side_by_side() {
     let back = material::decode_png(&material::encode_png(&a)).unwrap();
     assert_eq!((back.width, back.height, back.rgba.clone()), (4, 2, a.rgba.clone()));
 
-    // One texture: stored as is (linear data sRGB-encoded so it samples back the same).
+    // One texture: padded, with its own mip chain to its right (linear data
+    // sRGB-encoded so it samples back the same).
     let one = material::atlas(&[img(4, 4, 64, false)]);
-    assert_eq!(one.rects, vec![[0.0, 0.0, 1.0, 1.0]]);
-    assert!(one.image.rgba[0] > 64, "linear 64 is stored sRGB-encoded");
-    assert_eq!(one.image.rgba[3], 64, "alpha stays linear");
+    assert_eq!(one.levels[0].len(), 3, "4x4, 2x2, 1x1");
+    assert_eq!(one.rects[0], one.levels[0][0]);
+    let p = ((2 * one.image.width + 2) * 4) as usize;
+    assert!(one.image.rgba[p] > 64, "linear 64 is stored sRGB-encoded");
+    assert_eq!(one.image.rgba[p + 3], 64, "alpha stays linear");
+    // A flat texture stays flat down its mips.
+    let m = one.levels[0][2];
+    let (mx, my) = ((m[0] * one.image.width as f32) as u32, (m[1] * one.image.height as f32) as u32);
+    assert_eq!(one.image.rgba[((my * one.image.width + mx) * 4) as usize], one.image.rgba[p]);
 
     let at = material::atlas(&[img(8, 8, 10, true), img(16, 4, 20, true)]);
     assert_eq!(at.rects.len(), 2);
-    assert_eq!(at.image.width, 8 + 16 + 4 * 2);
-    assert_eq!(at.image.height, 8 + 2 * 2);
-    for r in &at.rects {
+    assert_eq!(at.image.width, (8 + 4 + 16 + 8) + 4 * 2 * 2);
+    // The 16x4 texture's mips (8x2, 4x1, 2x1, 1x1) stack to 5 + 4 padded rows.
+    assert_eq!(at.image.height, (2 + 1 + 1 + 1) + 4 * 2 * 2);
+    let all: Vec<_> = at.levels.iter().flatten().collect();
+    for r in &all {
         assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= 1.0 && r[1] + r[3] <= 1.0, "{r:?}");
     }
-    assert!(at.rects[0][0] + at.rects[0][2] < at.rects[1][0], "tiles do not overlap");
+    for (i, a) in all.iter().enumerate() {
+        for b in &all[i + 1..] {
+            let apart = a[0] + a[2] < b[0] || b[0] + b[2] < a[0] || a[1] + a[3] < b[1] || b[1] + b[3] < a[1];
+            assert!(apart, "tiles do not overlap: {a:?} {b:?}");
+        }
+    }
 
     let n = material::stand_in_missing();
     assert_eq!(n.rgba.len(), (n.width * n.height * 4) as usize);

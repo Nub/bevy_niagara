@@ -23,18 +23,21 @@ packs=${*:-perfect_fire arrow_trail}
 view() {
 	case $1 in
 	perfect_fire) echo "--camera 0,2.0,5.75 --target 0,0.7,0 --fov 59 --duration 3" ;;
-	arrow_trail) echo "--camera -7,3,-3.5 --target -1,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -0.3" ;;
+	arrow_trail) echo "--camera -7,3,-3.5 --target -1,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -3.5" ;;
 	esac
 }
-# The Unreal-like look. Exposure matched by eye to the listings (Unreal's
-# auto exposure brightens the arrow demo's dark map by about 1.5 stops); arrows
-# fly at 20 m/s, the demo blueprint's Speed. BEFORE=1 renders with the plain default look (and an
+# The Unreal-like look. Exposure matched by eye to the listings; arrows fly at
+# 20 m/s, the demo blueprint's Speed, over the demo map's blue-grey prototype
+# grid (`--floor proto`, shown the same at any exposure), so the exposure only
+# sets the trails against it: +5.5 stops makes the faint translucent ribbons
+# (Basic, Basic_02, Holy) read as in the listing, with a tight bloom.
+# BEFORE=1 renders with the plain default look (and an
 # older fxpreview via BIN) for before/after shots.
 look() {
 	[ -n "${BEFORE:-}" ] && return
 	case $1 in
 	perfect_fire) echo "--look ue" ;;
-	arrow_trail) echo "--look ue --bloom 0.35 --exposure 1.5" ;;
+	arrow_trail) echo "--look ue --floor proto --bloom 0.1 --exposure 5.5" ;;
 	esac
 }
 src() {
@@ -93,9 +96,13 @@ for pack in $packs; do
 		lview="--camera 0,7,11 --target 0,0,-1.5 --fov 59 --duration 3"
 		pos() { echo "$(((($1 % 5) - 2) * 3)),0,$((2 - ($1 / 5) * 4))"; } ;;
 	arrow_trail)
-		order="NS_ArrowTrail_Basic NS_ArrowTrail_Basic_02 NS_ArrowTrail_Fire NS_ArrowTrail_Fire_02 NS_ArrowTrail_Holy NS_ArrowTrail_Ice NS_ArrowTrail_Magic NS_ArrowTrail_Magic_2 NS_ArrowTrail_Nature NS_ArrowTrail_Water"
-		lview="--camera -7,4,-5 --target 0,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -0.3"
-		pos() { echo "0,0,$(echo "$1" | awk '{print 2.7 - $1 * 0.6}')"; } ;;
+		# The listing's showcase shot (testdata/fab/_cmp/at_ref.png): the trails in
+		# its order, nearest first, 1.5 m apart as in the demo map (BP_Demo
+		# actors 150-160 cm apart), heads level; camera fitted to the shot's
+		# trail heads and directions (vertical fov 38.6, yaw 48, pitch -35).
+		order="NS_ArrowTrail_Basic_02 NS_ArrowTrail_Basic NS_ArrowTrail_Fire NS_ArrowTrail_Ice NS_ArrowTrail_Magic NS_ArrowTrail_Magic_2 NS_ArrowTrail_Holy NS_ArrowTrail_Water NS_ArrowTrail_Nature NS_ArrowTrail_Fire_02"
+		lview="--camera -13.493,9.095,-11.783 --target -8.064,3.308,-5.697 --fov 38.6 --duration 2 --fly 20,0,0 --ground -3.5"
+		pos() { echo "0,0,$(echo "$1" | awk '{print -6.75 + $1 * 1.5}')"; } ;;
 	esac
 	first="" also="" i=0
 	for s in $order; do

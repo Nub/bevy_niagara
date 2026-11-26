@@ -168,6 +168,13 @@ pub fn read_texture(store: &mut Store, object_path: &str) -> Result<Image, Strin
         crate::bulk::read_payload(&l.bytes, p).map_err(|e| e.to_string())?
     };
     let rgba = match compression.as_str() {
+        // Unreal PNG-compresses BGRA8 source art byte for byte: the file's
+        // "RGB" is B, G, R (normal maps decode red, leaves cyan otherwise).
+        "TSCF_PNG" if matches!(format.as_str(), "TSF_BGRA8" | "TSF_BGRE8") => {
+            let mut rgba = decode_png(&data)?.rgba;
+            rgba.chunks_mut(4).for_each(|p| p.swap(0, 2));
+            rgba
+        }
         "TSCF_PNG" => decode_png(&data)?.rgba,
         "TSCF_None" => raw_to_rgba(&data, w, h, &format)?,
         other => return Err(format!("texture source compression {other} not supported")),
@@ -283,58 +290,116 @@ fn linear_to_srgb8(v: u8) -> u8 {
 
 /// Textures packed side by side into one image (our renderers bind one
 /// texture); `rects[i]` = (u, v, width, height) of texture i in UV units.
-/// The atlas is loaded as sRGB, so linear textures are stored sRGB-encoded
-/// and sample back as their original values.
+/// `levels[i]` = the rects of texture i's mip chain, full size first: each
+/// texture carries its own box-filtered mips (to the right of the full-size
+/// image, stacked), so materials filter like an Unreal sampler (trilinear,
+/// wrapping per texture) without mips of the whole atlas bleeding across
+/// textures. The atlas is loaded as sRGB, so linear textures are stored
+/// sRGB-encoded and sample back as their original values.
 pub struct Atlas {
     pub image: Image,
     pub rects: Vec<[f32; 4]>,
+    pub levels: Vec<Vec<[f32; 4]>>,
 }
 
 const PAD: u32 = 2;
 
-pub fn atlas(images: &[Image]) -> Atlas {
-    if images.len() == 1 {
-        let mut img = images[0].clone();
-        if !img.srgb {
-            for p in img.rgba.chunks_mut(4) {
-                for c in &mut p[..3] {
-                    *c = linear_to_srgb8(*c);
+/// Mip levels of `img` (full size first), down to 1 x 1: 2 x 2 box filtered
+/// in linear light (colour) or as stored (alpha), wrapping at odd edges.
+fn mip_chain(img: &Image) -> Vec<Image> {
+    let to_lin = |v: u8, c: usize| if c < 3 && img.srgb { srgb_to_linear(v as f32 / 255.0) } else { v as f32 / 255.0 };
+    let from_lin = |v: f32, c: usize| {
+        let v = if c < 3 && img.srgb {
+            let x = v.clamp(0.0, 1.0);
+            if x <= 0.003_130_8 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+        } else {
+            v
+        };
+        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    };
+    let mut out = vec![img.clone()];
+    let (mut w, mut h) = (img.width, img.height);
+    let mut cur: Vec<f32> = img.rgba.iter().enumerate().map(|(i, &v)| to_lin(v, i % 4)).collect();
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0.0f32; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let mut s = 0.0;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let sx = (x * 2 + dx) % w;
+                        let sy = (y * 2 + dy) % h;
+                        s += cur[((sy * w + sx) * 4) as usize + c];
+                    }
+                    next[((y * nw + x) * 4) as usize + c] = s * 0.25;
                 }
             }
-            img.srgb = true;
         }
-        return Atlas { image: img, rects: vec![[0.0, 0.0, 1.0, 1.0]] };
+        out.push(Image {
+            width: nw,
+            height: nh,
+            rgba: next.iter().enumerate().map(|(i, &v)| from_lin(v, i % 4)).collect(),
+            srgb: img.srgb,
+        });
+        cur = next;
+        (w, h) = (nw, nh);
     }
-    let w: u32 = images.iter().map(|i| i.width + 2 * PAD).sum();
-    let h: u32 = images.iter().map(|i| i.height + 2 * PAD).max().unwrap_or(1);
+    out
+}
+
+pub fn atlas(images: &[Image]) -> Atlas {
+    let chains: Vec<Vec<Image>> = images.iter().map(mip_chain).collect();
+    // Column of texture i: the full-size image, then its mips stacked to its right.
+    let col = |c: &Vec<Image>| {
+        let w0 = c[0].width + 2 * PAD;
+        let w1 = c.get(1).map_or(0, |m| m.width + 2 * PAD);
+        let h0 = c[0].height + 2 * PAD;
+        let h1: u32 = c[1..].iter().map(|m| m.height + 2 * PAD).sum();
+        (w0 + w1, h0.max(h1))
+    };
+    let w: u32 = chains.iter().map(|c| col(c).0).sum();
+    let h: u32 = chains.iter().map(|c| col(c).1).max().unwrap_or(1);
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     let mut rects = Vec::new();
+    let mut levels = Vec::new();
     let mut x0 = 0;
-    for img in images {
-        // Edge texels repeat into the padding (clamped bilinear at the seams).
-        for y in 0..img.height + 2 * PAD {
-            let sy = y.saturating_sub(PAD).min(img.height - 1);
-            for x in 0..img.width + 2 * PAD {
-                let sx = x.saturating_sub(PAD).min(img.width - 1);
-                let s = ((sy * img.width + sx) * 4) as usize;
-                let d = ((y * w + x0 + x) * 4) as usize;
-                for c in 0..4 {
-                    let v = img.rgba[s + c];
-                    rgba[d + c] = if c < 3 && !img.srgb { linear_to_srgb8(v) } else { v };
+    for chain in &chains {
+        let mut lv = Vec::new();
+        let mut y1 = 0;
+        for (k, img) in chain.iter().enumerate() {
+            let (bx, by) = if k == 0 { (x0, 0) } else { (x0 + chain[0].width + 2 * PAD, y1) };
+            if k > 0 {
+                y1 += img.height + 2 * PAD;
+            }
+            // Edge texels repeat into the padding (clamped bilinear at the seams).
+            for y in 0..img.height + 2 * PAD {
+                let sy = y.saturating_sub(PAD).min(img.height - 1);
+                for x in 0..img.width + 2 * PAD {
+                    let sx = x.saturating_sub(PAD).min(img.width - 1);
+                    let s = ((sy * img.width + sx) * 4) as usize;
+                    let d = (((by + y) * w + bx + x) * 4) as usize;
+                    for c in 0..4 {
+                        let v = img.rgba[s + c];
+                        rgba[d + c] = if c < 3 && !img.srgb { linear_to_srgb8(v) } else { v };
+                    }
                 }
             }
+            lv.push([
+                (bx + PAD) as f32 / w as f32,
+                (by + PAD) as f32 / h as f32,
+                img.width as f32 / w as f32,
+                img.height as f32 / h as f32,
+            ]);
         }
-        rects.push([
-            (x0 + PAD) as f32 / w as f32,
-            PAD as f32 / h as f32,
-            img.width as f32 / w as f32,
-            img.height as f32 / h as f32,
-        ]);
-        x0 += img.width + 2 * PAD;
+        rects.push(lv[0]);
+        levels.push(lv);
+        x0 += col(chain).0;
     }
     Atlas {
         image: Image { width: w, height: h, rgba, srgb: true },
         rects,
+        levels,
     }
 }
 
@@ -1608,8 +1673,20 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
     })
 }
 
-/// Fills the atlas rectangles into a compiled material's `tex` helper.
+/// Fills the atlas rectangles (one level each) into a compiled material's
+/// `tex` helper.
 pub fn with_rects(wesl: &str, rects: &[[f32; 4]]) -> String {
+    with_levels(wesl, &rects.iter().map(|r| vec![*r]).collect::<Vec<_>>())
+}
+
+/// Fills an atlas's textures and their mip levels (`Atlas::levels`) into a
+/// compiled material's `tex` helper.
+pub fn with_atlas(wesl: &str, at: &Atlas) -> String {
+    with_levels(wesl, &at.levels)
+}
+
+fn with_levels(wesl: &str, levels: &[Vec<[f32; 4]>]) -> String {
+    let rects: Vec<[f32; 4]> = levels.iter().flatten().copied().collect();
     let mut table = String::new();
     let _ = write!(table, "const TEX_RECTS = array<vec4<f32>, {}>(", rects.len().max(1));
     if rects.is_empty() {
@@ -1621,7 +1698,19 @@ pub fn with_rects(wesl: &str, rects: &[[f32; 4]]) -> String {
         }
         let _ = write!(table, "vec4<f32>({}, {}, {}, {})", lit(r[0]), lit(r[1]), lit(r[2]), lit(r[3]));
     }
-    table.push_str(");");
+    table.push_str(");\n");
+    // First rect and level count of each texture.
+    let n = levels.len().max(1);
+    let mut first = Vec::new();
+    let mut at = 0;
+    for l in levels {
+        first.push(format!("{at}u"));
+        at += l.len();
+    }
+    let counts: Vec<String> = levels.iter().map(|l| format!("{}u", l.len().max(1))).collect();
+    let or_one = |v: Vec<String>, d: &str| if v.is_empty() { d.to_string() } else { v.join(", ") };
+    let _ = write!(table, "const TEX_FIRST = array<u32, {n}>({});\n", or_one(first, "0u"));
+    let _ = write!(table, "const TEX_LEVELS = array<u32, {n}>({});", or_one(counts, "1u"));
     wesl.replace("// TEX_RECTS", &table)
 }
 
@@ -1639,11 +1728,27 @@ fn scene_behind(in: FxVertexOutput, offset: vec2<f32>) -> vec3<f32> {
 const HELPERS: &str = r#"// TEX_RECTS
 
 // Texture `i` of the atlas at `uv`, filtered like an Unreal sampler:
-// bilinear, wrapping at the texture's own edges (a hardware sample of the
-// atlas would clamp into the padding there: uv 0 would read the corner
-// texel instead of the mean of the four wrapped corners).
+// trilinear over the texture's own mip levels (picked from the screen
+// derivatives of `uv`), bilinear within a level, wrapping at the texture's
+// own edges (a hardware sample of the atlas would clamp into the padding
+// there: uv 0 would read the corner texel instead of the mean of the four
+// wrapped corners).
 fn tex(i: u32, uv: vec2<f32>) -> vec4<f32> {
-    let r = TEX_RECTS[i];
+    let first = TEX_FIRST[i];
+    let levels = TEX_LEVELS[i];
+    let dims = vec2<f32>(textureDimensions(particle_texture, 0));
+    let size = max(round(TEX_RECTS[first].zw * dims), vec2<f32>(1.0));
+    let dx = dpdx(uv) * size;
+    let dy = dpdy(uv) * size;
+    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-8)), 0.0, f32(levels - 1u));
+    let l0 = u32(floor(lod));
+    let l1 = min(l0 + 1u, levels - 1u);
+    return mix(tex_level(first + l0, uv), tex_level(first + l1, uv), lod - f32(l0));
+}
+
+// One level (atlas rect `k`) of a texture, bilinear and wrapping.
+fn tex_level(k: u32, uv: vec2<f32>) -> vec4<f32> {
+    let r = TEX_RECTS[k];
     let dims = vec2<f32>(textureDimensions(particle_texture, 0));
     let size = max(round(r.zw * dims), vec2<f32>(1.0));
     let origin = vec2<i32>(round(r.xy * dims));

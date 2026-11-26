@@ -1231,6 +1231,18 @@ impl<'a> Cx<'a> {
             }
             "NiagaraRibbonRendererProperties" => {
                 fields.push(format!("blend_mode: {blend}"));
+                // Niagara tessellates ribbons by default (Automatic: up to
+                // TessellationFactor = 16 Hermite sub-segments where the
+                // ribbon bends); without it a curl-noise ribbon spawned at
+                // 50/s on a 20 m/s arrow is a jagged zigzag of 0.4 m legs.
+                // We subdivide every segment by the factor; Disabled = 1.
+                let factor = match enum_tail("TessellationMode").as_deref() {
+                    Some("Disabled") => 1,
+                    _ => find(&r.properties, "TessellationFactor").and_then(|v| v.as_f64()).map_or(16, |v| v as i64).clamp(1, 16),
+                };
+                if factor > 1 {
+                    fields.push(format!("tessellation_factor: {factor}"));
+                }
                 material_fields(&mut fields, &mut self.report, "ribbon");
                 format!("Ribbon(({}))", fields.join(", "))
             }
@@ -1385,7 +1397,7 @@ impl<'a> Cx<'a> {
                 let at = mt::atlas(&imgs);
                 let png = format!("{}/{base}.png", a.dir);
                 a.files.insert(png.clone(), mt::encode_png(&at.image));
-                (Some(png), mt::with_rects(&c.wesl, &at.rects))
+                (Some(png), mt::with_atlas(&c.wesl, &at))
             };
             a.files.insert(wesl_path.clone(), wesl.into_bytes());
             Ok(MatOut {
