@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use fx_core::cook::CookedSystem;
 use fx_core::events::{EVENT_WORDS, Event, EventKind};
-use fx_core::sim::Particle;
+use fx_core::sim::{OwnerPose, Particle};
 
 use crate::codegen::ShaderOptions;
 use crate::events::EventLayout;
@@ -113,7 +113,10 @@ pub const MAX_EVENT_HANDLERS: usize = 16;
 const FRAME_LOOP_WORD: usize = 12 + MAX_USER_PARAMS * 4;
 /// First word of the frame's batch addressing (`src_base` .. `n_active`).
 const FRAME_BASE_WORD: usize = FRAME_LOOP_WORD + 4;
-const FRAME_BYTES: usize = (FRAME_BASE_WORD + 8) * 4;
+/// First word of the owner poses (previous, then current: translation,
+/// rotation, scale, a vec4 each), for world-space emitters.
+const FRAME_POSE_WORD: usize = FRAME_BASE_WORD + 8;
+const FRAME_BYTES: usize = (FRAME_POSE_WORD + 24) * 4;
 /// Words of the emitter state buffer.
 pub const STATE_WORDS: u64 = 32;
 /// Word holding the living-particle count in the state buffer.
@@ -246,6 +249,12 @@ pub struct GpuEffect {
     pub user: Vec<Value>,
     /// `Engine.Owner.Velocity` (m/s), read by Inherit Velocity; set by the host.
     pub owner_velocity: [f32; 3],
+    /// The owner's `world_from_local` at the end of the next step (set by
+    /// the host): world-space emitters move new particles to world space
+    /// with it, as [`fx_core::sim::Simulation::owner_pose`].
+    pub owner_pose: OwnerPose,
+    /// The owner's `world_from_local` at the start of the next step.
+    pub previous_owner_pose: OwnerPose,
     pub emitters: Vec<GpuEmitter>,
     /// Where each emitter's events live (offsets within [`GpuEffect::event_counts`] and [`GpuEffect::event_data`]).
     pub event_layout: EventLayout,
@@ -937,6 +946,8 @@ impl GpuBatch {
             time: 0.0,
             user: system.user_params.iter().map(|p| p.value).collect(),
             owner_velocity: [0.0; 3],
+            owner_pose: OwnerPose::IDENTITY,
+            previous_owner_pose: OwnerPose::IDENTITY,
             emitters,
             event_layout: program.event_layout.clone(),
             event_counts: region(&self.event_counts, self.ev_count_stride as u64, s),
@@ -1069,6 +1080,18 @@ impl GpuBatch {
             put(FRAME_BASE_WORD + 5, slot * be.grid_words);
             put(FRAME_BASE_WORD + 6, slot);
             put(FRAME_BASE_WORD + 7, 0);
+            // Owner poses (world-space emitters): previous, then current.
+            for (q, pose) in [fx.previous_owner_pose, fx.owner_pose].iter().enumerate() {
+                let at = FRAME_POSE_WORD + q * 12;
+                let words = [
+                    pose.translation.extend(0.0).to_array(),
+                    pose.rotation.to_array(),
+                    pose.scale.extend(0.0).to_array(),
+                ];
+                for (r, v) in words.iter().flatten().enumerate() {
+                    put(at + r, v.to_bits());
+                }
+            }
 
             em.current = 1 - em.current;
             em.age += dt;
@@ -1210,6 +1233,9 @@ impl GpuBatch {
         fx.warmed = true;
         let delta = fx.system.warmup_tick_delta;
         let mut left = fx_core::lifecycle::warmup_steps(&fx.system);
+        // The owner stands where it starts during the warm-up (as on the CPU).
+        let previous = fx.previous_owner_pose;
+        fx.previous_owner_pose = fx.owner_pose;
         while left > 0 {
             let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("fx warm-up"),
@@ -1223,6 +1249,7 @@ impl GpuBatch {
             self.submitted();
             left -= n;
         }
+        fx.previous_owner_pose = previous;
     }
 
     /// The layout of the scene bind group (group 2), for hosts that build it.
@@ -1358,6 +1385,19 @@ impl GpuEffect {
         self.own = Some(batch);
     }
 
+    /// The owner moved to `world_from_local` over the next step (see
+    /// [`fx_core::sim::Simulation::move_owner`]).
+    pub fn move_owner(&mut self, world_from_local: bevy_math::Affine3A) {
+        self.previous_owner_pose = self.owner_pose;
+        self.owner_pose = OwnerPose::from_affine(world_from_local);
+    }
+
+    /// The owner jumped to `world_from_local`: no step interpolates from where it was.
+    pub fn teleport_owner(&mut self, world_from_local: bevy_math::Affine3A) {
+        self.owner_pose = OwnerPose::from_affine(world_from_local);
+        self.previous_owner_pose = self.owner_pose;
+    }
+
     /// Restarts the effect as if just created with `seed` (pooling: reuse an
     /// instance instead of building a new one). No allocation: the next
     /// step clears the GPU counts, events and grids with buffer clears before
@@ -1372,6 +1412,7 @@ impl GpuEffect {
         self.active = true;
         self.spawn_scale = 1.0;
         self.owner_velocity = [0.0; 3];
+        self.previous_owner_pose = self.owner_pose;
         for (u, p) in self.user.iter_mut().zip(&self.system.user_params) {
             *u = p.value;
         }

@@ -40,7 +40,7 @@ struct FxRenderer {
     sub_image_from_index: u32,  // sprite: show Particles.SubImageIndex (SubUV Animation), not the flipbook over life
     batched: u32,               // indices are batch references r * capacity + i (fx_gpu::view::BatchDraw)
     region_words: u32,          // batched: words between particle copies
-    _pad0: u32,
+    world_space: u32,           // 1: the emitter simulates in world space (local_space: false): drawn without the effect transform
     _pad1: u32,
 }
 
@@ -62,8 +62,12 @@ fn pw(w: u32, i: u32) -> f32 {
     return particles[w * fx.capacity + i];
 }
 
-// The effect transform of particle `i` (per instance when batched).
+// The effect transform of particle `i` (per instance when batched; identity
+// for world-space emitters).
 fn particle_world_from_local(i: u32) -> mat4x4<f32> {
+    if (fx.world_space != 0u) {
+        return mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    }
     if (fx.batched != 0u) {
         return transforms[i / fx.capacity / 2u];
     }

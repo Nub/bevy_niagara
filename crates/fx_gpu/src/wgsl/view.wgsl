@@ -21,7 +21,7 @@ struct ViewParams {
     radius_scale: f32,
     region_words: u32,           // batched: words between particle copies
     entry_count: u32,            // batched: instances drawn
-    _pad1: u32,
+    world_space: u32,            // batched: the emitter simulates in world space, slot transforms not applied
     _pad2: u32,
 }
 
@@ -320,7 +320,10 @@ fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_
     }
     let base = r * vp.region_words;
     let cap = vp.capacity;
-    let m = transforms[slot];
+    var m = transforms[slot];
+    if (vp.world_space != 0u) {
+        m = mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    }
     let pos = (m * vec4<f32>(particles[base + i], particles[base + cap + i], particles[base + 2u * cap + i], 1.0)).xyz;
     var shown = true;
     if (vp.cull_mode != 3u) {

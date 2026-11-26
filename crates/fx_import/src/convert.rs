@@ -441,6 +441,8 @@ struct FxEmitter {
     max_particles: u32,
     deterministic: bool,
     interpolated_spawning: bool,
+    /// Niagara bLocalSpace: false means particles live in world space.
+    local_space: bool,
     fixed_bounds: Option<([f32; 3], [f32; 3])>,
     stacks: Vec<(String, Vec<FxModule>)>,
     events: Vec<(String, Vec<FxModule>)>,
@@ -533,6 +535,7 @@ impl<'a> Cx<'a> {
             max_particles: 0,
             deterministic: e.deterministic,
             interpolated_spawning: e.interpolated_spawning,
+            local_space: e.local_space,
             fixed_bounds: e.fixed_bounds.map(|(a, b)| {
                 let a = swap(a).map(|v| v * CM);
                 let b = swap(b).map(|v| v * CM);
@@ -549,9 +552,6 @@ impl<'a> Cx<'a> {
         };
         for n in &e.notes {
             self.report.notes.push(format!("{}: {n}", e.name));
-        }
-        if !e.local_space {
-            out.comment.push("Niagara simulates this emitter in world space; here particles live in the effect's space.".into());
         }
         let mut has_sprite_size = false;
         for st in &e.stacks {
@@ -1129,6 +1129,15 @@ impl<'a> Cx<'a> {
                     Some("CustomFacingVector") => fields.push("facing_mode: CustomFacingVector".into()),
                     _ => {}
                 }
+                // Same UV-space convention (V down): (0.5, 0.85) stands a
+                // card on its particle (floor fires).
+                if let Some(v) = find(&r.properties, "PivotInUVSpace") {
+                    let x = v.field("X").and_then(|x| x.as_f64()).unwrap_or(0.5);
+                    let y = v.field("Y").and_then(|x| x.as_f64()).unwrap_or(0.5);
+                    if (x - 0.5).abs() > 1e-6 || (y - 0.5).abs() > 1e-6 {
+                        fields.push(format!("pivot_in_uv_space: ({}, {})", f(x as f32), f(y as f32)));
+                    }
+                }
                 match enum_tail("SortMode").as_deref() {
                     Some("ViewDepth") => fields.push("sort_mode: ViewDepth".into()),
                     Some("ViewDistance") => fields.push("sort_mode: ViewDistance".into()),
@@ -1468,6 +1477,9 @@ impl<'a> Cx<'a> {
             }
             if e.interpolated_spawning {
                 let _ = writeln!(o, "            interpolated_spawning: true,");
+            }
+            if !e.local_space {
+                let _ = writeln!(o, "            local_space: false,");
             }
             if let Some((a, b)) = e.fixed_bounds {
                 let _ = writeln!(
@@ -2218,6 +2230,21 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             used.push("Rotation Vector");
             o.mods.push(x);
         }
+        "AlignSpriteToMeshOrientation" => {
+            let mut x = FxModule::new("Align Sprite to Mesh Orientation");
+            put!(x, "Mesh Orientation Relative Sprite Facing Vector", "Facing Axis", Unit::Dir);
+            put!(x, "Mesh Orientation Relative Sprite Alignment Vector", "Alignment Axis", Unit::Dir);
+            // Orientation Quaternion defaults to Particles.MeshOrientation,
+            // which the module reads; a fixed identity is the same as unset.
+            used.push("Orientation Quaternion");
+            match m.input("Orientation Quaternion") {
+                Some(NInput::Value(NValue::Quat(q))) if q[..3].iter().any(|c| c.abs() > 1e-6) => {
+                    o.drop_input("Orientation Quaternion", "a fixed rotation is not carried over (the particle's mesh orientation is used)");
+                }
+                _ => {}
+            }
+            o.mods.push(x);
+        }
         "InitialMeshOrientation" => {
             let mut x = FxModule::new("Initial Mesh Orientation");
             put!(x, "Rotation", "Rotation", Unit::Dir);
@@ -2237,6 +2264,15 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             o.mods.push(x);
         }
         "SystemState" => return Ok(Some("system loop settings".into())),
+        // Spawn-time forces: Add Velocity here writes Velocity directly and
+        // the forces modules act in Particle Update, so there is nothing left
+        // to apply at spawn.
+        "ApplyInitialForces" => return Ok(Some("spawn velocity is written directly by the velocity modules".into())),
+        "ScaleRibbonWidth" => {
+            let mut x = FxModule::new("Scale Ribbon Width");
+            put!(x, "Ribbon Width Scale", "Ribbon Width Scale", Unit::None);
+            o.mods.push(x);
+        }
         _ => return Err(format!("{script} has no equivalent module here")),
     }
     let _ = st;

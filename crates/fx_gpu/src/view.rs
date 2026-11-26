@@ -504,6 +504,9 @@ fn write_params(
 /// `world_from_local` from the `transforms` buffer given at creation.
 pub struct BatchDraw {
     pub config: ViewDrawConfig,
+    /// The emitter simulates in world space (`local_space: false`): its
+    /// particles are culled and sorted without the slots' transforms.
+    pub world_space: bool,
     capacity: u32,
     region_words: u32,
     max_pow2: u32,
@@ -612,6 +615,7 @@ impl BatchDraw {
         });
         BatchDraw {
             config,
+            world_space: false,
             capacity,
             region_words: batch.region_words(emitter),
             max_pow2,
@@ -650,6 +654,7 @@ impl BatchDraw {
             self.region_words,
             copies.len() as u32,
         );
+        self.scratch[41 * 4..42 * 4].copy_from_slice(&(self.world_space as u32).to_le_bytes());
         queue.write_buffer(&self.params, 0, &self.scratch);
         self.entry_bytes.clear();
         for c in copies {

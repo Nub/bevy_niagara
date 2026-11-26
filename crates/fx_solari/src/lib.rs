@@ -665,7 +665,9 @@ fn write_proxies(
 
         let mut words = [0u32; 52];
         let mut f = |i: usize, v: f32| words[i] = v.to_bits();
-        let m: Mat4 = world_from_local;
+        // World-space emitters (`local_space: false`) hold world positions.
+        let world_space = gpu.system.emitters.get(p.emitter).is_some_and(|e| !e.local_space);
+        let m: Mat4 = if world_space { Mat4::IDENTITY } else { world_from_local };
         for (i, v) in m.to_cols_array().iter().enumerate() {
             f(i, *v);
         }

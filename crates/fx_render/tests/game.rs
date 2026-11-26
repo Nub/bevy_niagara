@@ -21,7 +21,7 @@ use fx_render::{
 #[test]
 fn game_api() {
     let mut app = app();
-    let scenarios: [(&str, fn(&mut App)); 7] = [
+    let scenarios: [(&str, fn(&mut App)); 8] = [
         ("one-shot despawns, looping stays", one_shot_despawns_when_done_and_looping_stays),
         ("attached effect follows its parent", attached_effect_follows_its_parent),
         ("user parameters are typed", user_parameters_are_typed),
@@ -29,6 +29,7 @@ fn game_api() {
         ("scalability culls by distance and budget", scalability_culls_by_distance_and_budget),
         ("deactivate, reset and fire", deactivate_reset_and_fire),
         ("owner velocity drives Spawn Per Unit", owner_velocity_drives_spawn_per_unit),
+        ("world-space emitter leaves a trail", world_space_emitter_leaves_a_trail),
     ];
     for (name, run) in scenarios {
         eprintln!("scenario: {name}");
@@ -463,4 +464,47 @@ fn owner_velocity_drives_spawn_per_unit(app: &mut App) {
     }
     let v = app.world().get::<EffectControl>(child).unwrap().owner_velocity();
     assert!((v - Vec3::new(0.0, 0.0, -6.0)).length() < 1e-3, "attached velocity {v}");
+}
+
+/// A world-space emitter (`local_space: false`) on a moving entity leaves its
+/// particles where they were born: read back, they spread along the path in
+/// world coordinates (one per step, evenly), while the entity's transform is
+/// not in them.
+fn world_space_emitter_leaves_a_trail(app: &mut App) {
+    let sys = cook(
+        r#"(
+    name: "World trail",
+    emitters: [(
+        name: "T",
+        max_particles: 1000,
+        local_space: false,
+        emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(60.0) })],
+        particle_spawn: [(module: "Initialize Particle", inputs: { "Lifetime": Float(5.0), "Position": Vec3((0.0, 0.0, 1.0)) })],
+        particle_update: [(module: "Particle State")],
+        renderers: [Sprite(())],
+    )],
+)"#,
+    );
+    // Rotated 90° about Y: effect-space +Z is world +X.
+    let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    let e = spawn(app, (ParticleEffect::shared(sys, 9), Transform::from_rotation(rot).with_translation(Vec3::new(0.0, 2.0, 0.0))));
+    frames(app, 1);
+    for k in 1..=30 {
+        app.world_mut().get_mut::<Transform>(e).unwrap().translation.x = 0.05 * k as f32;
+        frames(app, 1);
+    }
+    let c = app.world().get::<EffectControl>(e).unwrap();
+    let prev = c.previous_world_from_local().expect("moving: a previous transform");
+    assert!((prev.translation.x - 1.45).abs() < 1e-4, "previous {:?}", prev.translation);
+    let device = app.world().resource::<bevy::render::renderer::RenderDevice>();
+    let queue = app.world().resource::<bevy::render::renderer::RenderQueue>();
+    let parts = render_effect(app, e, |g, _| g.read_particles(device.wgpu_device(), queue)).unwrap();
+    let xs: Vec<f32> = parts[0].iter().map(|p| p.position.x).collect();
+    assert!(xs.len() >= 25, "{} particles", xs.len());
+    for p in &parts[0] {
+        // Born 1 m along effect +Z (world +X) of the owner, at y = 2.
+        assert!((p.position.y - 2.0).abs() < 1e-4 && p.position.z.abs() < 1e-4, "{}", p.position);
+    }
+    let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    assert!(lo < 1.3 && hi > 2.4, "trail spread {lo}..{hi}");
 }

@@ -9,8 +9,21 @@
 //! fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.25,0.5,1,2] [--duration S]
 //!           [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey]
 //!           [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--no-mp4] [--test-scene]
-//!           [--orbit RADIUS,SECONDS]
+//!           [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--look default|ue] [--exposure EV] [--bloom I]
 //! ```
+//!
+//! `--look ue` matches Unreal's default look for side-by-side comparisons
+//! with Unreal footage: ACES filmic tonemapping (Unreal's tone curve is ACES
+//! based), bloom, and a dark floor with a 1 m grid (like the editor's
+//! showcase floors). `--exposure` shifts everything by stops (Unreal's
+//! exposure compensation), `--bloom` sets the bloom intensity.
+//!
+//! `--fly` moves the effect in a straight line, turned to face its velocity
+//! (local +X forward, Unreal's forward axis): projectile trails.
+//!
+//! `--also FILE@X,Y,Z` (repeatable) adds more effects to the scene at fixed
+//! positions: a lineup of a whole pack, as in a marketplace showcase. `--at`
+//! places the main effect.
 //!
 //! `--orbit` moves the effect on a horizontal circle around the origin (one
 //! turn per SECONDS of simulated time), so effects reading
@@ -29,6 +42,9 @@ use std::time::Duration;
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::camera::{Hdr, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::post_process::bloom::Bloom;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
@@ -56,11 +72,25 @@ struct Options {
     test_scene: bool,
     /// Moves the effect on a horizontal circle: (radius m, seconds per turn).
     orbit: Option<(f32, f32)>,
+    /// Flies the effect in a straight line at this velocity (m/s), turned to
+    /// face it (local +X forward), passing the origin halfway through.
+    fly: Option<Vec3>,
+    /// More effects drawn in the same scene at fixed positions (`--also`).
+    also: Vec<(PathBuf, Vec3)>,
+    /// Where the main effect sits (`--at`), added to `--orbit` and `--fly`.
+    at: Vec3,
     /// Vertical field of view in degrees (Bevy's default 45; Unreal's editor
     /// viewport is 90 horizontal).
     fov: f32,
     /// Height of the ground plane (metres).
     ground: f32,
+    /// `default` (Bevy's look) or `ue` (Unreal-like: ACES tonemap, bloom,
+    /// dark grid floor), for fair comparisons with Unreal footage.
+    look: String,
+    /// Exposure in stops (ColorGrading), applied to everything drawn.
+    exposure: f32,
+    /// Bloom intensity (`--look ue`; 0 turns it off).
+    bloom: f32,
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -91,8 +121,14 @@ fn parse_args() -> Result<Options, String> {
         mp4: true,
         test_scene: false,
         orbit: None,
+        fly: None,
+        also: Vec::new(),
+        at: Vec3::ZERO,
         fov: 45.0,
         ground: 0.0,
+        look: "default".into(),
+        exposure: 0.0,
+        bloom: 0.2,
     };
     let mut effect = None;
     while let Some(a) = args.next() {
@@ -119,8 +155,18 @@ fn parse_args() -> Result<Options, String> {
             "--ground" => o.ground = val()?.parse::<f32>().map_err(|e| format!("--ground: {e}"))?,
             "--fov" => o.fov = val()?.parse::<f32>().map_err(|e| format!("--fov: {e}"))?,
             "--target" => o.target = parse_vec3(&val()?)?,
+            "--look" => o.look = val()?,
+            "--exposure" => o.exposure = val()?.parse::<f32>().map_err(|e| format!("--exposure: {e}"))?,
+            "--bloom" => o.bloom = val()?.parse::<f32>().map_err(|e| format!("--bloom: {e}"))?,
             "--no-mp4" => o.mp4 = false,
             "--test-scene" => o.test_scene = true,
+            "--at" => o.at = parse_vec3(&val()?)?,
+            "--also" => {
+                let v = val()?;
+                let (f, p) = v.rsplit_once('@').ok_or("--also is FILE@X,Y,Z")?;
+                o.also.push((PathBuf::from(f), parse_vec3(p)?));
+            }
+            "--fly" => o.fly = Some(parse_vec3(&val()?)?),
             "--orbit" => {
                 let v = val()?;
                 let (r, t) = v.split_once(',').ok_or("--orbit is RADIUS,SECONDS")?;
@@ -143,12 +189,15 @@ fn parse_args() -> Result<Options, String> {
     if !["dark", "grey"].contains(&o.backdrop.as_str()) {
         return Err("--backdrop is dark or grey".into());
     }
+    if !["default", "ue"].contains(&o.look.as_str()) {
+        return Err("--look is default or ue".into());
+    }
     let last = o.times.iter().cloned().fold(0.0, f32::max);
     o.duration = o.duration.max(last);
     Ok(o)
 }
 
-const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS]";
+const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--look default|ue] [--exposure EV] [--bloom I] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--at X,Y,Z] [--also FILE@X,Y,Z ...]";
 
 fn main() -> ExitCode {
     let o = match parse_args() {
@@ -161,23 +210,23 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let checked = match fx_core::check_file(&o.effect) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("fxpreview: {}: {e}", o.effect.display());
-            return ExitCode::from(1);
+    // Textures and materials resolve next to each effect file: with `--also`,
+    // from the folder holding them all.
+    let files: Vec<&Path> = std::iter::once(o.effect.as_path()).chain(o.also.iter().map(|(f, _)| f.as_path())).collect();
+    let root = asset_root(&files);
+    let mut effects = Vec::new();
+    for (k, f) in files.iter().enumerate() {
+        match cook(f, &root) {
+            Ok(system) => {
+                let at = if k == 0 { None } else { Some(o.also[k - 1].1) };
+                effects.push((ParticleEffect::new(system, o.seed.wrapping_add(k as u32)), at));
+            }
+            Err(e) => {
+                eprintln!("fxpreview: {e}");
+                return ExitCode::from(1);
+            }
         }
-    };
-    for d in &checked.diagnostics {
-        eprintln!("{d}");
     }
-    let Some(system) = checked.cooked else {
-        eprintln!(
-            "fxpreview: {} has errors; nothing rendered",
-            o.effect.display()
-        );
-        return ExitCode::from(1);
-    };
 
     let frames = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let result = Arc::new(Mutex::new(None));
@@ -191,8 +240,7 @@ fn main() -> ExitCode {
                 ..default()
             })
             .set(AssetPlugin {
-                // Textures and materials resolve next to the effect file.
-                file_path: asset_root(&o.effect),
+                file_path: root.to_string_lossy().into_owned(),
                 ..default()
             })
             .disable::<PipelinedRenderingPlugin>()
@@ -205,7 +253,7 @@ fn main() -> ExitCode {
     .insert_resource(FxClock::manual(1.0 / SIM_HZ as f32))
     .insert_resource(Preview {
         o: o.clone(),
-        effect: Some(ParticleEffect::new(system, o.seed)),
+        effects,
         image: Handle::default(),
         frames: frames.clone(),
         n_frames,
@@ -243,7 +291,8 @@ enum Phase {
 #[derive(Resource)]
 struct Preview {
     o: Options,
-    effect: Option<ParticleEffect>,
+    /// The effects to spawn: the main one (None: at `effect_transform`), then `--also`.
+    effects: Vec<(ParticleEffect, Option<Vec3>)>,
     image: Handle<Image>,
     frames: Arc<Mutex<Vec<Vec<u8>>>>,
     n_frames: usize,
@@ -271,7 +320,9 @@ fn setup(
             Color::srgb(0.06, 0.06, 0.065),
         ),
     };
-    commands.spawn((
+    let ue = o.look == "ue";
+    let clear = if ue { Color::srgb(0.008, 0.009, 0.012) } else { clear };
+    let mut camera = commands.spawn((
         Camera3d::default(),
         Camera {
             clear_color: ClearColorConfig::Custom(clear),
@@ -284,24 +335,56 @@ fn setup(
         Projection::Perspective(PerspectiveProjection { fov: o.fov.to_radians(), ..default() }),
         Transform::from_translation(o.camera).looking_at(o.target, Vec3::Y),
     ));
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 30.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    if o.exposure != 0.0 {
+        camera.insert(ColorGrading {
+            global: ColorGradingGlobal {
+                exposure: o.exposure,
+                ..default()
+            },
+            ..default()
+        });
+    }
+    if ue {
+        // Unreal's filmic tone curve is fitted to ACES; its default bloom is
+        // a wide, soft glow around anything brighter than white.
+        camera.insert(Tonemapping::AcesFitted);
+        if o.bloom > 0.0 {
+            camera.insert(Bloom {
+                intensity: o.bloom,
+                ..Bloom::NATURAL
+            });
+        }
+    }
+    let floor = if ue {
+        StandardMaterial {
+            base_color_texture: Some(images.add(grid_image())),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(FLOOR_SIZE)),
+            perceptual_roughness: 0.85,
+            reflectance: 0.3,
+            ..default()
+        }
+    } else {
+        StandardMaterial {
             base_color: ground,
             perceptual_roughness: 0.9,
             ..default()
-        })),
+        }
+    };
+    let size = if ue { FLOOR_SIZE } else { 30.0 };
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(size, size))),
+        MeshMaterial3d(materials.add(floor)),
         Transform::from_xyz(0.0, o.ground, 0.0),
     ));
     commands.spawn((
         DirectionalLight {
-            illuminance: 3000.0,
+            illuminance: if ue { 800.0 } else { 3000.0 },
             ..default()
         },
         Transform::from_xyz(3.0, 6.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight {
-        brightness: 300.0,
+        brightness: if ue { 700.0 } else { 300.0 },
         ..default()
     });
     if o.test_scene {
@@ -327,8 +410,82 @@ fn setup(
             Transform::from_xyz(-0.9, 1.2, 1.4),
         ));
     }
-    let effect = preview.effect.take().unwrap();
-    commands.spawn((effect, PreviewEffect, orbit_transform(o.orbit, 0.0)));
+    for (effect, at) in std::mem::take(&mut preview.effects) {
+        match at {
+            None => commands.spawn((effect, PreviewEffect(o.at), offset(effect_transform(&o, 0.0), o.at))),
+            Some(p) => commands.spawn((effect, PreviewEffect(p), offset(effect_transform(&o, 0.0), p))),
+        };
+    }
+}
+
+/// Side of the `--look ue` floor (metres): one grid cell per metre.
+const FLOOR_SIZE: f32 = 80.0;
+
+/// One 1 m cell of the `--look ue` floor: dark tile, light border lines,
+/// with a full mip chain (box filtered) so the grid does not shimmer or
+/// moiré towards the horizon.
+fn grid_image() -> Image {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension};
+    const N: usize = 256;
+    let tile = [0.15f32, 0.155, 0.17];
+    let line = [0.7f32, 0.72, 0.78];
+    // Linear values, encoded to sRGB per mip.
+    let mut level: Vec<[f32; 3]> = (0..N * N)
+        .map(|i| {
+            let (x, y) = ((i % N) as f32 + 0.5, (i / N) as f32 + 0.5);
+            // Distance to the nearest cell edge in texels; ~5 texel (2 cm) lines.
+            let d = x.min(N as f32 - x).min(y).min(N as f32 - y);
+            let w = (1.0 - (d - 2.5).max(0.0)).clamp(0.0, 1.0);
+            let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+            [0, 1, 2].map(|k| lin(tile[k]) * (1.0 - w) + lin(line[k]) * w)
+        })
+        .collect();
+    let enc = |c: f32| {
+        let s = if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    };
+    let mut data = Vec::new();
+    let mut n = N;
+    let mut mips = 0;
+    loop {
+        for p in &level {
+            data.extend([enc(p[0]), enc(p[1]), enc(p[2]), 255]);
+        }
+        mips += 1;
+        if n == 1 {
+            break;
+        }
+        let h = n / 2;
+        level = (0..h * h)
+            .map(|i| {
+                let (x, y) = (i % h * 2, i / h * 2);
+                let at = |dx: usize, dy: usize| level[(y + dy) * n + x + dx];
+                [0, 1, 2].map(|k| (at(0, 0)[k] + at(1, 0)[k] + at(0, 1)[k] + at(1, 1)[k]) * 0.25)
+            })
+            .collect();
+        n = h;
+    }
+    let mut img = Image::new(
+        Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data[..N * N * 4].to_vec(),
+        TextureFormat::Rgba8UnormSrgb,
+        default(),
+    );
+    // Every mip, largest first (Image::new checks for the first only).
+    img.data = Some(data);
+    img.texture_descriptor.mip_level_count = mips;
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..default()
+    });
+    img
 }
 
 /// Draws each entity a Component renderer drives as a small cube in its
@@ -358,13 +515,25 @@ fn show_particle_components(
     }
 }
 
-/// The effect fxpreview renders.
+/// An effect fxpreview renders, at its `--also` offset (zero for the main one).
 #[derive(Component)]
-struct PreviewEffect;
+struct PreviewEffect(Vec3);
 
-/// Where `--orbit` puts the effect at simulated time `t`.
-fn orbit_transform(orbit: Option<(f32, f32)>, t: f32) -> Transform {
-    match orbit {
+/// `tr` moved by `p` (an `--also` position): extra effects move with `--orbit`
+/// and `--fly` too, keeping their place in the lineup.
+fn offset(tr: Transform, p: Vec3) -> Transform {
+    Transform { translation: tr.translation + p, ..tr }
+}
+
+/// Where `--orbit` or `--fly` puts the effect at simulated time `t`.
+fn effect_transform(o: &Options, t: f32) -> Transform {
+    if let Some(v) = o.fly {
+        let start = -v * o.duration * 0.5;
+        let dir = v.normalize_or(Vec3::X);
+        return Transform::from_translation(start + v * t)
+            .with_rotation(Quat::from_rotation_arc(Vec3::X, dir));
+    }
+    match o.orbit {
         Some((r, period)) => {
             let a = std::f32::consts::TAU * t / period;
             Transform::from_xyz(r * a.cos(), 0.0, r * a.sin())
@@ -376,7 +545,7 @@ fn orbit_transform(orbit: Option<(f32, f32)>, t: f32) -> Transform {
 fn drive(
     mut commands: Commands,
     mut preview: ResMut<Preview>,
-    mut effect: Query<&mut Transform, With<PreviewEffect>>,
+    mut effect: Query<(&mut Transform, &PreviewEffect)>,
     mut clock: ResMut<FxClock>,
     ready: Res<FxReady>,
     mut exit: MessageWriter<AppExit>,
@@ -404,8 +573,8 @@ fn drive(
                 clock.request_steps(steps_per_frame);
                 // The effect's position at the end of this frame's steps.
                 let t = (k * steps_per_frame as usize) as f32 / SIM_HZ as f32;
-                for mut tr in &mut effect {
-                    *tr = orbit_transform(preview.o.orbit, t);
+                for (mut tr, p) in &mut effect {
+                    *tr = offset(effect_transform(&preview.o, t), p.0);
                 }
                 preview.phase = Phase::Capturing(k + 1);
             } else {
@@ -522,13 +691,42 @@ fn write_outputs(o: &Options, frames: &[Vec<u8>]) -> Result<String, String> {
     Ok(msg)
 }
 
-/// The folder holding the effect file, absolute: its `texture` and
-/// `material` paths are relative to it.
-fn asset_root(effect: &Path) -> String {
-    let dir = effect.parent().unwrap_or(Path::new("."));
-    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    std::fs::canonicalize(dir)
-        .unwrap_or_else(|_| dir.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+/// The deepest folder holding every effect file, absolute (with one effect,
+/// its folder: its `texture` and `material` paths are relative to it).
+fn asset_root(effects: &[&Path]) -> PathBuf {
+    let dir = |e: &Path| {
+        let d = e.parent().unwrap_or(Path::new("."));
+        let d = if d.as_os_str().is_empty() { Path::new(".") } else { d };
+        std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf())
+    };
+    let mut root = dir(effects[0]);
+    for e in &effects[1..] {
+        let d = dir(e);
+        while !d.starts_with(&root) {
+            if !root.pop() {
+                break;
+            }
+        }
+    }
+    root
+}
+
+/// Checks and cooks an effect file. When it is not directly in `root`
+/// (`--also`), the paths of the assets `fximport convert` writes beside it
+/// (`"<stem>_assets/..."`) are made relative to `root`.
+fn cook(file: &Path, root: &Path) -> Result<fx_core::CookedSystem, String> {
+    let mut text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let dir = std::fs::canonicalize(file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if let Ok(rel) = dir.strip_prefix(root)
+        && !rel.as_os_str().is_empty()
+    {
+        let stem = file.file_name().and_then(|n| n.to_str()).unwrap_or("").trim_end_matches(".fx.ron");
+        text = text.replace(&format!("\"{stem}_assets/"), &format!("\"{}/{stem}_assets/", rel.display()));
+    }
+    let checked = fx_core::check_source(&file.display().to_string(), &text);
+    for d in &checked.diagnostics {
+        eprintln!("{d}");
+    }
+    checked.cooked.ok_or_else(|| format!("{} has errors; nothing rendered", file.display()))
 }

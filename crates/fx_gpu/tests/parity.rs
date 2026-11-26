@@ -445,6 +445,65 @@ const GAPS: &str = r#"(
     )],
 )"#;
 
+// World-space emitters (`local_space: false`): spawned particles move to world
+// space with the owner pose at their birth (interpolated through the step or
+// at its end), next to a local-space emitter. The owner moves and turns.
+const WORLD_SPACE: &str = r#"(
+    name: "World space",
+    emitters: [
+        (
+            name: "Interpolated",
+            max_particles: 2000,
+            local_space: false,
+            interpolated_spawning: true,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(237.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": RandomRange(Float(0.5), Float(1.5)), "Position": Vec3((0.2, 0.5, -0.3)) }),
+                (module: "Add Velocity", inputs: { "Velocity": RandomRange(Vec3((-1.0, 2.0, -1.0)), Vec3((1.0, 4.0, 1.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Solve Forces and Velocity"),
+            ],
+        ),
+        (
+            name: "At step end",
+            max_particles: 2000,
+            local_space: false,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(97.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.0), "Position": Vec3((1.0, 0.0, 0.0)) }),
+                (module: "Add Velocity", inputs: { "Velocity": Vec3((0.0, 0.0, 2.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Solve Forces and Velocity"),
+            ],
+        ),
+        (
+            name: "Local",
+            max_particles: 500,
+            emitter_update: [(module: "Spawn Rate", inputs: { "Spawn Rate": Float(50.0) })],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(1.0), "Position": Vec3((1.0, 0.0, 0.0)) }),
+            ],
+            particle_update: [(module: "Particle State")],
+        ),
+    ],
+)"#;
+
+/// Where the parity test's owner is at time `t`: flying, turning about a
+/// tilted axis and scaled.
+fn owner_at(t: f32) -> bevy_math::Affine3A {
+    let axis = bevy_math::Vec3::new(0.3, 1.0, 0.2).normalize();
+    bevy_math::Affine3A::from_scale_rotation_translation(
+        bevy_math::Vec3::new(1.2, 0.8, 1.0),
+        bevy_math::Quat::from_axis_angle(axis, 1.7 * t),
+        bevy_math::Vec3::new(4.0 * t, (2.0 * t).sin(), -1.5 * t),
+    )
+}
+
 #[test]
 fn material_parameters_2_3_widen_only_their_emitter() {
     let (device, _, _) = fx_gpu::headless_device().unwrap();
@@ -495,6 +554,9 @@ fn gpu_matches_cpu_reference() {
     let c = fx_core::check_source("interpolated.fx.ron", INTERPOLATED);
     let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
     systems.push(("interpolated spawning", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), 0));
+    let c = fx_core::check_source("world_space.fx.ron", WORLD_SPACE);
+    let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
+    systems.push(("world space", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), 0));
     let c = fx_core::check_source("batch2.fx.ron", BATCH2);
     let errs: Vec<String> = c.errors().map(|d| d.to_string()).collect();
     systems.push(("batch 2 extras", c.cooked.unwrap_or_else(|| panic!("{errs:?}")), WORDS_PER_PARTICLE_EXTENDED));
@@ -512,6 +574,9 @@ fn gpu_matches_cpu_reference() {
         // A moving owner, for Inherit Velocity.
         cpu.owner_velocity = bevy_math::Vec3::new(0.5, 0.25, -1.0);
         gpu.owner_velocity = cpu.owner_velocity.to_array();
+        // And a moving, turning owner, for world-space emitters.
+        cpu.teleport_owner(owner_at(0.0));
+        gpu.teleport_owner(owner_at(0.0));
         // Same per-instance value for `deterministic: false` emitters.
         gpu.nonce = cpu.nonce;
         // The CPU warms up inside its first step; the GPU before it.
@@ -524,6 +589,8 @@ fn gpu_matches_cpu_reference() {
         let mut most_alive = 0usize;
         // 3 seconds: bursts, steady spawning, deaths and the curl field.
         for step in 1..=180u32 {
+            cpu.move_owner(owner_at(step as f32 * DT));
+            gpu.move_owner(owner_at(step as f32 * DT));
             cpu.step(DT);
             let mut enc = device.create_command_encoder(&Default::default());
             gpu.step(&queue, &mut enc, DT);

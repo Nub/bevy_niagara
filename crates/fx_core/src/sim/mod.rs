@@ -15,8 +15,10 @@
 //! 4. new particles are created (capped at `max_particles`): first the
 //!    emitter stack's request, then `spawn_number` per event of each
 //!    SpawnedParticles handler, in handler and event order. They run the
-//!    Particle Spawn stack (and the handler's modules) and first update on
-//!    the next step.
+//!    Particle Spawn stack; a world-space emitter (`local_space: false`) then
+//!    moves them to world space with the owner pose at their birth
+//!    ([`OwnerPose`]); then the handler's modules run. They first update on
+//!    the next step (in this one with interpolated spawning).
 //!
 //! `Engine.Time` and the ages read during a step are their values at the
 //! start of the step.
@@ -344,6 +346,14 @@ pub struct Simulation {
     /// `Engine.Owner.Velocity`: the owning entity's velocity (m/s), set by
     /// the host; read by Inherit Velocity.
     pub owner_velocity: Vec3,
+    /// The owner's `world_from_local` at the end of the next step, set by
+    /// the host; world-space emitters (`local_space: false`) move new
+    /// particles to world space with it (see [`Simulation::move_owner`]).
+    pub owner_pose: OwnerPose,
+    /// The owner's `world_from_local` at the start of the next step: with
+    /// interpolated spawning, a particle born part way through the step
+    /// gets the pose lerped between this and [`Self::owner_pose`].
+    pub previous_owner_pose: OwnerPose,
     /// What SceneDepth and RayTraced collisions hit on the CPU (set by the host).
     pub colliders: Vec<Collider>,
     /// The camera the effect is seen from (Camera Query, Scene Depth), set by the host.
@@ -455,6 +465,8 @@ impl Simulation {
             time: 0.0,
             user,
             owner_velocity: Vec3::ZERO,
+            owner_pose: OwnerPose::IDENTITY,
+            previous_owner_pose: OwnerPose::IDENTITY,
             colliders: Vec::new(),
             camera: None,
             data,
@@ -462,6 +474,20 @@ impl Simulation {
             nonce: random_nonce(),
             warmed: false,
         }
+    }
+
+    /// The owner moved to `world_from_local` over the next step: the pose it
+    /// had becomes [`Self::previous_owner_pose`]. Call before each step (with
+    /// the same transform when the owner stands still).
+    pub fn move_owner(&mut self, world_from_local: bevy_math::Affine3A) {
+        self.previous_owner_pose = self.owner_pose;
+        self.owner_pose = OwnerPose::from_affine(world_from_local);
+    }
+
+    /// The owner jumped to `world_from_local`: no step interpolates from where it was.
+    pub fn teleport_owner(&mut self, world_from_local: bevy_math::Affine3A) {
+        self.owner_pose = OwnerPose::from_affine(world_from_local);
+        self.previous_owner_pose = self.owner_pose;
     }
 
     /// Sets a `User.` parameter. Returns false if it is not declared or the type differs.
@@ -561,9 +587,13 @@ impl Simulation {
         }
         self.warmed = true;
         let delta = self.system.warmup_tick_delta;
+        // The owner stands where it starts during the warm-up.
+        let previous = self.previous_owner_pose;
+        self.previous_owner_pose = self.owner_pose;
         for _ in 0..crate::lifecycle::warmup_steps(&self.system) {
             self.step_once(delta);
         }
+        self.previous_owner_pose = previous;
     }
 
     pub fn step(&mut self, dt: f32) {
@@ -692,6 +722,7 @@ impl Simulation {
         let n = spawn_count.min(room);
         room -= n;
         let mut spawned = n;
+        let poses = (!emitter.local_space).then_some((self.previous_owner_pose, self.owner_pose));
         // Interpolated spawning: the k-th of the n regular spawns was born
         // (n - k) / n of the way back through the step and runs Particle
         // Update over that part of it (events it writes are dropped).
@@ -702,6 +733,14 @@ impl Simulation {
             for (mi, m) in emitter.particle_spawn.iter().enumerate() {
                 let k = key(STAGE_PARTICLE_SPAWN, mi, p.unique_id, 0);
                 run_particle_module(m, &env, &mut p, k, &mut cx);
+            }
+            // World space: from effect space with the owner's pose at the
+            // particle's birth; event handlers then run in world space.
+            if let Some((from, to)) = &poses {
+                let kk = if h.is_some() { n } else { k };
+                let pose = from.lerp(to, spawn_fraction(emitter.interpolated_spawning, kk, n));
+                p.position = pose.transform_point(p.position);
+                p.velocity = pose.transform_vector(p.velocity);
             }
             if let Some((hi, ev)) = h {
                 let mut cx = ParticleCx {
@@ -1967,4 +2006,104 @@ pub fn param_type(r: ParamRef, sys: &CookedSystem) -> ValueType {
 /// same expression.
 pub fn spawn_step_dt(dt: f32, k: u32, n: u32) -> f32 {
     dt * ((n - k) as f32 / n as f32)
+}
+
+/// Where in a step of `n` regular spawns the `k`-th one is born, as a
+/// fraction of the step (0: its start, 1: its end), for the owner pose a
+/// world-space emitter moves it to: `k / n` with interpolated spawning
+/// (matching [`spawn_step_dt`]), else the end of the step (as are particles
+/// spawned by event handlers, `k >= n`). fx_gpu computes the same expression.
+pub fn spawn_fraction(interpolated: bool, k: u32, n: u32) -> f32 {
+    if interpolated && k < n {
+        k as f32 / n as f32
+    } else {
+        1.0
+    }
+}
+
+/// The owner's `world_from_local` transform as scale, rotation and
+/// translation (no shear), for world-space emitters (`local_space: false`):
+/// it moves a newly spawned particle from effect space to world space.
+/// fx_gpu's `sim_common.wgsl` mirrors [`OwnerPose::lerp`] and the transforms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnerPose {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+impl Default for OwnerPose {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl OwnerPose {
+    pub const IDENTITY: OwnerPose = OwnerPose {
+        translation: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+    };
+
+    /// The pose of `world_from_local` (shear is dropped).
+    pub fn from_affine(world_from_local: bevy_math::Affine3A) -> Self {
+        let (scale, rotation, translation) = world_from_local.to_scale_rotation_translation();
+        OwnerPose {
+            translation,
+            rotation: rotation.normalize(),
+            scale,
+        }
+    }
+
+    /// The pose of `world_from_local` (an affine matrix; shear is dropped).
+    pub fn from_mat4(world_from_local: bevy_math::Mat4) -> Self {
+        Self::from_affine(bevy_math::Affine3A::from_mat4(world_from_local))
+    }
+
+    pub fn to_affine(&self) -> bevy_math::Affine3A {
+        bevy_math::Affine3A::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+    }
+
+    /// From `self` (t = 0) to `to` (t = 1): translation and scale lerp,
+    /// rotation slerp (the shorter way).
+    pub fn lerp(&self, to: &OwnerPose, t: f32) -> OwnerPose {
+        if t <= 0.0 {
+            return *self;
+        }
+        if t >= 1.0 {
+            return *to;
+        }
+        OwnerPose {
+            translation: self.translation + (to.translation - self.translation) * t,
+            rotation: slerp(self.rotation, to.rotation, t),
+            scale: self.scale + (to.scale - self.scale) * t,
+        }
+    }
+
+    pub fn transform_point(&self, p: Vec3) -> Vec3 {
+        self.rotation * (p * self.scale) + self.translation
+    }
+
+    pub fn transform_vector(&self, v: Vec3) -> Vec3 {
+        self.rotation * (v * self.scale)
+    }
+}
+
+/// Spherical interpolation of unit quaternions, the shorter way (nlerp when
+/// nearly equal); `slerp_quat` in fx_gpu's `sim_common.wgsl` is the same.
+fn slerp(a: Quat, b: Quat, t: f32) -> Quat {
+    let (a, mut b) = (Vec4::from(a), Vec4::from(b));
+    let mut d = a.dot(b);
+    if d < 0.0 {
+        b = -b;
+        d = -d;
+    }
+    let v = if d > 0.9995 {
+        a + (b - a) * t
+    } else {
+        let theta = d.min(1.0).acos();
+        let s = theta.sin();
+        a * (((1.0 - t) * theta).sin() / s) + b * ((t * theta).sin() / s)
+    };
+    Quat::from_vec4(v.normalize())
 }

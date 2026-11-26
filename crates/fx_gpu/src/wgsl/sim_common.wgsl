@@ -37,6 +37,15 @@ struct Frame {
     grid_base: u32,
     slot: u32,                  // instance slot (scene, transforms)
     n_active: u32,              // instances stepped by this dispatch
+    // Owner poses of world-space emitters (fx_core::sim::OwnerPose) at the
+    // start (prev_*) and end (owner_*) of the step; translation and scale in
+    // xyz, rotation a quaternion (xyzw).
+    prev_translation: vec4<f32>,
+    prev_rotation: vec4<f32>,
+    prev_scale: vec4<f32>,
+    owner_translation: vec4<f32>,
+    owner_rotation: vec4<f32>,
+    owner_scale: vec4<f32>,
 }
 
 // One Frame per instance stepped (dynamic offset per step); `fr` is this
@@ -48,6 +57,46 @@ var<private> fr: Frame;
 
 fn load_frame(j: u32) {
     fr = frames[j];
+}
+
+// ---- world-space emitters (fx_core::sim::OwnerPose) ----
+
+// fx_core::sim's `slerp`: unit quaternions, the shorter way, nlerp when close.
+fn slerp_quat(a: vec4<f32>, b_in: vec4<f32>, t: f32) -> vec4<f32> {
+    var b = b_in;
+    var d = dot(a, b);
+    if (d < 0.0) {
+        b = -b;
+        d = -d;
+    }
+    var v: vec4<f32>;
+    if (d > 0.9995) {
+        v = a + (b - a) * t;
+    } else {
+        let theta = acos(min(d, 1.0));
+        let s = sin(theta);
+        v = a * (sin((1.0 - t) * theta) / s) + b * (sin(t * theta) / s);
+    }
+    return normalize(v);
+}
+
+// Moves a new particle from effect space to world space with the owner pose
+// `f` of the way through the step (OwnerPose::lerp, transform_point/vector).
+fn owner_to_world(f: f32, p: ptr<function, Particle>) {
+    var t = fr.owner_translation.xyz;
+    var r = fr.owner_rotation;
+    var s = fr.owner_scale.xyz;
+    if (f <= 0.0) {
+        t = fr.prev_translation.xyz;
+        r = fr.prev_rotation;
+        s = fr.prev_scale.xyz;
+    } else if (f < 1.0) {
+        t = fr.prev_translation.xyz + (t - fr.prev_translation.xyz) * f;
+        r = slerp_quat(fr.prev_rotation, r, f);
+        s = fr.prev_scale.xyz + (s - fr.prev_scale.xyz) * f;
+    }
+    (*p).position = quat_rotate(r, (*p).position * s) + t;
+    (*p).velocity = quat_rotate(r, (*p).velocity * s);
 }
 @group(0) @binding(3) var<storage, read_write> state: array<atomic<u32>>;
 // Indirect dispatch args: update at words 0..3, spawn at 4..7. Bound only to the
@@ -372,6 +421,7 @@ fn spawn(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) w
     grids_at_update();
     var p = new_particle(atomicLoad(&state[S_BASE_ID]) + k);
     spawn_particle(&p);
+    spawn_to_world(k, &p);
     spawn_event(k, &p);
     spawn_update(k, &p);
     if (p.alive) {

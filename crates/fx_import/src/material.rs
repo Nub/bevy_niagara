@@ -267,6 +267,14 @@ pub fn encode_png(img: &Image) -> Vec<u8> {
     out
 }
 
+fn srgb_to_linear(s: f32) -> f32 {
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 fn linear_to_srgb8(v: u8) -> u8 {
     let x = v as f32 / 255.0;
     let s = if x <= 0.003_130_8 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 };
@@ -378,10 +386,37 @@ pub struct Material {
     pub scalars: HashMap<String, f32>,
     pub vectors: HashMap<String, [f32; 4]>,
     pub textures: HashMap<String, String>,
+    /// Static switch parameter overrides (instances' `StaticSwitchParameters`).
+    pub switches: HashMap<String, bool>,
     /// The base material's package and its editor-only data export (the graph).
     pub base: Option<(Rc<Loaded>, usize)>,
     /// Parents that could not be loaded (the chain stops there).
     pub missing: Option<String>,
+    /// Material function packages the graph calls (directly or nested),
+    /// by package path (`/Game/A/MF_X`); engine functions are not on disk.
+    pub functions: HashMap<String, Rc<Loaded>>,
+}
+
+/// Loads the material functions `l`'s graph calls, and theirs, into `out`.
+fn load_functions(store: &mut Store, l: &Loaded, out: &mut HashMap<String, Rc<Loaded>>) {
+    for i in 0..l.pkg.exports.len() {
+        if l.pkg.export_class(i) != "MaterialExpressionMaterialFunctionCall" {
+            continue;
+        }
+        let Some(Value::Object(f)) = find(l.props(i), "MaterialFunction") else { continue };
+        if f.is_null() {
+            continue;
+        }
+        let path = l.path(*f);
+        let key = split_object_path(&path).0;
+        if out.contains_key(&key) {
+            continue;
+        }
+        if let Some(fl) = store.load(&path) {
+            out.insert(key, fl.clone());
+            load_functions(store, &fl, out);
+        }
+    }
 }
 
 fn param_name(v: &Value) -> Option<String> {
@@ -404,8 +439,10 @@ impl Material {
             scalars: HashMap::new(),
             vectors: HashMap::new(),
             textures: HashMap::new(),
+            switches: HashMap::new(),
             base: None,
             missing: None,
+            functions: HashMap::new(),
         };
         let mut path = object_path.to_string();
         let mut blend_override: Option<Blend> = None;
@@ -438,6 +475,7 @@ impl Material {
                 };
                 // Older packages keep the graph on the material itself.
                 m.base = Some((l.clone(), editor.unwrap_or(i)));
+                load_functions(store, &l, &mut m.functions);
                 return Ok(m);
             }
             // A material instance: its overrides win over its parents'.
@@ -457,6 +495,12 @@ impl Material {
                         m.textures.entry(n).or_insert(l.path(*t));
                     }
                 }
+            }
+            // Static switches: `StaticParameters` (UE4), `StaticParametersRuntime` (UE5).
+            let mut switches = Vec::new();
+            static_switches(&props, &mut switches);
+            for (n, on) in switches {
+                m.switches.entry(n).or_insert(on);
             }
             if let Some(o) = find(&props, "BasePropertyOverrides") {
                 let flag = |n: &str| matches!(o.field(n), Some(Value::Bool(true)));
@@ -494,6 +538,29 @@ impl Material {
     /// Short name of the instance (last path element).
     pub fn name(&self) -> String {
         self.chain.first().map(|p| split_object_path(p).1).unwrap_or_default()
+    }
+}
+
+/// Overridden static switch parameters (name, value) found anywhere in a
+/// material instance's properties (`StaticSwitchParameters` arrays).
+fn static_switches(props: &[Property], out: &mut Vec<(String, bool)>) {
+    fn walk(v: &Value, out: &mut Vec<(String, bool)>) {
+        match v {
+            Value::Struct { fields, .. } => static_switches(fields, out),
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    for p in props {
+        if p.name == "StaticSwitchParameters" {
+            for s in arr(Some(&p.value)) {
+                if let (Some(n), Some(Value::Bool(true))) = (param_name(s), s.field("bOverride")) {
+                    out.push((n, matches!(s.field("Value"), Some(Value::Bool(true)))));
+                }
+            }
+        } else {
+            walk(&p.value, out);
+        }
     }
 }
 
@@ -588,19 +655,246 @@ fn pair(a: &V, b: &V) -> (V, V, u8) {
     }
 }
 
+/// A graph being translated: the material's own (frame 0), or a material
+/// function's, inlined for one call node of its parent frame.
+struct Frame<'a> {
+    l: &'a Loaded,
+    /// (parent frame, the MaterialFunctionCall export in it).
+    call: Option<(usize, usize)>,
+}
+
+/// Nested material function calls deeper than this are not inlined.
+const MAX_FUNCTION_DEPTH: usize = 16;
+
 struct Gen<'a> {
+    /// The current frame's package.
     l: &'a Loaded,
     m: &'a Material,
     needs: &'a Needs,
     lines: Vec<String>,
-    done: HashMap<usize, V>,
+    /// Emitted values by (frame, export * 8 + output).
+    done: HashMap<(usize, usize), V>,
     textures: Vec<String>,
     notes: BTreeMap<String, ()>,
     dynamic_read: [bool; 4],
     depth: usize,
+    frames: Vec<Frame<'a>>,
+    cur: usize,
+    /// Frame of each inlined call: (parent frame, call export) -> frame.
+    call_frames: HashMap<(usize, usize), usize>,
+}
+
+/// Unreal's component count for a function input type (None: not a float vector).
+fn input_type_width(t: Option<&str>) -> Option<u8> {
+    match t.unwrap_or("FunctionInput_Vector3") {
+        "FunctionInput_Scalar" => Some(1),
+        "FunctionInput_Vector2" => Some(2),
+        "FunctionInput_Vector3" => Some(3),
+        "FunctionInput_Vector4" => Some(4),
+        _ => None,
+    }
 }
 
 impl<'a> Gen<'a> {
+    /// Runs `op` with frame `f` current.
+    fn in_frame<T>(&mut self, f: usize, op: impl FnOnce(&mut Self) -> T) -> T {
+        let (l, cur) = (self.l, self.cur);
+        self.l = self.frames[f].l;
+        self.cur = f;
+        let r = op(self);
+        self.l = l;
+        self.cur = cur;
+        r
+    }
+
+    /// How many function calls deep frame `f` is.
+    fn frame_depth(&self, mut f: usize) -> usize {
+        let mut n = 0;
+        while let Some((p, _)) = self.frames[f].call {
+            f = p;
+            n += 1;
+        }
+        n
+    }
+
+    /// The entry of the current frame's call node feeding Function Input `e`
+    /// (matched by input Id, else by name), with the parent frame.
+    fn call_input_of(&self, e: usize) -> Option<(usize, &'a Value)> {
+        let (parent, call) = self.frames[self.cur].call?;
+        let p = self.props(e);
+        let id = find(p, "Id");
+        let name = find(p, "InputName").and_then(|n| n.as_str()).unwrap_or("In");
+        let entries = arr(find(self.frames[parent].l.props(call), "FunctionInputs"));
+        let entry = entries
+            .iter()
+            .find(|i| id.is_some() && i.field("ExpressionInputId") == id)
+            .or_else(|| entries.iter().find(|i| i.field("Input").and_then(|x| x.field("InputName")).and_then(|n| n.as_str()) == Some(name)))?;
+        let inp = entry.field("Input")?;
+        matches!(inp.field("Expression"), Some(Value::Object(x)) if x.export().is_some()).then_some((parent, inp))
+    }
+
+    /// A Function Input's value: the call's connected input, else the
+    /// input's preview (connected Preview, else PreviewValue), as its type.
+    fn function_input(&mut self, e: usize) -> V {
+        let p = self.props(e);
+        let width = input_type_width(enum_tail(find(p, "InputType")).as_deref());
+        let val = match self.call_input_of(e) {
+            Some((parent, inp)) => self.in_frame(parent, |g| g.link(inp)),
+            None => None,
+        };
+        let val = match val {
+            Some(x) => x,
+            None => {
+                let name = find(p, "InputName").and_then(|n| n.as_str()).unwrap_or("In").to_string();
+                if self.frames[self.cur].call.is_some() && !matches!(find(p, "bUsePreviewValueAsDefault"), Some(Value::Bool(true))) {
+                    self.note(format!("material function input {name}: required but not connected (its preview value is used)"));
+                }
+                match self.input(e, "Preview") {
+                    Some(x) => x,
+                    None => {
+                        let c = find(p, "PreviewValue");
+                        let c = |n: &str| c.and_then(|c| c.field(n)).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                        let c = [c("X"), c("Y"), c("Z"), c("W")];
+                        match width.unwrap_or(1) {
+                            1 => v(lit(c[0]), 1),
+                            n => v(format!("{}({})", ty(n), c[..n as usize].iter().map(|x| lit(*x)).collect::<Vec<_>>().join(", ")), n),
+                        }
+                    }
+                }
+            }
+        };
+        match width {
+            Some(n) => cast(&val, n),
+            None => val,
+        }
+    }
+
+    /// A call's argument by input name (connected inputs only).
+    fn call_arg(&mut self, e: usize, name: &str) -> Option<V> {
+        let inp = arr(find(self.props(e), "FunctionInputs"))
+            .iter()
+            .filter_map(|i| i.field("Input"))
+            .find(|i| i.field("InputName").and_then(|n| n.as_str()) == Some(name))?;
+        self.link(inp)
+    }
+
+    /// A call's static bool argument by input name (None when unconnected).
+    fn call_static_bool(&mut self, e: usize, name: &str) -> Option<bool> {
+        let inp = arr(find(self.props(e), "FunctionInputs"))
+            .iter()
+            .filter_map(|i| i.field("Input"))
+            .find(|i| i.field("InputName").and_then(|n| n.as_str()) == Some(name))?;
+        match inp.field("Expression") {
+            Some(Value::Object(x)) => Some(self.static_bool(x.export()?)),
+            _ => None,
+        }
+    }
+
+    /// Output `out` of a Material Function Call: the function's graph
+    /// inlined when its package is loaded, else a built-in engine function.
+    fn function_call(&mut self, e: usize, out: usize) -> V {
+        let p = self.props(e);
+        let path = match find(p, "MaterialFunction") {
+            Some(Value::Object(i)) if !i.is_null() => self.l.path(*i),
+            _ => String::new(),
+        };
+        let (pkg, fname) = split_object_path(&path);
+        let fname = if fname.is_empty() { "?".to_string() } else { fname };
+        let outputs = arr(find(p, "FunctionOutputs"));
+        let out_id = outputs.get(out).and_then(|o| o.field("ExpressionOutputId"));
+        let out_name = outputs.get(out).and_then(|o| o.field("Output")).and_then(|o| o.field("OutputName")).and_then(|n| n.as_str()).unwrap_or("").to_string();
+        if let Some(fl) = self.m.functions.get(&pkg) {
+            let fl: &'a Loaded = fl;
+            if self.frame_depth(self.cur) >= MAX_FUNCTION_DEPTH {
+                self.note(format!("material function {fname}: nested too deep (taken as 1)"));
+                return v("1.0", 1);
+            }
+            let outs: Vec<usize> = (0..fl.pkg.exports.len()).filter(|&i| fl.pkg.export_class(i) == "MaterialExpressionFunctionOutput").collect();
+            let oname = |o: usize| find(fl.props(o), "OutputName").and_then(|n| n.as_str()).unwrap_or("Result");
+            let pick = outs
+                .iter()
+                .copied()
+                .find(|&o| out_id.is_some() && find(fl.props(o), "Id") == out_id)
+                .or_else(|| outs.iter().copied().find(|&o| !out_name.is_empty() && oname(o) == out_name))
+                .or_else(|| {
+                    // Unreal's order: SortPriority, then the export order.
+                    let mut s = outs.clone();
+                    s.sort_by_key(|&o| (find(fl.props(o), "SortPriority").and_then(|x| x.as_f64()).unwrap_or(0.0) as i64, o));
+                    s.get(out).copied()
+                });
+            let Some(pick) = pick else {
+                self.note(format!("material function {fname}: output {out} not found (taken as 1)"));
+                return v("1.0", 1);
+            };
+            let frame = match self.call_frames.get(&(self.cur, e)) {
+                Some(&f) => f,
+                None => {
+                    self.frames.push(Frame { l: fl, call: Some((self.cur, e)) });
+                    let f = self.frames.len() - 1;
+                    self.call_frames.insert((self.cur, e), f);
+                    f
+                }
+            };
+            return match self.in_frame(frame, |g| g.input(pick, "A")) {
+                Some(x) => x,
+                None => {
+                    self.note(format!("material function {fname}: output {} is not connected (taken as 0)", oname(pick)));
+                    v("0.0", 1)
+                }
+            };
+        }
+        match self.builtin_function(e, &fname, &out_name) {
+            Some(x) => x,
+            None => {
+                let why = if pkg.starts_with("/Engine/") { "not translated" } else { "package not found, not translated" };
+                self.note(format!("material function {fname}: {why} (taken as 1)"));
+                v("1.0", 1)
+            }
+        }
+    }
+
+    /// Engine material functions (not on disk), by their documented graphs.
+    fn builtin_function(&mut self, e: usize, name: &str, out_name: &str) -> Option<V> {
+        let arg = |g: &mut Self, n: &str, d: V, width: u8| cast(&g.call_arg(e, n).unwrap_or(d), width);
+        Some(match name {
+            // Rotates UVs about the centre by angle (0-1) turns.
+            "CustomRotator" => {
+                let uv = arg(self, "UVs", v("in.uv0", 2), 2);
+                let c = arg(self, "Rotation Center", v("vec2<f32>(0.5, 0.5)", 2), 2);
+                let a = arg(self, "Rotation Angle (0-1)", v("0.0", 1), 1);
+                v(format!("rotate_uv({}, {}, {} * {})", uv.code, c.code, a.code, lit(std::f32::consts::TAU)), 2)
+            }
+            // 1 at the centre falling to 0 at Radius, with ExponentialDensity
+            // (1 - exp(-depth * density)) shaping the edge.
+            "RadialGradientExponential" => {
+                let uv = arg(self, "UVs", v("in.uv0", 2), 2);
+                let c = arg(self, "CenterPosition", v("vec2<f32>(0.5, 0.5)", 2), 2);
+                let r = arg(self, "Radius", v("0.5", 1), 1);
+                let d = arg(self, "Density", v("2.25", 1), 1);
+                let invert = self.call_static_bool(e, "Invert Density").unwrap_or(false);
+                let g = format!("(1.0 - exp(-saturate(1.0 - distance({}, {}) / ({})) * ({})))", uv.code, c.code, r.code, d.code);
+                v(if invert { format!("(1.0 - {g})") } else { g }, 1)
+            }
+            "CheapContrast" => {
+                let x = arg(self, "In", v("0.0", 1), 1);
+                let k = arg(self, "Contrast", v("0.0", 1), 1);
+                v(format!("saturate(mix(0.0 - ({0}), 1.0 + ({0}), {1}))", k.code, x.code), 1)
+            }
+            "MakeFloat2" | "MakeFloat3" | "MakeFloat4" => {
+                let n = name.as_bytes()[9] - b'0';
+                let parts: Vec<String> = ["X", "Y", "Z", "W"][..n as usize].iter().map(|c| arg(self, c, v("0.0", 1), 1).code).collect();
+                v(format!("{}({})", ty(n), parts.join(", ")), n)
+            }
+            "BreakOutFloat2Components" | "BreakOutFloat3Components" | "BreakOutFloat4Components" => {
+                let n = name.as_bytes()[13] - b'0';
+                let x = arg(self, &format!("Float{n}"), v("0.0", 1), n);
+                let k = ["R", "G", "B", "A"].iter().position(|c| *c == out_name)?;
+                let x = self.expr_inline(x);
+                v(format!("{}.{}", x.code, &"xyzw"[k..k + 1]), 1)
+            }
+            _ => return None,
+        })
+    }
     fn note(&mut self, s: impl Into<String>) {
         self.notes.insert(s.into(), ());
     }
@@ -665,15 +959,17 @@ impl<'a> Gen<'a> {
     /// Expression `e`'s value (output `out` for multi-output nodes without a
     /// mask), emitted once as a `let`.
     fn expr(&mut self, e: usize, out: usize) -> V {
-        let key = e * 8 + out.min(7);
+        let key = (self.cur, e * 8 + out.min(7));
         if let Some(x) = self.done.get(&key) {
             return x.clone();
         }
         self.depth += 1;
         let val = if self.depth > 200 { v("0.0", 1) } else { self.eval(e, out) };
         self.depth -= 1;
-        let name = format!("e{e}_{out}");
+        let name = if self.cur == 0 { format!("e{e}_{out}") } else { format!("f{}_e{e}_{out}", self.cur) };
         let simple = val.code.parse::<f32>().is_ok() || val.code.starts_with("in.") && !val.code.contains(' ');
+        // Another value's name (a reroute, a function input or output) is not bound again.
+        let simple = simple || val.code.starts_with(|c: char| c.is_ascii_alphabetic()) && val.code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         let res = if simple {
             val
         } else {
@@ -682,6 +978,101 @@ impl<'a> Gen<'a> {
         };
         self.done.insert(key, res.clone());
         res
+    }
+
+    /// A static switch's or static bool's value: an instance's override of
+    /// the parameter, the bool wired into a plain Static Switch's `Value`,
+    /// else the node's default.
+    fn static_bool(&mut self, e: usize) -> bool {
+        let class = self.l.pkg.export_class(e);
+        let p = self.props(e);
+        let default = matches!(find(p, "DefaultValue"), Some(Value::Bool(true)));
+        match class.strip_prefix("MaterialExpression").unwrap_or(&class) {
+            "StaticBool" => matches!(find(p, "Value"), Some(Value::Bool(true))),
+            "StaticBoolParameter" | "StaticSwitchParameter" => {
+                let name = find(p, "ParameterName").and_then(|v| v.as_str()).unwrap_or("");
+                self.m.switches.get(name).copied().unwrap_or(default)
+            }
+            "StaticSwitch" => match find(p, "Value").and_then(|i| i.field("Expression")) {
+                Some(Value::Object(x)) if x.export().is_some() && self.depth < 200 => {
+                    self.depth += 1;
+                    let r = self.static_bool(x.export().unwrap());
+                    self.depth -= 1;
+                    r
+                }
+                _ => default,
+            },
+            "Reroute" | "NamedRerouteDeclaration" => match find(p, "Input").and_then(|i| i.field("Expression")) {
+                Some(Value::Object(x)) if x.export().is_some() && self.depth < 200 => {
+                    self.depth += 1;
+                    let r = self.static_bool(x.export().unwrap());
+                    self.depth -= 1;
+                    r
+                }
+                _ => false,
+            },
+            "FunctionInput" => {
+                if self.depth >= 200 {
+                    return false;
+                }
+                self.depth += 1;
+                let r = match self.call_input_of(e) {
+                    Some((parent, inp)) => match inp.field("Expression") {
+                        Some(Value::Object(x)) => self.in_frame(parent, |g| g.static_bool(x.export().unwrap())),
+                        _ => false,
+                    },
+                    None => match find(p, "Preview").and_then(|i| i.field("Expression")) {
+                        Some(Value::Object(x)) if x.export().is_some() => self.static_bool(x.export().unwrap()),
+                        _ => find(p, "PreviewValue").and_then(|c| c.field("X")).and_then(|x| x.as_f64()).unwrap_or(0.0) != 0.0,
+                    },
+                };
+                self.depth -= 1;
+                r
+            }
+            _ => default,
+        }
+    }
+
+    /// The texture an expression samples: its own, an instance's override of
+    /// its parameter, or that of a texture object (parameter) wired into it.
+    fn texture_of(&mut self, e: usize) -> Option<String> {
+        let class = self.l.pkg.export_class(e);
+        let p = self.props(e);
+        if class == "MaterialExpressionFunctionInput" && self.depth < 200 {
+            self.depth += 1;
+            let r = match self.call_input_of(e) {
+                Some((parent, inp)) => match inp.field("Expression") {
+                    Some(Value::Object(x)) => self.in_frame(parent, |g| g.texture_of(x.export().unwrap())),
+                    _ => None,
+                },
+                None => match find(p, "Preview").and_then(|i| i.field("Expression")) {
+                    Some(Value::Object(x)) if x.export().is_some() => self.texture_of(x.export().unwrap()),
+                    _ => None,
+                },
+            };
+            self.depth -= 1;
+            return r;
+        }
+        if let Some(obj) = find(p, "TextureObject").and_then(|i| match i.field("Expression") {
+            Some(Value::Object(x)) => x.export(),
+            _ => None,
+        }) {
+            if obj != e {
+                if let Some(t) = self.texture_of(obj) {
+                    return Some(t);
+                }
+            }
+        }
+        if class.ends_with("Parameter2D") || class.ends_with("TextureObjectParameter") || class.ends_with("ParameterSubUV") {
+            let name = find(p, "ParameterName").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(t) = self.m.textures.get(name) {
+                return Some(t.clone());
+            }
+        }
+        match find(p, "Texture") {
+            Some(Value::Object(t)) if !t.is_null() => Some(self.l.path(*t)),
+            _ => None,
+        }
     }
 
     fn sample(&mut self, slot: usize, uv: &V) -> V {
@@ -713,7 +1104,7 @@ impl<'a> Gen<'a> {
             }
             "VectorParameter" => {
                 let name = find(p, "ParameterName").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let c = self.m.vectors.get(&name).copied().or_else(|| color_prop("DefaultValue")).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                let c = self.m.vectors.get(&name).copied().or_else(|| color_prop("DefaultValue")).unwrap_or([0.0; 4]);
                 let full = v(format!("vec4<f32>({}, {}, {}, {})", lit(c[0]), lit(c[1]), lit(c[2]), lit(c[3])), 4);
                 match out {
                     1..=4 => v(lit(c[out - 1]), 1),
@@ -721,11 +1112,10 @@ impl<'a> Gen<'a> {
                 }
             }
             "StaticBoolParameter" | "StaticSwitchParameter" | "StaticSwitch" => {
-                let on = matches!(find(p, "DefaultValue"), Some(Value::Bool(true)));
+                let on = self.static_bool(e);
                 if class == "StaticBoolParameter" {
                     return v(if on { "1.0" } else { "0.0" }, 1);
                 }
-                self.note("static switches use their default values");
                 let pick = if on { "A" } else { "B" };
                 self.input(e, pick).unwrap_or(v("0.0", 1))
             }
@@ -738,11 +1128,12 @@ impl<'a> Gen<'a> {
                 }
             }
             "Time" => {
+                // The period applies only with bOverride_Period (0 then reads 0).
                 let period = fprop("Period", 0.0);
-                if period > 0.0 {
-                    v(format!("(globals.time % {})", lit(period)), 1)
-                } else {
-                    v("globals.time", 1)
+                match find(p, "bOverride_Period") {
+                    Some(Value::Bool(true)) if period > 0.0 => v(format!("(globals.time % {})", lit(period)), 1),
+                    Some(Value::Bool(true)) => v("0.0", 1),
+                    _ => v("globals.time", 1),
                 }
             }
             "Panner" => {
@@ -752,12 +1143,12 @@ impl<'a> Gen<'a> {
                     Some(s) => cast(&s, 2),
                     None => v(format!("vec2<f32>({}, {})", lit(fprop("SpeedX", 0.0)), lit(fprop("SpeedY", 0.0))), 2),
                 };
-                let r = format!("{} + {} * {}", cast(&coord, 2).code, speed.code, cast(&time, 1).code);
+                // Unreal takes the fractional part of the offset only.
+                let mut offset = format!("{} * {}", speed.code, cast(&time, 1).code);
                 if matches!(find(p, "bFractionalPart"), Some(Value::Bool(true))) {
-                    v(format!("fract({r})"), 2)
-                } else {
-                    v(r, 2)
+                    offset = format!("fract({offset})");
                 }
+                v(format!("{} + {offset}", cast(&coord, 2).code), 2)
             }
             "Rotator" => {
                 let coord = self.input(e, "Coordinate").unwrap_or(v("in.uv0", 2));
@@ -776,39 +1167,25 @@ impl<'a> Gen<'a> {
                 )
             }
             "TextureSample" | "TextureSampleParameter2D" | "TextureObject" | "TextureObjectParameter" | "ParticleSubUV" => {
-                let mut tex = match find(p, "Texture") {
-                    Some(Value::Object(t)) if !t.is_null() => Some(self.l.path(*t)),
-                    _ => None,
-                };
-                if class.ends_with("Parameter2D") || class == "TextureObjectParameter" {
-                    let name = find(p, "ParameterName").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    if let Some(t) = self.m.textures.get(&name) {
-                        tex = Some(t.clone());
-                    }
-                }
-                // A texture object wired into the sampler wins.
-                if let Some(Value::Struct { .. }) = find(p, "TextureObject") {
-                    if let Some(obj) = find(p, "TextureObject").and_then(|i| match i.field("Expression") {
-                        Some(Value::Object(x)) => x.export(),
-                        _ => None,
-                    }) {
-                        let op = self.props(obj);
-                        if let Some(Value::Object(t)) = find(op, "Texture") {
-                            if !t.is_null() {
-                                tex = Some(self.l.path(*t));
-                            }
-                        }
-                    }
-                }
+                // A texture object (parameter) wired into the sampler wins.
+                let tex = self.texture_of(e);
                 if class.starts_with("TextureObject") {
                     return v("0.0", 1); // only meaningful through a sampler
                 }
-                let Some(tex) = tex else {
+                // Sampled once for all its outputs (kept under slot 7).
+                if let Some(full) = self.done.get(&(self.cur, e * 8 + 7)).cloned() {
+                    return match out {
+                        0 => v(format!("{}.xyz", full.code), 3),
+                        1..=4 => v(format!("{}.{}", full.code, &"xyzw"[out - 1..out]), 1),
+                        _ => full,
+                    };
+                }
+                let slot = tex.map(|t| self.texture_slot(t));
+                let full = if slot.is_none() {
                     self.note("a texture sampler without a texture samples white");
-                    return v("vec4<f32>(1.0)", 4);
-                };
-                let slot = self.texture_slot(tex);
-                let full = if class == "ParticleSubUV" {
+                    v("vec4<f32>(1.0)", 4)
+                } else if class == "ParticleSubUV" {
+                    let slot = slot.unwrap();
                     let a = self.sample(slot, &v("in.uv0", 2));
                     let b = self.sample(slot, &v("in.uv1", 2));
                     if matches!(find(p, "bBlend"), Some(Value::Bool(true))) {
@@ -818,10 +1195,28 @@ impl<'a> Gen<'a> {
                     }
                 } else {
                     let uv = self.input(e, "Coordinates").unwrap_or(v("in.uv0", 2));
-                    self.sample(slot, &uv)
+                    self.sample(slot.unwrap(), &uv)
+                };
+                // The sampler type's lookup post-processing (grayscale
+                // textures are single channel on the GPU: R, alpha 1; normal
+                // maps unpack to -1..1 with Z rebuilt).
+                let full = match enum_tail(find(p, "SamplerType")).as_deref() {
+                    Some("SAMPLERTYPE_Grayscale" | "SAMPLERTYPE_LinearGrayscale") => {
+                        let t = self.expr_inline(full);
+                        v(format!("vec4<f32>({0}.x, {0}.x, {0}.x, 1.0)", t.code), 4)
+                    }
+                    Some("SAMPLERTYPE_Normal") => {
+                        let t = self.expr_inline(full);
+                        let xy = format!("({}.xy * 2.0 - 1.0)", t.code);
+                        v(format!("vec4<f32>({xy}, sqrt(saturate(1.0 - dot({xy}, {xy}))), 1.0)"), 4)
+                    }
+                    _ => full,
                 };
                 let full = self.expr_inline(full);
+                self.done.insert((self.cur, e * 8 + 7), full.clone());
+                // Outputs: RGB, R, G, B, A, RGBA.
                 match out {
+                    0 => v(format!("{}.xyz", full.code), 3),
                     1 => v(format!("{}.x", full.code), 1),
                     2 => v(format!("{}.y", full.code), 1),
                     3 => v(format!("{}.z", full.code), 1),
@@ -831,11 +1226,10 @@ impl<'a> Gen<'a> {
             }
             "Multiply" | "Add" | "Subtract" | "Divide" | "Max" | "Min" => {
                 let (ca, cb) = match class.as_str() {
-                    "Multiply" => (0.0, 1.0),
-                    "Add" => (0.0, 1.0),
                     "Subtract" => (1.0, 1.0),
                     "Divide" => (1.0, 2.0),
-                    _ => (0.0, 0.0),
+                    // Multiply, Add, Max, Min.
+                    _ => (0.0, 1.0),
                 };
                 let a = self.input_or(e, "A", "ConstA", ca);
                 let b = self.input_or(e, "B", "ConstB", cb);
@@ -903,8 +1297,11 @@ impl<'a> Gen<'a> {
                 let a = self.input_or(e, "A", "ConstA", 0.0);
                 let b = self.input_or(e, "B", "ConstB", 1.0);
                 let t = self.input_or(e, "Alpha", "ConstAlpha", 0.5);
+                // Unreal broadcasts all three to the widest (a scalar A and B
+                // with a vector Alpha give a vector).
                 let (a, b, n) = pair(&a, &b);
-                let t = if t.n == 1 { t } else { cast(&t, n) };
+                let (a, t, n) = if t.n == 1 { (a, t, n) } else { pair(&a, &t) };
+                let b = cast(&b, n);
                 v(format!("mix({}, {}, {})", a.code, b.code, t.code), n)
             }
             "ComponentMask" => {
@@ -1042,26 +1439,23 @@ impl<'a> Gen<'a> {
                 let gt = self.input(e, "AGreaterThanB").unwrap_or(v("0.0", 1));
                 let eq = self.input(e, "AEqualsB");
                 let lt = self.input(e, "ALessThanB").unwrap_or(v("0.0", 1));
-                let n = gt.n.max(lt.n);
+                let n = gt.n.max(lt.n).max(eq.as_ref().map_or(1, |q| q.n));
                 let (gt, lt) = (cast(&gt, n), cast(&lt, n));
-                let ge = match eq {
-                    Some(q) => v(format!("select({}, {}, {} == {})", gt.code, cast(&q, n).code, a.code, b.code), n),
-                    None => gt,
-                };
-                v(format!("select({}, {}, {} >= {})", lt.code, ge.code, a.code, b.code), n)
-            }
-            other => {
-                let what = match other {
-                    "MaterialFunctionCall" => {
-                        let f = match find(p, "MaterialFunction") {
-                            Some(Value::Object(i)) => split_object_path(&self.l.path(*i)).1,
-                            _ => "?".into(),
-                        };
-                        format!("material function {f}")
+                let order = v(format!("select({}, {}, {} >= {})", lt.code, gt.code, a.code, b.code), n);
+                // Within EqualsThreshold of each other A and B count as equal.
+                match eq {
+                    Some(q) => {
+                        let thr = lit(fprop("EqualsThreshold", 0.00001));
+                        v(format!("select({}, {}, abs({} - {}) <= {thr})", order.code, cast(&q, n).code, a.code, b.code), n)
                     }
-                    o => o.to_string(),
-                };
-                self.note(format!("{what}: not translated (taken as 1)"));
+                    None => order,
+                }
+            }
+            "MaterialFunctionCall" => self.function_call(e, out),
+            "FunctionInput" => self.function_input(e),
+            "FunctionOutput" => self.input(e, "A").unwrap_or(v("0.0", 1)),
+            other => {
+                self.note(format!("{other}: not translated (taken as 1)"));
                 v("1.0", 1)
             }
         }
@@ -1085,7 +1479,8 @@ impl<'a> Gen<'a> {
             return match inp.field("Constant") {
                 Some(Value::Float(x)) => Some(v(lit(*x), 1)),
                 Some(c @ Value::Struct { .. }) if c.field("R").is_some() => {
-                    let b = |n: &str| c.field(n).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32 / 255.0;
+                    // An FColor: sRGB-encoded (Unreal linearizes it).
+                    let b = |n: &str| srgb_to_linear(c.field(n).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32 / 255.0);
                     Some(v(format!("vec3<f32>({}, {}, {})", lit(b("R")), lit(b("G")), lit(b("B"))), 3))
                 }
                 _ => None,
@@ -1108,6 +1503,9 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
         notes: BTreeMap::new(),
         dynamic_read: [false; 4],
         depth: 0,
+        frames: vec![Frame { l, call: None }],
+        cur: 0,
+        call_frames: HashMap::new(),
     };
     let emissive = g.material_input(*editor, "EmissiveColor").map(|x| cast(&x, 3));
     // Unreal clamps Emissive at 0 (GetMaterialEmissive) unless the material
@@ -1145,8 +1543,8 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
         let e = emissive.map(|x| x.code).unwrap_or("vec3<f32>(0.0)".into());
         match base {
             Some(b) => format!("{} * scene_light(normalize(in.normal), {}) + {e}", b.code, !needs.mesh),
-            None if m.unlit => e,
-            None => format!("vec3<f32>(0.5) * scene_light(normalize(in.normal), {}) + {e}", !needs.mesh),
+            // Unreal's default Base Color is black: only the emissive shows.
+            None => e,
         }
     };
     let a = match (m.blend, alpha) {
@@ -1203,10 +1601,26 @@ pub fn with_rects(wesl: &str, rects: &[[f32; 4]]) -> String {
 
 const HELPERS: &str = r#"// TEX_RECTS
 
-// Texture `i` of the atlas at `uv`, wrapped (Unreal samplers repeat).
+// Texture `i` of the atlas at `uv`, filtered like an Unreal sampler:
+// bilinear, wrapping at the texture's own edges (a hardware sample of the
+// atlas would clamp into the padding there: uv 0 would read the corner
+// texel instead of the mean of the four wrapped corners).
 fn tex(i: u32, uv: vec2<f32>) -> vec4<f32> {
     let r = TEX_RECTS[i];
-    return textureSampleLevel(particle_texture, particle_sampler, r.xy + fract(uv) * r.zw, 0.0);
+    let dims = vec2<f32>(textureDimensions(particle_texture, 0));
+    let size = max(round(r.zw * dims), vec2<f32>(1.0));
+    let origin = vec2<i32>(round(r.xy * dims));
+    let p = fract(uv) * size - 0.5;
+    let f = fract(p);
+    let a = (floor(p) + size) % size;
+    let b = (a + 1.0) % size;
+    let ia = origin + vec2<i32>(a);
+    let ib = origin + vec2<i32>(b);
+    let t00 = textureLoad(particle_texture, ia, 0);
+    let t10 = textureLoad(particle_texture, vec2<i32>(ib.x, ia.y), 0);
+    let t01 = textureLoad(particle_texture, vec2<i32>(ia.x, ib.y), 0);
+    let t11 = textureLoad(particle_texture, ib, 0);
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
 }
 
 fn ue_space(p: vec3<f32>) -> vec3<f32> {
@@ -1243,4 +1657,462 @@ fn rotate_uv(uv: vec2<f32>, c: vec2<f32>, a: f32) -> vec2<f32> {
 /// is how the reference recordings of the test systems look.
 pub fn stand_in_missing() -> Image {
     Image { width: 4, height: 4, rgba: [0, 0, 0, 255].repeat(16), srgb: false }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The graph translator on small hand-built graphs (export 0 is the
+    //! material, holding the material inputs; node `k` is export `k`).
+    use super::*;
+    use crate::package::{Export, Import, Object, Package};
+    use crate::property::TypeName;
+
+    fn prop(name: &str, value: Value) -> Property {
+        Property { name: name.into(), ty: TypeName::new("Test"), array_index: 0, value }
+    }
+    fn f(name: &str, x: f32) -> Property {
+        prop(name, Value::Float(x))
+    }
+    fn s(name: &str, x: &str) -> Property {
+        prop(name, Value::Name(x.into()))
+    }
+    fn st(name: &str, fields: Vec<Property>) -> Property {
+        prop(name, Value::Struct { name: "S".into(), fields })
+    }
+    /// An expression input linked to node `k`, output `out`, mask "rgba" letters.
+    fn link(name: &str, k: usize, out: i32, mask: &str) -> Property {
+        let bit = |c: char| Value::Int(mask.contains(c) as i32);
+        st(
+            name,
+            vec![
+                prop("Expression", Value::Object(PackageIndex(k as i32 + 1))),
+                prop("OutputIndex", Value::Int(out)),
+                prop("Mask", Value::Int(!mask.is_empty() as i32)),
+                prop("MaskR", bit('r')),
+                prop("MaskG", bit('g')),
+                prop("MaskB", bit('b')),
+                prop("MaskA", bit('a')),
+            ],
+        )
+    }
+
+    /// A material whose node 0 holds `inputs` and nodes 1.. are `nodes`.
+    fn material(inputs: Vec<Property>, nodes: Vec<(&str, Vec<Property>)>) -> Material {
+        from_package(graph(inputs, nodes, &[]))
+    }
+
+    /// A graph package: export 0 holds `inputs`, exports 1.. are `nodes`;
+    /// `refs` are object paths imported first (see [`obj_ref`]).
+    fn graph(inputs: Vec<Property>, nodes: Vec<(&str, Vec<Property>)>, refs: &[&str]) -> Package {
+        let class = Import {
+            class_package: "/Script/CoreUObject".into(),
+            class_name: "Class".into(),
+            outer: PackageIndex(0),
+            object_name: "Material".into(),
+            package_name: String::new(),
+            optional: false,
+        };
+        let mut imports = Vec::new();
+        for r in refs {
+            let (pkg, obj) = split_object_path(r);
+            let outer = PackageIndex(-(imports.len() as i32 + 1));
+            imports.push(Import { object_name: pkg, class_name: "Package".into(), ..class.clone() });
+            imports.push(Import { object_name: obj, class_name: "MaterialFunction".into(), outer, ..class.clone() });
+        }
+        imports.push(class.clone());
+        let export = |class: i32, name: String, properties: Vec<Property>| Export {
+            class: PackageIndex(class),
+            super_: PackageIndex(0),
+            template: PackageIndex(0),
+            outer: PackageIndex(0),
+            object_name: name,
+            object_flags: 0,
+            serial_size: 0,
+            serial_offset: 0,
+            is_asset: false,
+            script_range: None,
+            object: Object { properties, ..Default::default() },
+        };
+        let mut exports = vec![export(-(imports.len() as i32), "M".into(), inputs)];
+        for (k, (class, props)) in nodes.into_iter().enumerate() {
+            imports.push(Import { object_name: format!("MaterialExpression{class}"), ..imports[refs.len() * 2].clone() });
+            exports.push(export(-(imports.len() as i32), format!("N{k}"), props));
+        }
+        Package { summary: Default::default(), names: vec![], imports, exports, soft_object_paths: vec![], problems: vec![] }
+    }
+
+    /// The `i`th of a graph's `refs`.
+    fn obj_ref(i: usize) -> Value {
+        Value::Object(PackageIndex(-(2 * i as i32 + 2)))
+    }
+
+    fn loaded(pkg: Package) -> Rc<Loaded> {
+        Rc::new(Loaded { file: PathBuf::new(), bytes: vec![], pkg })
+    }
+
+    fn from_package(pkg: Package) -> Material {
+        Material {
+            chain: vec!["/Game/M.M".into()],
+            blend: Blend::Translucent,
+            unlit: true,
+            two_sided: false,
+            clip: 0.3333,
+            scalars: HashMap::new(),
+            vectors: HashMap::new(),
+            textures: HashMap::new(),
+            switches: HashMap::new(),
+            base: Some((loaded(pkg), 0)),
+            missing: None,
+            functions: HashMap::new(),
+        }
+    }
+
+    fn wesl(m: &Material) -> String {
+        compile(m, &Needs::default()).unwrap().wesl
+    }
+
+    fn tex_node(sampler: &str) -> (&'static str, Vec<Property>) {
+        ("TextureSample", vec![prop("Texture", Value::Object(PackageIndex(-1))), prop("SamplerType", Value::Enum(sampler.into()))])
+    }
+
+    #[test]
+    fn atlas_sampling_wraps_at_each_texture_edge() {
+        // uv 0 must blend the four wrapped corners, as an Unreal Wrap sampler does.
+        let m = material(vec![link("EmissiveColor", 1, 0, "rgb")], vec![tex_node("SAMPLERTYPE_Color")]);
+        let w = wesl(&m);
+        assert!(w.contains("let a = (floor(p) + size) % size;") && w.contains("textureLoad(particle_texture"), "{w}");
+        assert!(!w.contains("textureSampleLevel"), "{w}");
+    }
+
+    #[test]
+    fn texture_outputs_and_sampler_types() {
+        // Output 0 is RGB; a grayscale sampler reads R with alpha 1.
+        let m = material(
+            vec![link("EmissiveColor", 1, 0, ""), link("Opacity", 1, 4, "a")],
+            vec![tex_node("SAMPLERTYPE_LinearGrayscale")],
+        );
+        let w = wesl(&m);
+        assert!(w.contains("vec4<f32>(t0.x, t0.x, t0.x, 1.0)"), "{w}");
+        assert!(w.contains("vec3<f32> = t1.xyz;") && w.contains("f32 = t1.w;"), "{w}");
+        assert_eq!(w.matches("tex(0u").count(), 1, "one sample for both outputs: {w}");
+        // Normal maps unpack.
+        let n = material(vec![link("EmissiveColor", 1, 0, "")], vec![tex_node("SAMPLERTYPE_Normal")]);
+        assert!(wesl(&n).contains("* 2.0 - 1.0)"));
+    }
+
+    #[test]
+    fn panner_fraction_applies_to_the_offset_only() {
+        let m = material(
+            vec![link("EmissiveColor", 1, 0, "")],
+            vec![("Panner", vec![f("SpeedX", 0.5), prop("bFractionalPart", Value::Bool(true))])],
+        );
+        assert!(wesl(&m).contains("in.uv0 + fract(vec2<f32>(0.5, 0.0) * globals.time)"), "{}", wesl(&m));
+    }
+
+    #[test]
+    fn time_period_needs_its_override_flag() {
+        let plain = material(vec![link("Opacity", 1, 0, "")], vec![("Time", vec![f("Period", 2.0)])]);
+        assert!(wesl(&plain).contains("= globals.time;") && !wesl(&plain).contains("globals.time %"), "{}", wesl(&plain));
+        let periodic = material(vec![link("Opacity", 1, 0, "")], vec![("Time", vec![f("Period", 2.0), prop("bOverride_Period", Value::Bool(true))])]);
+        assert!(wesl(&periodic).contains("(globals.time % 2.0)"));
+    }
+
+    #[test]
+    fn max_and_min_default_b_is_one() {
+        let m = material(vec![link("Opacity", 1, 0, "")], vec![("Max", vec![link("A", 2, 0, "")]), ("Time", vec![])]);
+        assert!(wesl(&m).contains("max(e2_0, 1.0)"), "{}", wesl(&m));
+    }
+
+    #[test]
+    fn lerp_widens_to_a_vector_alpha() {
+        let m = material(
+            vec![link("EmissiveColor", 1, 0, "")],
+            vec![("LinearInterpolate", vec![link("Alpha", 2, 0, "")]), ("Constant3Vector", vec![])],
+        );
+        let w = wesl(&m);
+        assert!(w.contains("mix(vec3<f32>(0.0), vec3<f32>(1.0), "), "{w}");
+    }
+
+    #[test]
+    fn if_uses_the_equals_threshold() {
+        let m = material(
+            vec![link("Opacity", 1, 0, "")],
+            vec![
+                ("If", vec![link("A", 2, 0, ""), f("ConstB", 0.5), link("AGreaterThanB", 2, 0, ""), link("AEqualsB", 2, 0, ""), link("ALessThanB", 2, 0, ""), f("EqualsThreshold", 0.1)]),
+                ("Time", vec![]),
+            ],
+        );
+        let w = wesl(&m);
+        assert!(w.contains("abs(e2_0 - 0.5) <= 0.1)"), "{w}");
+    }
+
+    #[test]
+    fn static_switches_take_instance_overrides() {
+        let nodes = vec![
+            ("StaticSwitchParameter", vec![s("ParameterName", "UseTime"), link("A", 2, 0, ""), link("B", 3, 0, "")]),
+            ("Constant", vec![f("R", 0.75)]),
+            ("Constant", vec![f("R", 0.25)]),
+        ];
+        let mut m = material(vec![link("Opacity", 1, 0, "")], nodes);
+        assert!(wesl(&m).contains("saturate(0.25)"), "default false picks B");
+        m.switches.insert("UseTime".into(), true);
+        assert!(wesl(&m).contains("saturate(0.75)"));
+
+        // The overrides as an instance stores them (UE4 StaticParameters).
+        let entry = |name: &str, on: bool, over: bool| Value::Struct {
+            name: "StaticSwitchParameter".into(),
+            fields: vec![
+                st("ParameterInfo", vec![s("Name", name)]),
+                prop("Value", Value::Bool(on)),
+                prop("bOverride", Value::Bool(over)),
+            ],
+        };
+        let props = vec![st("StaticParameters", vec![prop("StaticSwitchParameters", Value::Array(vec![entry("A", true, true), entry("B", true, false)]))])];
+        let mut out = Vec::new();
+        static_switches(&props, &mut out);
+        assert_eq!(out, vec![("A".to_string(), true)]);
+    }
+
+    #[test]
+    fn constant_inputs_and_defaults_match_unreal() {
+        // A constant Emissive is an sRGB FColor; an unconnected Base Color is black.
+        let c = st("Constant", vec![prop("R", Value::Byte(128)), prop("G", Value::Byte(0)), prop("B", Value::Byte(255))]);
+        let mut m = material(vec![st("EmissiveColor", vec![prop("UseConstant", Value::Bool(true)), c])], vec![]);
+        m.unlit = false;
+        let w = wesl(&m);
+        assert!(w.contains("vec3<f32>(0.21586") && w.contains(", 0.0, 1.0)"), "{w}");
+        assert!(!w.contains("scene_light(normalize"), "{w}");
+        // A vector parameter without a saved default is zero.
+        let v0 = material(vec![link("Opacity", 1, 4, "a")], vec![("VectorParameter", vec![s("ParameterName", "C")])]);
+        assert!(wesl(&v0).contains("saturate(0.0)"), "{}", wesl(&v0));
+    }
+
+    #[test]
+    fn texture_object_parameters_take_instance_overrides() {
+        let mut m = material(
+            vec![link("EmissiveColor", 1, 0, "")],
+            vec![
+                ("TextureSample", vec![link("TextureObject", 2, 0, "")]),
+                ("TextureObjectParameter", vec![s("ParameterName", "T"), prop("Texture", Value::Object(PackageIndex(-1)))]),
+            ],
+        );
+        m.textures.insert("T".into(), "/Game/T_Over.T_Over".into());
+        assert_eq!(compile(&m, &Needs::default()).unwrap().textures, vec!["/Game/T_Over.T_Over".to_string()]);
+    }
+
+    /// The Fab "Perfect Fire" erosion instances (local-only test files;
+    /// skipped when testdata/fab is absent).
+    #[test]
+    fn fab_erosion_instances() {
+        let content = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fab/perfect_fire/Content");
+        if !content.is_dir() {
+            eprintln!("skipped: {} is absent (sh testdata/fab_assets.sh)", content.display());
+            return;
+        }
+        let mut store = Store::new(vec![]);
+        store.content_roots.push(content);
+        let dir = "/Game/Vefects/Free_Fire/Shared/Materials";
+        let needs = Needs { dynamic_written: [true, false, false, false], dynamic_available: [true, true, false, false], mesh: false };
+        for (name, blend, unlit) in [
+            ("MI_VFX_Fire_02", Blend::Additive, true),
+            ("MI_VFX_Fire_01", Blend::Additive, true),
+            ("MI_VFX_Glow_01", Blend::Translucent, false),
+            ("MI_VFX_Smoke_01", Blend::Translucent, false),
+        ] {
+            let m = Material::load(&mut store, &format!("{dir}/{name}.{name}")).unwrap();
+            assert_eq!((m.blend, m.unlit), (blend, unlit), "{name}");
+            let c = compile(&m, &needs).unwrap();
+            assert_eq!(c.textures.len(), 3, "{name}: {:?}", c.textures);
+            assert!(c.wesl.contains("in.dynamic_param.x"), "{name}: dissolve");
+            assert!(c.notes.iter().any(|n| n.contains("Depth Fade")), "{name}");
+        }
+        // Fire_02: emissive 40, noise 1 panning at (0.5, 0.5) over a 2x tiling.
+        let m = Material::load(&mut store, &format!("{dir}/MI_VFX_Fire_02.MI_VFX_Fire_02")).unwrap();
+        let w = compile(&m, &needs).unwrap().wesl;
+        for s in ["vec3<f32>(40.0)", "vec2<f32>(0.5, 0.5);", "vec2<f32>(2.0, 2.0)", "* 1.2)"] {
+            assert!(w.contains(s), "{s}\n{w}");
+        }
+    }
+
+    fn guid(k: u32) -> Value {
+        Value::Struct { name: "Guid".into(), fields: vec![prop("Guid", Value::Guid(crate::reader::Guid([k, 0, 0, 0])))] }
+    }
+    fn unlinked(name: &str) -> Property {
+        st(name, vec![prop("Expression", Value::Object(PackageIndex(0))), prop("OutputIndex", Value::Int(0))])
+    }
+    /// A call's FunctionInputs entry: (input id, the input as linked).
+    fn call_input(id: u32, mut input: Property, name: &str) -> Value {
+        if let Value::Struct { fields, .. } = &mut input.value {
+            fields.push(s("InputName", name));
+        }
+        Value::Struct { name: "FunctionExpressionInput".into(), fields: vec![prop("ExpressionInputId", guid(id)), Property { name: "Input".into(), ..input }] }
+    }
+    fn call_output(id: u32, name: &str) -> Value {
+        Value::Struct {
+            name: "FunctionExpressionOutput".into(),
+            fields: vec![prop("ExpressionOutputId", guid(id)), st("Output", vec![s("OutputName", name)])],
+        }
+    }
+
+    /// MF_T: `UV` (vector2, input id 1) * `Scale` (scalar, id 2, preview 3)
+    /// as output `Out` (id 3); `Scale` alone as output `S` (id 4).
+    fn function_package() -> Package {
+        let input = |name: &str, id: u32, ty: &str, preview: [f32; 2]| {
+            vec![
+                s("InputName", name),
+                prop("Id", guid(id)),
+                prop("InputType", Value::Enum(format!("EFunctionInputType::{ty}"))),
+                st("PreviewValue", vec![f("X", preview[0]), f("Y", preview[1]), f("Z", 0.0), f("W", 1.0)]),
+                prop("bUsePreviewValueAsDefault", Value::Bool(true)),
+            ]
+        };
+        graph(
+            vec![],
+            vec![
+                ("FunctionInput", input("UV", 1, "FunctionInput_Vector2", [0.25, 0.75])),
+                ("FunctionInput", input("Scale", 2, "FunctionInput_Scalar", [3.0, 0.0])),
+                ("Multiply", vec![link("A", 1, 0, ""), link("B", 2, 0, "")]),
+                ("FunctionOutput", vec![link("A", 3, 0, ""), prop("Id", guid(3)), s("OutputName", "Out")]),
+                ("FunctionOutput", vec![link("A", 2, 0, ""), prop("Id", guid(4)), s("OutputName", "S")]),
+            ],
+            &[],
+        )
+    }
+
+    #[test]
+    fn material_functions_inline_with_call_inputs_and_previews() {
+        // The call lists outputs S then Out; UV is wired, Scale takes its preview.
+        let call = vec![
+            prop("MaterialFunction", obj_ref(0)),
+            prop("FunctionInputs", Value::Array(vec![call_input(1, link("Input", 2, 0, ""), "UV"), call_input(2, unlinked("Input"), "Scale")])),
+            prop("FunctionOutputs", Value::Array(vec![call_output(4, "S"), call_output(3, "Out")])),
+        ];
+        let pkg = graph(
+            vec![link("EmissiveColor", 1, 1, ""), link("Opacity", 1, 0, "")],
+            vec![("MaterialFunctionCall", call), ("TextureCoordinate", vec![f("UTiling", 2.0)])],
+            &["/Game/MF_T.MF_T"],
+        );
+        let mut m = from_package(pkg);
+        // Without the package: the call is not translated.
+        let c = compile(&m, &Needs::default()).unwrap();
+        assert!(c.notes.iter().any(|n| n == "material function MF_T: package not found, not translated (taken as 1)"), "{:?}", c.notes);
+        m.functions.insert("/Game/MF_T".into(), loaded(function_package()));
+        let c = compile(&m, &Needs::default()).unwrap();
+        assert!(c.notes.is_empty(), "{:?}", c.notes);
+        let w = c.wesl;
+        assert!(w.contains("let e2_0: vec2<f32> = in.uv0 * vec2<f32>(2.0, 1.0);"), "{w}");
+        assert!(w.contains("let f1_e3_0: vec2<f32> = (e2_0 * vec2<f32>(3.0));") && w.contains("finish(max(vec3<f32>(f1_e3_0, 0.0)"), "{w}");
+        assert!(w.contains("saturate(3.0)"), "output S is Scale's preview: {w}");
+        assert_eq!(w.matches("let f1_e3_0").count(), 1, "{w}");
+    }
+
+    #[test]
+    fn unconnected_function_inputs_use_their_preview_value() {
+        let call = vec![
+            prop("MaterialFunction", obj_ref(0)),
+            prop("FunctionInputs", Value::Array(vec![call_input(1, unlinked("Input"), "UV"), call_input(2, link("Input", 2, 0, ""), "Scale")])),
+            prop("FunctionOutputs", Value::Array(vec![call_output(3, "Out")])),
+        ];
+        let pkg = graph(vec![link("EmissiveColor", 1, 0, "")], vec![("MaterialFunctionCall", call), ("Constant", vec![f("R", 0.5)])], &["/Game/MF_T.MF_T"]);
+        let mut m = from_package(pkg);
+        m.functions.insert("/Game/MF_T".into(), loaded(function_package()));
+        let w = wesl(&m);
+        assert!(w.contains("let f1_e1_0: vec2<f32> = vec2<f32>(0.25, 0.75);") && w.contains("(f1_e1_0 * vec2<f32>(0.5))"), "{w}");
+    }
+
+    #[test]
+    fn recursive_material_functions_stop() {
+        // MF_R calls itself: inlining stops at the depth limit with a note.
+        let call = |k: usize| vec![prop("MaterialFunction", obj_ref(0)), prop("FunctionOutputs", Value::Array(vec![call_output(9, "Result")])), link("Unused", k, 0, "")];
+        let f = graph(vec![], vec![("MaterialFunctionCall", call(0)), ("FunctionOutput", vec![link("A", 1, 0, ""), prop("Id", guid(9))])], &["/Game/MF_R.MF_R"]);
+        let mut m = from_package(graph(vec![link("Opacity", 1, 0, "")], vec![("MaterialFunctionCall", call(0))], &["/Game/MF_R.MF_R"]));
+        m.functions.insert("/Game/MF_R".into(), loaded(f));
+        let c = compile(&m, &Needs::default()).unwrap();
+        assert!(c.notes.iter().any(|n| n.contains("MF_R: nested too deep")), "{:?}", c.notes);
+    }
+
+    #[test]
+    fn built_in_engine_functions() {
+        let engine = "/Engine/Functions/Engine_MaterialFunctions02/Texturing/CustomRotator.CustomRotator";
+        let call = vec![
+            prop("MaterialFunction", obj_ref(0)),
+            prop(
+                "FunctionInputs",
+                Value::Array(vec![
+                    call_input(1, link("Input", 2, 0, ""), "UVs"),
+                    call_input(2, unlinked("Input"), "Rotation Center"),
+                    call_input(3, link("Input", 3, 0, ""), "Rotation Angle (0-1)"),
+                ]),
+            ),
+            prop("FunctionOutputs", Value::Array(vec![call_output(4, "Rotated Values")])),
+        ];
+        let m = from_package(graph(
+            vec![link("EmissiveColor", 4, 0, "")],
+            vec![("MaterialFunctionCall", call), ("TextureCoordinate", vec![]), ("Constant", vec![f("R", 0.25)]), tex_node_with_uv(1)],
+            &[engine],
+        ));
+        let c = compile(&m, &Needs::default()).unwrap();
+        assert!(c.notes.is_empty(), "{:?}", c.notes);
+        assert!(c.wesl.contains("rotate_uv(in.uv0, vec2<f32>(0.5, 0.5), 0.25 * 6.2831855)"), "{}", c.wesl);
+
+        // BreakOutFloat3Components picks its output by name; MakeFloat2 appends.
+        let brk = vec![
+            prop("MaterialFunction", obj_ref(0)),
+            prop("FunctionInputs", Value::Array(vec![call_input(1, link("Input", 3, 0, ""), "Float3")])),
+            prop("FunctionOutputs", Value::Array(vec![call_output(2, "R"), call_output(3, "G"), call_output(4, "B")])),
+        ];
+        let make = vec![
+            prop("MaterialFunction", obj_ref(1)),
+            prop("FunctionInputs", Value::Array(vec![call_input(1, link("Input", 1, 2, ""), "X"), call_input(2, unlinked("Input"), "Y")])),
+            prop("FunctionOutputs", Value::Array(vec![call_output(5, "Result")])),
+        ];
+        let m = from_package(graph(
+            vec![link("EmissiveColor", 2, 0, "")],
+            vec![("MaterialFunctionCall", brk), ("MaterialFunctionCall", make), ("VertexColor", vec![])],
+            &["/Engine/Functions/Engine_MaterialFunctions02/Utility/BreakOutFloat3Components.BreakOutFloat3Components", "/Engine/Functions/Engine_MaterialFunctions02/Utility/MakeFloat2.MakeFloat2"],
+        ));
+        let w = wesl(&m);
+        assert!(w.contains("let e1_2: f32 = t0.z;") && w.contains("vec2<f32>(e1_2, 0.0)"), "{w}");
+
+        // Unknown engine functions keep the note.
+        let m = from_package(graph(vec![link("Opacity", 1, 0, "")], vec![("MaterialFunctionCall", vec![prop("MaterialFunction", obj_ref(0))])], &["/Engine/Functions/X/Fancy.Fancy"]));
+        let c = compile(&m, &Needs::default()).unwrap();
+        assert_eq!(c.notes, vec!["material function Fancy: not translated (taken as 1)".to_string()]);
+    }
+
+    fn tex_node_with_uv(k: usize) -> (&'static str, Vec<Property>) {
+        ("TextureSample", vec![prop("Texture", Value::Object(PackageIndex(-1))), link("Coordinates", k, 0, "")])
+    }
+
+    /// The Fab "Free Arrow Trail" materials call MF_Texcoord (in the pack)
+    /// and engine functions (local-only test files; skipped when absent).
+    #[test]
+    fn fab_arrow_trail_material_functions() {
+        let content = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fab/arrow_trail/Content");
+        if !content.is_dir() {
+            eprintln!("skipped: {} is absent (sh testdata/fab_assets.sh)", content.display());
+            return;
+        }
+        let mut store = Store::new(vec![]);
+        store.content_roots.push(content);
+        let needs = Needs { dynamic_written: [true, false, false, false], dynamic_available: [true, true, false, false], mesh: false };
+        for path in [
+            "/Game/ArrowTrail/Material/M_Master/M_SimpleTrail.M_SimpleTrail",
+            "/Game/ArrowTrail/Material/MI_Instance/MI_HolyRibbon.MI_HolyRibbon",
+            "/Game/ArrowTrail/Material/M_Master/M_SimpleParticle.M_SimpleParticle",
+            "/Game/ArrowTrail/Demo/Material/M_PrototypeGrid.M_PrototypeGrid",
+        ] {
+            let m = Material::load(&mut store, path).unwrap();
+            let c = compile(&m, &needs).unwrap();
+            assert!(!c.notes.iter().any(|n| n.contains("material function")), "{path}: {:?}", c.notes);
+        }
+        let m = Material::load(&mut store, "/Game/ArrowTrail/Material/M_Master/M_SimpleTrail.M_SimpleTrail").unwrap();
+        assert!(m.functions.contains_key("/Game/ArrowTrail/Material/MF_Function/MF_Texcoord"));
+        let w = compile(&m, &needs).unwrap().wesl;
+        assert!(w.contains("rotate_uv(e30_0, vec2<f32>(0.5, 0.5), 0.0 * 6.2831855)"), "{w}");
+        // MF_Texcoord inlined (Holy ribbon: UV * tile + time * speed).
+        let m = Material::load(&mut store, "/Game/ArrowTrail/Material/MI_Instance/MI_HolyRibbon.MI_HolyRibbon").unwrap();
+        let w = compile(&m, &needs).unwrap().wesl;
+        assert!(w.contains("= vec2<f32>(f1_e3_0, f1_e2_0);") && w.contains("tex(1u, f1_e4_0)"), "{w}");
+    }
 }

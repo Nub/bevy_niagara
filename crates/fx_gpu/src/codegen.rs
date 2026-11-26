@@ -1234,6 +1234,23 @@ pub fn emitter_shader(
         );
     }
     g.out.push_str("}\n");
+    // World space (fx_core::sim::spawn_fraction): after Particle Spawn, the
+    // owner pose at the particle's birth moves it to world space.
+    g.out.push_str("\nfn spawn_to_world(k: u32, p: ptr<function, Particle>) {\n");
+    if !emitter.local_space {
+        writeln!(
+            g.out,
+            "    let n = atomicLoad(&state[S_REGULAR_N]);
+    var f = 1.0;
+    if ({} && k < n) {{
+        f = f32(k) / f32(n);
+    }}
+    owner_to_world(f, p);",
+            emitter.interpolated_spawning
+        )
+        .unwrap();
+    }
+    g.out.push_str("}\n");
     for (h, handler) in emitter.event_handlers.iter().enumerate() {
         writeln!(g.out, "\nfn handler_{h}(p: ptr<function, Particle>) {{").unwrap();
         for (i, m) in handler.modules.iter().enumerate() {

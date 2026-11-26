@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::ecs::system::EntityCommands;
+use bevy::math::Affine3A;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use fx_core::cook::CookedSystem;
@@ -85,6 +86,12 @@ pub struct EffectControl {
     last_position: Option<Vec3>,
     /// `Engine.Owner.Velocity` in world space (m/s).
     owner_velocity: Vec3,
+    /// The entity's `world_from_local` when the owner velocity was last
+    /// measured: where this frame's simulation steps start (world-space
+    /// emitters lerp new particles' poses from it to the current one).
+    previous_world_from_local: Option<Affine3A>,
+    /// The entity's `world_from_local` at the last measurement.
+    last_world_from_local: Option<Affine3A>,
 }
 
 impl Default for EffectControl {
@@ -103,6 +110,8 @@ impl Default for EffectControl {
             offscreen: 0.0,
             last_position: None,
             owner_velocity: Vec3::ZERO,
+            previous_world_from_local: None,
+            last_world_from_local: None,
         }
     }
 }
@@ -138,6 +147,8 @@ impl EffectControl {
         self.spawning = true;
         self.last_position = None;
         self.owner_velocity = Vec3::ZERO;
+        self.previous_world_from_local = None;
+        self.last_world_from_local = None;
     }
     /// The effect jumped (moved without travelling): the next frame measures
     /// no owner velocity, so Spawn Per Unit does not fill the gap and new
@@ -145,6 +156,8 @@ impl EffectControl {
     pub fn teleported(&mut self) {
         self.last_position = None;
         self.owner_velocity = Vec3::ZERO;
+        self.previous_world_from_local = None;
+        self.last_world_from_local = None;
     }
     /// `Engine.Owner.Velocity`: how fast the effect's entity moves in the
     /// world (m/s), measured from its `GlobalTransform` each frame. Zero on
@@ -152,6 +165,14 @@ impl EffectControl {
     /// faster than [`TELEPORT_SPEED`]).
     pub fn owner_velocity(&self) -> Vec3 {
         self.owner_velocity
+    }
+    /// Where the effect's entity was (`world_from_local`) at the start of
+    /// this frame's simulation steps, measured with the owner velocity;
+    /// `None` on its first frame and after a teleport (no interpolation:
+    /// the steps use the current `GlobalTransform`). World-space emitters
+    /// (`local_space: false`) place new particles between it and the current one.
+    pub fn previous_world_from_local(&self) -> Option<Affine3A> {
+        self.previous_world_from_local
     }
     /// Plays the effect again from the start (a one-shot's replay): [`Self::reset`].
     pub fn fire(&mut self) {
@@ -415,8 +436,12 @@ pub(crate) fn measure_owner_velocity(
             Some(last) => (pos - last) / dt,
             None => Vec3::ZERO,
         };
-        c.owner_velocity = if v.is_finite() && v.length() <= TELEPORT_SPEED { v } else { Vec3::ZERO };
+        let moved = v.is_finite() && v.length() <= TELEPORT_SPEED;
+        c.owner_velocity = if moved { v } else { Vec3::ZERO };
         c.last_position = Some(pos);
+        // A jump is not interpolated through either.
+        c.previous_world_from_local = if moved { c.last_world_from_local } else { None };
+        c.last_world_from_local = Some(gt.affine());
     }
 }
 

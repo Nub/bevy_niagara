@@ -144,6 +144,8 @@ pub(crate) struct ComponentUpdate {
     pub settings: CookedComponent,
     /// `WORDS.len()` words per particle.
     pub rows: Vec<f32>,
+    /// The particles are in world space (a `local_space: false` emitter), not the effect's.
+    pub world_space: bool,
 }
 
 /// One renderer's entities and which particle drives each.
@@ -164,7 +166,7 @@ pub fn apply_particle_components(
     mut commands: Commands,
     inbox: Res<ComponentInbox>,
     mut pools: ResMut<ComponentPools>,
-    effects: Query<(), With<crate::ParticleEffect>>,
+    effects: Query<&GlobalTransform, With<crate::ParticleEffect>>,
     mut driven: Query<(
         &mut ParticleComponent,
         &mut ParticleAttributes,
@@ -174,9 +176,11 @@ pub fn apply_particle_components(
 ) {
     let updates: Vec<ComponentUpdate> = std::mem::take(&mut *inbox.0.lock().unwrap());
     for u in updates {
-        if effects.get(u.effect).is_err() {
+        let Ok(gt) = effects.get(u.effect) else {
             continue;
-        }
+        };
+        // World-space particles: into the effect's space (the entities are its children).
+        let local_from_world = u.world_space.then(|| gt.affine().inverse());
         let pool = pools.0.entry((u.effect, u.renderer)).or_default();
         let cap = u.settings.max_components as usize;
         let attrs: Vec<ParticleAttributes> = u
@@ -222,10 +226,14 @@ pub fn apply_particle_components(
             };
             let transform = |old: Transform| {
                 if u.settings.transform {
-                    Transform {
+                    let t = Transform {
                         translation: a.position,
                         rotation: a.mesh_orientation,
                         scale: a.scale,
+                    };
+                    match local_from_world {
+                        Some(m) => Transform::from_matrix(Mat4::from(m * t.compute_affine())),
+                        None => t,
                     }
                 } else {
                     old

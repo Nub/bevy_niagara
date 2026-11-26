@@ -282,6 +282,8 @@ struct LightUpdate {
     renderer: usize,
     settings: CookedLight,
     lights: Vec<GpuLight>,
+    /// The lights are in world space (a `local_space: false` emitter), not the effect's.
+    world_space: bool,
 }
 
 /// A point light entity driven by a light renderer (a child of its effect).
@@ -431,14 +433,16 @@ fn apply_particle_lights(
     mut commands: Commands,
     inbox: Res<LightInbox>,
     mut pools: ResMut<LightPools>,
-    effects: Query<(), With<ParticleEffect>>,
+    effects: Query<&GlobalTransform, With<ParticleEffect>>,
     mut lights: Query<(&mut PointLight, &mut Transform, &mut Visibility), With<ParticleLight>>,
 ) {
     let updates: Vec<LightUpdate> = std::mem::take(&mut *inbox.0.lock().unwrap());
     for u in updates {
-        if effects.get(u.effect).is_err() {
+        let Ok(gt) = effects.get(u.effect) else {
             continue;
-        }
+        };
+        // World-space lights: into the effect's space (the lights are its children).
+        let local_from_world = u.world_space.then(|| gt.affine().inverse());
         let pool = pools.0.entry((u.effect, u.renderer)).or_default();
         let s = &u.settings;
         for (slot, l) in u.lights.iter().enumerate() {
@@ -467,7 +471,9 @@ fn apply_particle_lights(
                 intensity: s.intensity * peak * alpha,
                 ..light
             };
-            let transform = Transform::from_translation(Vec3::from_array(l.position));
+            let position = Vec3::from_array(l.position);
+            let position = local_from_world.map_or(position, |m| m.transform_point3(position));
+            let transform = Transform::from_translation(position);
             match pool.get(slot).copied().map(|e| (e, lights.get_mut(e))) {
                 Some((_, Ok((mut pl, mut t, mut v)))) => {
                     *pl = light;
@@ -519,6 +525,8 @@ struct ExtractedEffect {
     system: Arc<CookedSystem>,
     seed: u32,
     world_from_local: Mat4,
+    /// `world_from_local` at the start of this frame's steps.
+    previous_world_from_local: Mat4,
     /// Engine.Owner.Velocity in effect space (m/s).
     owner_velocity: Vec3,
     assets: Arc<Vec<RendererAssets>>,
@@ -656,6 +664,9 @@ fn extract_effects(
             system: effect.system.clone(),
             seed: effect.seed,
             world_from_local: transform.to_matrix(),
+            previous_world_from_local: control
+                .previous_world_from_local()
+                .map_or_else(|| transform.to_matrix(), Mat4::from),
             owner_velocity: transform
                 .affine()
                 .inverse()
@@ -1014,6 +1025,8 @@ struct EffectInstance {
     key: BatchKey,
     draws: Vec<RendererDraw>,
     world_from_local: Mat4,
+    /// Owner poses at the start and end of this frame's steps (world-space emitters).
+    owner_poses: (fx_core::sim::OwnerPose, fx_core::sim::OwnerPose),
     /// Data interface name → the data uploaded to its batch (held, so its address stays unique).
     uploaded: HashMap<String, Arc<dyn std::any::Any + Send + Sync>>,
     seen: u64,
@@ -1345,6 +1358,13 @@ fn prepare_effects(
         }
         inst.seen = frame;
         inst.world_from_local = ex.world_from_local;
+        inst.owner_poses = (
+            fx_core::sim::OwnerPose::from_mat4(ex.previous_world_from_local),
+            fx_core::sim::OwnerPose::from_mat4(ex.world_from_local),
+        );
+        // Where a warm-up (before this frame's steps) runs.
+        inst.gpu.owner_pose = inst.owner_poses.0;
+        inst.gpu.previous_owner_pose = inst.owner_poses.0;
         inst.gpu.owner_velocity = ex.owner_velocity.to_array();
         inst.paused = ex.paused;
         inst.gpu.active = ex.spawning;
@@ -1405,7 +1425,8 @@ fn prepare_effects(
             }
             let em = &inst.gpu.emitters[rd.emitter];
             let sub_index = inst.gpu.system.emitters[rd.emitter].sets_sub_image_index();
-            write_uniform(&rd.settings, &mut rd.scratch, &inst.world_from_local, em.capacity, fx_gpu::extended_level(em.words), 1.0, sub_index, None);
+            let world_space = !inst.gpu.system.emitters[rd.emitter].local_space;
+            write_uniform(&rd.settings, &mut rd.scratch, &inst.world_from_local, em.capacity, fx_gpu::extended_level(em.words), 1.0, sub_index, None, world_space);
             queue.write_buffer(&rd.uniform, 0, &rd.scratch);
             let loaded = rd.assets.texture.as_ref().and_then(|h| images.get(h));
             match &rd.settings {
@@ -1609,6 +1630,7 @@ fn prepare_effects(
                 mesh.map_or(1.0, |m| m.radius),
                 sub_index,
                 Some(batch.gpu.region_words(rd.emitter)),
+                !sys.emitters[rd.emitter].local_space,
             );
             queue.write_buffer(&rd.uniform, 0, &rd.scratch);
             let loaded = a.texture.as_ref().and_then(|h| images.get(h));
@@ -1648,7 +1670,7 @@ fn prepare_effects(
                 let entry = rd.views.get(&view.retained_view_entity);
                 let stale = entry.is_some_and(|v| loaded.is_some() && !v.uses_loaded_texture);
                 if entry.is_none() || stale {
-                    let draw = BatchDraw::new(
+                    let mut draw = BatchDraw::new(
                         wd,
                         &state.view_pipelines,
                         &batch.gpu,
@@ -1656,6 +1678,7 @@ fn prepare_effects(
                         &batch.transforms,
                         config,
                     );
+                    draw.world_space = !sys.emitters[rd.emitter].local_space;
                     let (tv, ts) = renderer_texture(wd, &queue, &mut state.builtin, loaded, &rd.settings);
                     let particles = batch.gpu.particles(rd.emitter);
                     let bind_group = particle_bind_group(
@@ -1848,6 +1871,8 @@ fn bytemuck_bytes<T: Copy>(v: &[T]) -> &[u8] {
 
 /// The `FxRenderer` uniform of particle_io.wesl; `batched`: the words
 /// between particle copies of a batch draw (indices are batch references).
+/// `world_space`: the emitter simulates in world space; drawn without the
+/// effect transform (identity here and for every batch slot).
 #[allow(clippy::too_many_arguments)]
 fn write_uniform(
     settings: &Settings,
@@ -1858,11 +1883,14 @@ fn write_uniform(
     mesh_radius: f32,
     sub_image_from_index: bool,
     batched: Option<u32>,
+    world_space: bool,
 ) {
     let mut put = |w: usize, v: u32| b[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    for (i, x) in world_from_local.to_cols_array().iter().enumerate() {
+    let m = if world_space { Mat4::IDENTITY } else { *world_from_local };
+    for (i, x) in m.to_cols_array().iter().enumerate() {
         put(i, x.to_bits());
     }
+    put(42, world_space as u32);
     put(26, 1.0f32.to_bits());
     put(27, 1.0f32.to_bits());
     put(28, capacity);
@@ -2188,9 +2216,13 @@ fn simulate(
             continue;
         }
         // Every member steps in the same dispatches.
-        for _ in 0..steps {
+        for s in 0..steps {
             for m in &batch.members {
                 if let Some(inst) = state.effects.get_mut(m) {
+                    // The owner's path through the frame, step by step (world-space emitters).
+                    let (from, to) = &inst.owner_poses;
+                    inst.gpu.previous_owner_pose = from.lerp(to, s as f32 / steps as f32);
+                    inst.gpu.owner_pose = from.lerp(to, (s + 1) as f32 / steps as f32);
                     batch.gpu.stage(&mut inst.gpu, encoder, extracted.dt);
                 }
             }
@@ -2298,7 +2330,9 @@ fn simulate(
             let Some(view) = views.iter().find(|v| v.retained_view_entity == ls.view) else {
                 continue;
             };
-            let vp = local_view(view, &inst.world_from_local);
+            // World-space emitters: particles (and their lights) are in world space.
+            let world_space = !inst.gpu.system.emitters[rd.emitter].local_space;
+            let vp = local_view(view, if world_space { &Mat4::IDENTITY } else { &inst.world_from_local });
             ls.draw
                 .record(&queue, encoder, &state.view_pipelines, em, &vp);
             ls.gather.record(encoder, &state.light_pipelines, em, tag);
@@ -2352,6 +2386,7 @@ fn read_lights(
                     renderer: ri,
                     settings: settings.clone(),
                     lights: ls.gather.lights.clone(),
+                    world_space: !inst.gpu.system.emitters[rd.emitter].local_space,
                 });
             }
         }
@@ -2370,6 +2405,7 @@ fn read_lights(
                     renderer: ri,
                     settings: settings.clone(),
                     rows: cs.gather.rows.clone(),
+                    world_space: !inst.gpu.system.emitters[rd.emitter].local_space,
                 });
             }
         }
@@ -2623,6 +2659,7 @@ fn new_instance(
         key,
         draws,
         world_from_local: ex.world_from_local,
+        owner_poses: Default::default(),
         uploaded: HashMap::default(),
         seen: frame,
         generation: ex.generation,

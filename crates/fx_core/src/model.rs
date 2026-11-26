@@ -146,6 +146,13 @@ pub struct EmitterSource {
     /// its spawn values only and a stream does not clump per frame.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interpolated_spawning: bool,
+    /// Niagara's Local Space: when false (bLocalSpace off) the emitter
+    /// simulates in world space: a particle spawns in effect space as usual,
+    /// then its position and velocity are moved to world space with the
+    /// owner's transform at its spawn time, and it lives there, left behind
+    /// by a moving owner (trails). Default true: particles follow the owner.
+    #[serde(skip_serializing_if = "is_true")]
+    pub local_space: bool,
     /// Niagara's Fixed Bounds: `(min, max)` in effect space, used for
     /// visibility culling instead of the system's `bounds_radius`.
     #[serde(
