@@ -5,7 +5,7 @@
 #
 # Output (git-ignored, never commit or share): testdata/fab/_look/<pack>/<system>/
 # (.fx.ron, report, materials, strip, mp4, logs), and per pack a labelled grid
-# video <pack>_grid.mp4, a still <pack>_grid.png (frame at GRID_T s), and the
+# video <pack>_grid.mp4, a still <pack>_grid.png (frame at GRID_T s: 1.5, arrows 0.9 as their trails die after ~1.5 s), and the
 # whole pack in one scene laid out like the listing shots: <pack>_lineup/.
 #
 # Run from the repository root inside the fork's dev shell, after
@@ -15,7 +15,6 @@
 set -eu
 out=${OUT:-testdata/fab/_look}
 bin=${BIN:-target/release}
-grid_t=${GRID_T:-1.5}
 packs=${*:-perfect_fire arrow_trail}
 
 # Camera and motion per pack, matched to the listings: fires sit on the floor
@@ -81,6 +80,7 @@ for pack in $packs; do
 	ffmpeg -y -loglevel error $inputs -filter_complex \
 		"$filter${stack}xstack=inputs=$n:layout=$layout:fill=black,pad=$((cols * 640)):$((rows * 360)):0:0:black,scale=iw/2:-2[out]" \
 		-map "[out]" -t 3 -c:v libx264 -pix_fmt yuv420p -crf 20 "$out/${pack}_grid.mp4"
+	case $pack in arrow_trail) grid_t=${GRID_T:-0.9} ;; *) grid_t=${GRID_T:-1.5} ;; esac
 	ffmpeg -y -loglevel error -ss "$grid_t" -i "$out/${pack}_grid.mp4" -frames:v 1 "$out/${pack}_grid.png"
 	echo "$out/${pack}_grid.mp4 ($n systems)"
 	# The whole pack in one scene, laid out like the listing's showcase shot:
