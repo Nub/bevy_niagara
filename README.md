@@ -11,6 +11,38 @@ A Niagara-style GPU particle system for [Bevy](https://bevyengine.org), with an 
 
 Effects live in [`effects/`](effects/README.md); benchmarks in [`bench/`](bench/README.md).
 
+## Gallery
+
+All media is rendered headlessly with `fxpreview` (see `crates/fx_preview`).
+
+### Imported from Niagara
+
+Unreal Niagara systems converted by `fximport` and rendered with an Unreal-like look (`--look ue`). Perfect Fire VFX and Free Arrow Trail are third-party Fab packs; only these renders are included here, not the source files.
+
+![Fire lineup](docs/media/fire_lineup.png)
+
+|   |   |   |
+|:--:|:--:|:--:|
+| ![NS_Fire_Big](docs/media/fire_NS_Fire_Big.gif)<br>NS_Fire_Big | ![NS_Fire_Medium](docs/media/fire_NS_Fire_Medium.gif)<br>NS_Fire_Medium | ![NS_Fire_Floor_01](docs/media/fire_NS_Fire_Floor_01.gif)<br>NS_Fire_Floor_01 |
+| ![NS_Fire_Small_Smoke](docs/media/fire_NS_Fire_Small_Smoke.gif)<br>NS_Fire_Small_Smoke |  |  |
+
+![Arrow trail lineup](docs/media/arrow_lineup.png)
+
+|   |   |   |
+|:--:|:--:|:--:|
+| ![NS_ArrowTrail_Fire](docs/media/arrow_NS_ArrowTrail_Fire.gif)<br>NS_ArrowTrail_Fire | ![NS_ArrowTrail_Ice](docs/media/arrow_NS_ArrowTrail_Ice.gif)<br>NS_ArrowTrail_Ice | ![NS_ArrowTrail_Magic](docs/media/arrow_NS_ArrowTrail_Magic.gif)<br>NS_ArrowTrail_Magic |
+| ![NS_ArrowTrail_Holy](docs/media/arrow_NS_ArrowTrail_Holy.gif)<br>NS_ArrowTrail_Holy |  |  |
+
+### Built-in effects
+
+Authored in [`effects/library`](effects/library/README.md).
+
+|   |   |   |
+|:--:|:--:|:--:|
+| ![campfire](docs/media/fx_campfire.gif)<br>campfire | ![fireworks_show](docs/media/fx_fireworks_show.gif)<br>fireworks_show | ![portal_vortex](docs/media/fx_portal_vortex.gif)<br>portal_vortex |
+| ![lightning_strike](docs/media/fx_lightning_strike.gif)<br>lightning_strike | ![stylized_tornado](docs/media/fx_stylized_tornado.gif)<br>stylized_tornado | ![sword_trail](docs/media/fx_sword_trail.gif)<br>sword_trail |
+| ![magic_swirl](docs/media/fx_magic_swirl.gif)<br>magic_swirl | ![meteor_rain](docs/media/fx_meteor_rain.gif)<br>meteor_rain | |
+
 ## Building
 
 The workspace builds against a Bevy 0.20-dev fork (`bevy-solari-opt`) that is referenced by local path in `Cargo.toml`; it does not build without that checkout.
