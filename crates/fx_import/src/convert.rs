@@ -2421,6 +2421,12 @@ fn init_particle<'m>(cx: &mut Cx, e: &NEmitter, m: &'m NModule, o: &mut Out, use
         if let Some(v) = cx.input(e, m, "Position", Unit::Len, Ty::Vec3, o) {
             x.set("Position", v);
         }
+    } else if m.switch("UsePositionOffset") == Some("true") {
+        // Simulation Position plus Position Offset (e.g. a fire's light
+        // 40 cm above the floor rather than on it).
+        if let Some(v) = cx.input(e, m, "Position Offset", Unit::Len, Ty::Vec3, o) {
+            x.set("Position", v);
+        }
     }
     // Sprite size.
     let size = |cx: &mut Cx, o: &mut Out, md: Option<u32>, prefix: &str, ty: Ty, unit: Unit| -> Option<Fx> {
