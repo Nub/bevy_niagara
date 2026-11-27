@@ -569,6 +569,19 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
                 bytes: r.bytes(end - start)?.to_vec(),
             }
         }
+        11 => {
+            // StringTableEntry: the table id (FName) and the key; kept raw.
+            let start = r.pos();
+            r.i32()?;
+            r.i32()?;
+            r.fstring()?;
+            let end = r.pos();
+            r.seek(start)?;
+            Text::Other {
+                history: 11,
+                bytes: r.bytes(end - start)?.to_vec(),
+            }
+        }
         h if !owns_rest => return Err(r.err(format!("FText history type {h} is not supported here"))),
         h => {
             // Kept raw: the text owns the rest of the reader.
