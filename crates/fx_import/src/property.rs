@@ -420,7 +420,7 @@ fn top_value(r: &mut Reader, tag: &Tag, ctx: &mut Ctx) -> Value {
     let start = r.pos();
     let first = top_value_once(r, tag, ctx, start);
     let texty = tag.ty.name == "TextProperty" || (tag.ty.name == "ArrayProperty" && tag.ty.inner_name() == Some("TextProperty"));
-    if texty && first.is_err() && ctx.v.editor_object.is_none() && r.seek(start).is_ok() {
+    if texty && first.is_err() && r.seek(start).is_ok() {
         FORCE_TEXT_INVARIANT.with(|f| f.set(true));
         let second = top_value_once(r, tag, ctx, start);
         FORCE_TEXT_INVARIANT.with(|f| f.set(false));
@@ -570,7 +570,7 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
     let history = r.i8()?;
     Ok(match history {
         -1 => {
-            // Some UE 5.8 packages leave the EditorObject version out but
+            // Some UE 5.8 packages give an old (or no) EditorObject version but
             // still write the flag: `top_value` retries with it forced.
             let has_flag = ctx.v.editor_object.unwrap_or(0) >= custom::EDITOR_CULTURE_INVARIANT_TEXT || FORCE_TEXT_INVARIANT.with(|f| f.get());
             let invariant = if has_flag && r.bool32()? {
