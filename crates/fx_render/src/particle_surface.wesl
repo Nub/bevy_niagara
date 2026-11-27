@@ -179,3 +179,69 @@ fn ribbon_builtin_texel(v: f32) -> vec4<f32> {
     let x = v * 2.0 - 1.0;
     return vec4<f32>(1.0, 1.0, 1.0, 1.0 - x * x);
 }
+
+// ----------------------------------------------------------------- meshes
+// Shared by the raster mesh shader (`mesh.wesl`) and fx_solari's mesh proxy
+// pass, so a mesh particle sits in reflections where it is drawn.
+
+// q * v * q⁻¹ for unit quaternion q = (x, y, z, w).
+fn mesh_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+// Rotation taking the mesh's X axis to `x` (world), keeping Y as close to
+// world up as it can.
+fn mesh_facing_basis(x: vec3<f32>) -> mat3x3<f32> {
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(dot(x, up)) > 0.999) {
+        up = vec3<f32>(0.0, 0.0, 1.0);
+    }
+    let z = normalize(cross(x, up));
+    let y = cross(z, x);
+    return mat3x3<f32>(x, y, z);
+}
+
+// A mesh particle's vertex in world space, with its (unnormalized) normal.
+struct MeshPoint {
+    world: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+// Where mesh vertex `p` (normal `nrm`) of a particle at world `center` lies:
+// scaled by `scale`, rotated by quaternion `q` (Particles.MeshOrientation),
+// then turned by the facing mode (0 Default: the effect transform `m`; 1
+// Velocity: X along world velocity `vel`; 2 CameraPosition: X toward
+// `cam_position`; 3 CameraPlane: X along the view direction, -`cam_back`).
+fn mesh_point(
+    m: mat4x4<f32>,
+    center: vec3<f32>,
+    vel: vec3<f32>,
+    scale: vec3<f32>,
+    q: vec4<f32>,
+    p: vec3<f32>,
+    nrm: vec3<f32>,
+    facing_mode: u32,
+    cam_position: vec3<f32>,
+    cam_back: vec3<f32>,
+) -> MeshPoint {
+    var offset = mesh_rotate(q, p * scale);
+    // Normals transform by the inverse scale.
+    var normal = mesh_rotate(q, nrm / select(scale, vec3<f32>(1.0), scale == vec3<f32>(0.0)));
+    var x = vec3<f32>(0.0);
+    switch facing_mode {
+        case 1u: { x = vel; }
+        case 2u: { x = cam_position - center; }
+        case 3u: { x = -cam_back; }
+        default: {}
+    }
+    if (facing_mode != 0u && length(x) > 1e-6) {
+        let f = mesh_facing_basis(normalize(x));
+        offset = f * offset;
+        normal = f * normal;
+    } else {
+        offset = (m * vec4<f32>(offset, 0.0)).xyz;
+        normal = (m * vec4<f32>(normal, 0.0)).xyz;
+    }
+    return MeshPoint(center + offset, normal);
+}

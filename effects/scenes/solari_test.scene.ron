@@ -3,8 +3,8 @@
 // fxsolari builds the room: a polished floor (glossy reflections), a white
 // back wall with a mirror on its right, a left wall, two occluders (a pillar
 // between the fires, a crate by the wall) and a dim ceiling light. This file
-// places the effects; every sprite and ribbon renderer is ray traced in
-// `--mode on` (mesh renderers have no proxy yet, so none are used here).
+// places the effects; every sprite, ribbon and mesh renderer is ray traced in
+// `--mode on`.
 //
 // Paths are relative to the repository root. `optional` effects are skipped
 // when missing: NS_Fire_Big is the git-ignored Fab import
@@ -21,5 +21,7 @@
         (file: "crates/fx_solari/scenes/sword_trail_rt.fx.ron", at: (1.9, -0.25, 0.6)),
         // Sparks behind the camera: seen only in the mirror and the floor.
         (file: "crates/fx_solari/scenes/sparks_rt.fx.ron", at: (2.4, 0.0, 9.6), yaw: 180.0),
+        // Mesh debris (lit opaque cubes): in the floor reflection, shadowed by the ceiling light.
+        (file: "effects/library/debris.fx.ron", at: (-1.7, 0.0, 2.0)),
     ],
 )

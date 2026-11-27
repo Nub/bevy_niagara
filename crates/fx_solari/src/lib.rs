@@ -31,6 +31,14 @@
 //!   occlude by their alpha too (Solari treats shadow and path rays alike),
 //!   so a light renderer's lights inside a dense fire are partly shadowed by
 //!   its own flames.
+//! - **Mesh particles** (mesh renderers with `ray_tracing: true`): the proxy
+//!   mesh holds one copy of the renderer's mesh per slot (up to
+//!   `ray_tracing_max_particles`, default 256, and 65535 triangles), placed
+//!   by `mesh_proxy.wesl` exactly where `mesh.wesl` draws them (shared
+//!   `particle_surface::mesh_point`): still one BLAS and one TLAS instance
+//!   per emitter. Opaque meshes get an opaque BLAS; lit meshes are shaded by
+//!   Solari with the particle colour (times their texture, UVs clamped to
+//!   0..1); unlit or additive ones emit it.
 //! - **Custom materials** (`material: "x.wesl"`, e.g. imported Unreal
 //!   materials) cannot run at ray hits: rays see the built-in soft sprite (or
 //!   ribbon edges) tinted by the particle colour.
@@ -67,11 +75,12 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 use bevy::shader::load_shader_library;
 use bevy::solari::prelude::{RaytracingMesh3d, SolariLighting};
 use bevy::solari::scene::{RaytracingMaterial, RaytracingMaterialDescription, SolariMaterialPlugin};
-use fx_core::cook::{CookedRenderer, CookedRibbon, CookedSprite, CookedSystem};
-use fx_core::render::{BlendMode, FacingMode, RibbonFacingMode, RibbonLinkOrderMode, RibbonUvMode, SpriteAlignment};
+use fx_core::cook::{CookedMesh, CookedRenderer, CookedRibbon, CookedSprite, CookedSystem};
+use fx_core::render::{BlendMode, MeshBlendMode, MeshFacingMode, FacingMode, RibbonFacingMode, RibbonLinkOrderMode, RibbonUvMode, SpriteAlignment};
 use fx_gpu::view::{CullRadius, SortMode, ViewDraw, ViewDrawConfig};
 use fx_gpu::wgpu;
 use fx_render::{FxRenderGraphSystems, FxState, NO_VIEW, ParticleEffect};
+use fx_render::mesh_data::MeshData;
 
 /// Most particles of one emitter in ray tracing: Solari samples an emissive
 /// mesh's triangles with a 16-bit index, and each particle has 4 triangles.
@@ -91,6 +100,7 @@ impl Plugin for FxSolariPlugin {
         load_shader_library!(app, "particle_hit.wesl");
         embedded_asset!(app, "proxy.wesl");
         embedded_asset!(app, "ribbon_proxy.wesl");
+        embedded_asset!(app, "mesh_proxy.wesl");
         app.init_asset::<ParticleRtMaterial>()
             .add_plugins(SolariMaterialPlugin::<ParticleRtMaterial>::default())
             .init_resource::<Proxies>()
@@ -145,6 +155,8 @@ pub struct ParticleRtMaterial {
     /// sampling aims rays at it. Otherwise it lights the scene only where
     /// bounce rays hit it (unbiased, noisier, much cheaper).
     pub lights: bool,
+    /// An opaque mesh: rays never pass through it.
+    pub opaque: bool,
 }
 
 impl Material for ParticleRtMaterial {}
@@ -155,7 +167,10 @@ impl RaytracingMaterial for ParticleRtMaterial {
     }
 
     fn raytracing_description(&self) -> RaytracingMaterialDescription {
-        let flags = self.emissive as u32 | (self.additive as u32) << 1 | (self.ribbon as u32) << 2;
+        let flags = self.emissive as u32
+            | (self.additive as u32) << 1
+            | (self.ribbon as u32) << 2
+            | (self.opaque as u32) << 3;
         RaytracingMaterialDescription {
             fallback: StandardMaterial {
                 base_color: if self.emissive { Color::BLACK } else { Color::WHITE },
@@ -166,7 +181,7 @@ impl RaytracingMaterial for ParticleRtMaterial {
                 } else {
                     LinearRgba::BLACK
                 },
-                alpha_mode: AlphaMode::Mask(ALPHA_CUTOFF),
+                alpha_mode: if self.opaque { AlphaMode::Opaque } else { AlphaMode::Mask(ALPHA_CUTOFF) },
                 double_sided: true,
                 cull_mode: None,
                 perceptual_roughness: 1.0,
@@ -196,6 +211,9 @@ impl RaytracingMaterial for ParticleRtMaterial {
 pub enum ProxyRenderer {
     Sprite(CookedSprite),
     Ribbon(CookedRibbon),
+    /// The renderer and its mesh's vertices (8 floats each: position,
+    /// normal, uv), which the proxy pass places once per slot.
+    Mesh(CookedMesh, Arc<Vec<f32>>),
 }
 
 /// The ray-tracing proxy of one sprite or ribbon renderer of a [`ParticleEffect`].
@@ -222,7 +240,54 @@ const RIBBON_TEXELS: u32 = 3;
 struct Proxies {
     by_renderer: HashMap<(Entity, usize), (Entity, usize)>,
     builtin_sprites: HashMap<(u32, u32), Handle<Image>>,
+    /// Mesh renderers' meshes by name, and their data once loaded and
+    /// converted (`None`: it cannot be drawn; fx_render logs why).
+    meshes: HashMap<String, Handle<Mesh>>,
+    mesh_data: HashMap<String, Option<Arc<MeshData>>>,
     radiance_scale: f32,
+}
+
+/// Most triangles in one mesh proxy (Solari indexes an emissive mesh's
+/// triangles with 16 bits).
+const MAX_MESH_TRIANGLES: u32 = 65535;
+
+/// Slots of a mesh proxy: up to `max` particles, as many copies of a mesh of
+/// `triangles` as fit in [`MAX_MESH_TRIANGLES`] (at least one).
+fn mesh_slots(max_particles: u32, max: u32, triangles: u32) -> u32 {
+    max_particles
+        .clamp(1, MAX_SLOTS)
+        .min(max.max(1))
+        .min((MAX_MESH_TRIANGLES / triangles.max(1)).max(1))
+}
+
+/// One copy of `src` per slot; slot k's UVs are (2k + u, v), u clamped to
+/// 0..1 (the hit function finds the slot from u).
+fn mesh_proxy_mesh(src: &MeshData, slots: u32, opaque: bool) -> Mesh {
+    let nv = src.vertices.len() / 8;
+    let n = nv * slots as usize;
+    let mut uvs = Vec::with_capacity(n);
+    let mut normals = Vec::with_capacity(n);
+    let mut indices = Vec::with_capacity(src.indices.len() * slots as usize);
+    for k in 0..slots {
+        for v in src.vertices.chunks_exact(8) {
+            normals.push([v[3], v[4], v[5]]);
+            uvs.push([2.0 * k as f32 + v[6].clamp(0.0, 1.0), v[7]]);
+        }
+        let b = k * nv as u32;
+        indices.extend(src.indices.iter().map(|i| b + i));
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; n])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[1.0f32, 0.0, 0.0, 1.0]; n])
+        .with_inserted_indices(Indices::U32(indices));
+    mesh.raytracing = if opaque {
+        MeshRaytracingFlags::OPAQUE
+    } else {
+        MeshRaytracingFlags::NON_OPAQUE
+    };
+    mesh
 }
 
 fn renderers(sys: &CookedSystem) -> impl Iterator<Item = (usize, &CookedRenderer)> {
@@ -287,6 +352,30 @@ fn ribbon_slots(max_particles: u32, tessellation: u32) -> u32 {
     (max_particles.saturating_sub(1).max(1) * tessellation.clamp(1, 16)).min(MAX_SLOTS)
 }
 
+/// The data of mesh renderer mesh `name` (a built-in shape or an asset
+/// path), once loaded; `None` while loading or when it cannot be drawn.
+fn mesh_source(
+    proxies: &mut Proxies,
+    name: &str,
+    meshes: &mut Assets<Mesh>,
+    asset_server: &AssetServer,
+) -> Option<Arc<MeshData>> {
+    if let Some(data) = proxies.mesh_data.get(name) {
+        return data.clone();
+    }
+    let handle = proxies
+        .meshes
+        .entry(name.to_string())
+        .or_insert_with(|| match fx_render::mesh_data::builtin(name) {
+            Some(mesh) => meshes.add(mesh),
+            None => fx_render::load_mesh_asset(asset_server, name),
+        })
+        .clone();
+    let data = fx_render::mesh_data::convert(meshes.get(&handle)?).ok().map(Arc::new);
+    proxies.mesh_data.insert(name.to_string(), data.clone());
+    data
+}
+
 /// Spawns, replaces and despawns the proxies of ray-traced sprite and ribbon
 /// renderers (only while a Solari camera is active),
 /// and keeps their emission in step with the Solari camera's exposure.
@@ -326,6 +415,7 @@ fn sync_proxies(
             let traced = match r {
                 CookedRenderer::Sprite(s) => s.ray_tracing,
                 CookedRenderer::Ribbon(r) => r.ray_tracing,
+                CookedRenderer::Mesh(m) => m.ray_tracing,
                 _ => false,
             };
             if !traced {
@@ -337,6 +427,17 @@ fn sync_proxies(
                 Some(&(old, _)) => commands.entity(old).despawn(),
                 None => {}
             }
+            // A mesh renderer's proxy waits for its mesh to load.
+            let mesh_source = match r {
+                CookedRenderer::Mesh(m) => {
+                    let Some(src) = mesh_source(proxies, &m.mesh, &mut meshes, &asset_server) else {
+                        proxies.by_renderer.remove(&(effect, ri));
+                        continue;
+                    };
+                    Some(src)
+                }
+                _ => None,
+            };
             let max_particles = fx.system.emitters[ei].max_particles;
             let (slots, data, material, settings) = match r {
                 CookedRenderer::Sprite(s) => {
@@ -366,6 +467,7 @@ fn sync_proxies(
                         radiance_scale,
                         ribbon: false,
                         lights: s.ray_tracing_lights,
+                        opaque: false,
                     };
                     (slots, data, material, ProxyRenderer::Sprite(s.clone()))
                 }
@@ -387,10 +489,42 @@ fn sync_proxies(
                         radiance_scale,
                         ribbon: true,
                         lights: rb.ray_tracing_lights,
+                        opaque: false,
                     };
                     (slots, data, material, ProxyRenderer::Ribbon(rb.clone()))
                 }
+                CookedRenderer::Mesh(m) => {
+                    let src = mesh_source.clone().unwrap();
+                    let slots = mesh_slots(max_particles, m.ray_tracing_max_particles, src.indices.len() as u32 / 3);
+                    let data = images.add(data_image(SPRITE_TEXELS * slots));
+                    let opaque = m.blend_mode == MeshBlendMode::Opaque;
+                    let material = ParticleRtMaterial {
+                        // Custom materials: rays see plain particle colour.
+                        sprite: m
+                            .texture
+                            .as_ref()
+                            .filter(|_| m.material.is_none())
+                            .map(|path| asset_server.load::<Image>(path.clone())),
+                        data: data.clone(),
+                        emissive: !m.lit || m.blend_mode == MeshBlendMode::Additive,
+                        additive: m.blend_mode == MeshBlendMode::Additive,
+                        sub_image: [1, 1],
+                        sub_uv_blending: false,
+                        radiance_scale,
+                        ribbon: false,
+                        lights: m.ray_tracing_lights,
+                        opaque,
+                    };
+                    let verts = Arc::new(src.vertices.clone());
+                    (slots, data, material, ProxyRenderer::Mesh(m.clone(), verts))
+                }
                 _ => unreachable!(),
+            };
+            let proxy_mesh = match (&settings, &mesh_source) {
+                (ProxyRenderer::Mesh(m, _), Some(src)) => {
+                    mesh_proxy_mesh(src, slots, m.blend_mode == MeshBlendMode::Opaque)
+                }
+                _ => proxy_mesh(slots),
             };
             let material = materials.add(material);
             let proxy = commands
@@ -404,7 +538,7 @@ fn sync_proxies(
                         data,
                         settings,
                     },
-                    RaytracingMesh3d(meshes.add(proxy_mesh(slots))),
+                    RaytracingMesh3d(meshes.add(proxy_mesh)),
                     MeshMaterial3d(material),
                     // Particles are written in world space.
                     Transform::IDENTITY,
@@ -467,6 +601,8 @@ struct ProxyGpu {
     particles: fx_gpu::Region,
     /// Sprites: every living particle, compacted. Ribbons use fx_render's sort.
     draw: Option<ViewDraw>,
+    /// Meshes: the renderer's mesh vertices (8 floats each).
+    source: Option<wgpu::Buffer>,
     uniform: wgpu::Buffer,
     data_view: Option<(AssetId<Image>, TextureView)>,
     scratch: [u8; PARAMS_BYTES],
@@ -479,6 +615,8 @@ struct ProxyState {
     pipeline: CachedComputePipelineId,
     ribbon_layout: BindGroupLayoutDescriptor,
     ribbon_pipeline: CachedComputePipelineId,
+    mesh_layout: BindGroupLayoutDescriptor,
+    mesh_pipeline: CachedComputePipelineId,
     entries: HashMap<Entity, ProxyGpu>,
     /// The camera sprites face: position, right, up, back (world).
     camera: [Vec4; 4],
@@ -529,11 +667,35 @@ fn init_proxy_state(mut commands: Commands, asset_server: Res<AssetServer>, cach
         entry_point: Some("ribbon_proxy".into()),
         ..default()
     });
+    let mesh_layout = BindGroupLayoutDescriptor::new(
+        "fx rt mesh proxy",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_sized(false, None),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            ),
+        ),
+    );
+    let mesh_pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("fx rt mesh proxy".into()),
+        layout: vec![mesh_layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "mesh_proxy.wesl"),
+        entry_point: Some("mesh_proxy".into()),
+        ..default()
+    });
     commands.insert_resource(ProxyState {
         layout,
         pipeline,
         ribbon_layout,
         ribbon_pipeline,
+        mesh_layout,
+        mesh_pipeline,
         entries: HashMap::default(),
         camera: [Vec4::ZERO, Vec4::X, Vec4::Y, Vec4::Z],
     });
@@ -570,7 +732,7 @@ fn prepare_proxies(
                 p.render,
                 ProxyGpu {
                     particles: em.particles[0].clone(),
-                    draw: matches!(p.settings, ProxyRenderer::Sprite(_)).then(|| {
+                    draw: matches!(p.settings, ProxyRenderer::Sprite(_) | ProxyRenderer::Mesh(..)).then(|| {
                         ViewDraw::with_config(
                             wd,
                             fx.view_pipelines(),
@@ -582,6 +744,17 @@ fn prepare_proxies(
                             },
                         )
                     }),
+                    source: match &p.settings {
+                        ProxyRenderer::Mesh(_, vertices) => {
+                            use wgpu::util::DeviceExt;
+                            Some(wd.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("fx rt mesh proxy source"),
+                                contents: bytemuck::cast_slice(vertices.as_slice()),
+                                usage: wgpu::BufferUsages::STORAGE,
+                            }))
+                        }
+                        _ => None,
+                    },
                     uniform: wd.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("fx rt proxy params"),
                         size: PARAMS_BYTES as u64,
@@ -655,14 +828,16 @@ fn write_proxies(
     if extracted.0.is_empty() {
         return;
     }
-    let (Some(pipeline), Some(ribbon_pipeline)) = (
+    let (Some(pipeline), Some(ribbon_pipeline), Some(mesh_pipeline)) = (
         pipeline_cache.get_compute_pipeline(state.pipeline),
         pipeline_cache.get_compute_pipeline(state.ribbon_pipeline),
+        pipeline_cache.get_compute_pipeline(state.mesh_pipeline),
     ) else {
         return;
     };
     let layout = pipeline_cache.get_bind_group_layout(&state.layout);
     let ribbon_layout = pipeline_cache.get_bind_group_layout(&state.ribbon_layout);
+    let mesh_layout = pipeline_cache.get_bind_group_layout(&state.mesh_layout);
     let state = &mut *state;
     let camera = state.camera;
     let recorder = ctx.diagnostic_recorder();
@@ -747,7 +922,7 @@ fn write_proxies(
                         texture(5),
                     ],
                 });
-                (bind_group, pipeline, words[43])
+                (bind_group, pipeline, [words[43], 1])
             }
             ProxyRenderer::Ribbon(r) => {
                 // This frame's sort and ribbon build, recorded by fx_render.
@@ -790,7 +965,43 @@ fn write_proxies(
                         texture(7),
                     ],
                 });
-                (bind_group, ribbon_pipeline, p.slots)
+                (bind_group, ribbon_pipeline, [p.slots, 1])
+            }
+            ProxyRenderer::Mesh(mr, vertices) => {
+                let (Some(draw), Some(source)) = (&mut entry.draw, &entry.source) else { continue };
+                let mesh_vertices = (vertices.len() / 8) as u32;
+                // Uniform (see `MeshProxyParams` in mesh_proxy.wesl).
+                words[32] = em.capacity;
+                words[33] = p.slots.min(em.capacity);
+                words[34] = mesh_vertices;
+                words[35] = match mr.facing_mode {
+                    MeshFacingMode::Default => 0,
+                    MeshFacingMode::Velocity => 1,
+                    MeshFacingMode::CameraPosition => 2,
+                    MeshFacingMode::CameraPlane => 3,
+                };
+                words[36] = slice.range.start * stride;
+                words[37] = stride;
+                words[38] = normal_offset;
+                words[39] = tangent_offset;
+                words[40] = DATA_WIDTH;
+                words[41] = (em.words > fx_gpu::WORDS_PER_PARTICLE) as u32;
+                words[42] = (mr.blend_mode == MeshBlendMode::Opaque) as u32;
+                draw.record(&queue, encoder, fx.view_pipelines(), em, &NO_VIEW);
+                let bind_group = device.wgpu_device().create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("fx rt mesh proxy"),
+                    layout: &mesh_layout,
+                    entries: &[
+                        buffer(0, &entry.uniform),
+                        wgpu::BindGroupEntry { binding: 1, resource: em.particles[em.current].binding() },
+                        buffer(2, &draw.indices),
+                        buffer(3, &draw.draw_args),
+                        buffer(4, source),
+                        buffer(5, &slice.buffer),
+                        texture(6),
+                    ],
+                });
+                (bind_group, mesh_pipeline, [mesh_vertices, words[33]])
             }
         };
         entry.scratch.copy_from_slice(bytemuck::cast_slice(&words));
@@ -801,7 +1012,7 @@ fn write_proxies(
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(threads.div_ceil(64), 1, 1);
+        pass.dispatch_workgroups(threads[0].div_ceil(64), threads[1], 1);
     }
     span.end(encoder);
 }
@@ -839,6 +1050,39 @@ mod tests {
         assert!(image.texture_descriptor.usage.contains(TextureUsages::STORAGE_BINDING));
         // Solari indexes an emissive mesh's triangles with 16 bits.
         assert!(4 * MAX_SLOTS <= u16::MAX as u32);
+    }
+
+    #[test]
+    fn mesh_proxy_has_one_mesh_copy_per_slot() {
+        let src = fx_render::mesh_data::convert(&fx_render::mesh_data::builtin("cube").unwrap()).unwrap();
+        let nv = src.vertices.len() / 8;
+        let mesh = mesh_proxy_mesh(&src, 3, true);
+        assert_eq!(mesh.count_vertices(), 3 * nv);
+        let Some(Indices::U32(indices)) = mesh.indices() else { panic!("u32 indices") };
+        assert_eq!(indices.len(), 3 * src.indices.len());
+        // Every triangle stays within one copy, and copy k's u is in [2k, 2k + 1].
+        for tri in indices.chunks(3) {
+            assert!(tri.iter().all(|&i| i as usize / nv == tri[0] as usize / nv));
+        }
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else {
+            panic!("uvs")
+        };
+        for (v, uv) in uvs.iter().enumerate() {
+            assert_eq!((uv[0] / 2.0).floor() as usize, v / nv);
+        }
+        assert_eq!(mesh.raytracing, MeshRaytracingFlags::OPAQUE);
+        assert_eq!(mesh_proxy_mesh(&src, 1, false).raytracing, MeshRaytracingFlags::NON_OPAQUE);
+    }
+
+    #[test]
+    fn mesh_slots_respect_particles_setting_and_triangle_cap() {
+        assert_eq!(mesh_slots(256, 256, 12), 256);
+        assert_eq!(mesh_slots(80, 256, 12), 80);
+        assert_eq!(mesh_slots(1000, 40, 12), 40);
+        // A 1088-triangle sphere: 60 copies fit in 65535 triangles.
+        assert_eq!(mesh_slots(256, 256, 1088), 60);
+        assert_eq!(mesh_slots(256, 256, 100_000), 1);
+        assert_eq!(mesh_slots(0, 0, 0), 1);
     }
 
     #[test]

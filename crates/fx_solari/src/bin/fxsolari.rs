@@ -282,6 +282,7 @@ fn load_scene(path: &Path, ray_tracing: bool) -> Result<Scene, String> {
                         s.material.as_mut().map(abs);
                     }
                     CookedRenderer::Mesh(s) => {
+                        s.ray_tracing = ray_tracing;
                         if !fx_core::render::MESH_BUILTINS.contains(&s.mesh.as_str()) {
                             abs(&mut s.mesh);
                         }

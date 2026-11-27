@@ -1,0 +1,12 @@
+// Mesh particles under Solari (`fxsolari shot --scene effects/scenes/solari_debris.scene.ron`):
+// the library debris (lit opaque cubes and dust) close up in the verification
+// room, its chunks mid-flight over the polished floor (default shot: 150
+// frames = 0.5 s after the 2 s burst). In `--mode on` the chunks show in the
+// floor reflection and cast shadows from the ceiling light; in `--mode raster`
+// the floor reflects nothing.
+(
+    camera: (from: (-0.2, 1.3, 4.6), to: (-1.6, 0.7, 1.6)),
+    effects: [
+        (file: "effects/library/debris.fx.ron", at: (-1.7, 0.0, 2.0)),
+    ],
+)

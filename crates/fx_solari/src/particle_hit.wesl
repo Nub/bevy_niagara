@@ -1,7 +1,10 @@
-// Solari hit function of ray-traced particles (`ParticleRtMaterial`): sprites
-// and ribbons.
+// Solari hit function of ray-traced particles (`ParticleRtMaterial`): sprites,
+// ribbons and meshes.
 //
 // The proxy geometry gives each slot k two quads with UV (2k + u, v).
+// Meshes (`mesh_proxy.wesl`) share the sprite layout: slot k is one copy of
+// the mesh with UV (2k + u, v), u clamped to 0..1; no flipbook (1 x 1), the
+// texture optional, opaque meshes keep every hit.
 // Sprites (`proxy.wesl`): the particle's colour (texel 2k) and normalized age
 // (texel 2k + 1) are in the material's data texture; the surface is the raster
 // sprite's: particle colour times the (flipbook) sprite texture.
@@ -25,6 +28,8 @@ const FLAG_EMISSIVE = 1u;
 const FLAG_ADDITIVE = 2u;
 // A ribbon proxy (three texels per slot).
 const FLAG_RIBBON = 4u;
+// Opaque (mesh renderers with blend_mode Opaque): every hit is kept.
+const FLAG_OPAQUE = 8u;
 
 fn texel_at(id: u32, t: u32, width: u32) -> vec4<f32> {
     return textureLoad(textures[id], vec2<u32>(t % width, t / width), 0);
@@ -60,11 +65,15 @@ fn raytracing_hit(input: RaytracingHitInput) -> RaytracingSurface {
         let extra = texel_at(data_id, t + 1u, width);
         weight = max(extra.y, 1.0);
         let frame = flipbook(extra.x, quad_uv, input.params[0].xy, input.params[0].z > 0.5);
-        let tex = mix(
-            sample_material_texture(input, 0u, frame.uv0),
-            sample_material_texture(input, 0u, frame.uv1),
-            frame.blend,
-        );
+        // (Meshes without a texture draw plain colour.)
+        var tex = vec4<f32>(1.0);
+        if input.texture_ids[0] != 0xFFFFFFFFu {
+            tex = mix(
+                sample_material_texture(input, 0u, frame.uv0),
+                sample_material_texture(input, 0u, frame.uv1),
+                frame.blend,
+            );
+        }
         texel = sprite_texel(color, tex);
     }
 
@@ -84,7 +93,7 @@ fn raytracing_hit(input: RaytracingHitInput) -> RaytracingSurface {
     // them would, and emits `weight` times their light over that coverage.
     let a = 1.0 - pow(1.0 - a1, weight);
     let gain = select(1.0, weight * a1 / a, a > 0.0);
-    let kept = a > 1.0 / 255.0 && hit_random(input.world_position, input.time) < a;
+    let kept = (flags & FLAG_OPAQUE) != 0u || (a > 1.0 / 255.0 && hit_random(input.world_position, input.time) < a);
     surface.alpha = select(0.0, 1.0, kept);
     if (flags & FLAG_EMISSIVE) != 0u {
         // Kept hits emit the full colour: on average colour x alpha, as the

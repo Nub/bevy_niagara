@@ -42,7 +42,7 @@ pub mod asset;
 pub mod component;
 pub mod data;
 pub mod game;
-mod mesh_data;
+pub mod mesh_data;
 mod scene;
 pub mod stats;
 mod textures;
@@ -2828,7 +2828,7 @@ fn assets_hash(assets: &[RendererAssets]) -> u64 {
 
 /// A mesh renderer's mesh asset: a glTF file without a label is its first
 /// primitive (`"x.glb"` = `"x.glb#Mesh0/Primitive0"`).
-fn load_mesh_asset(asset_server: &AssetServer, mesh: &str) -> Handle<Mesh> {
+pub fn load_mesh_asset(asset_server: &AssetServer, mesh: &str) -> Handle<Mesh> {
     let path = bevy::asset::AssetPath::parse(mesh).into_owned();
     let gltf = matches!(path.get_full_extension().as_deref(), Some("glb") | Some("gltf"));
     if path.label().is_none() && gltf {
