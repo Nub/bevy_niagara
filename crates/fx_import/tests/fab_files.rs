@@ -38,6 +38,11 @@ const PACKS: &[(&str, usize)] = &[
     ("portals", 11),
     ("mixed_vfx", 67),
     ("mayu_basic", 4),
+    ("niagara_examples", 67),
+    ("m5_fire", 60),
+    ("fire_explosion", 10),
+    ("sparkles", 14),
+    ("loot_drops", 7),
 ];
 
 /// The pack folder a file is in (`testdata/fab/<pack>/...`).
@@ -51,7 +56,40 @@ fn find_file(pack: &str, name: &str) -> Option<PathBuf> {
 }
 
 fn is_system(p: &Path) -> bool {
-    p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("NS_"))
+    // M5 VFX names its systems NFire_* (and its blueprints NFire_*_BP, kept
+    // in BluePrints/).
+    let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    n.starts_with("NS_") || (n.starts_with("NFire_") && !p.to_string_lossy().contains("/BluePrints/"))
+}
+
+/// Converts one system into a temporary folder; its .fx.ron text.
+fn convert_text(f: &Path, tag: &str) -> String {
+    let out = std::env::temp_dir().join(format!("fx_import_fab_{tag}_{}", std::process::id()));
+    let r = fx_import::convert_file(f, &out).unwrap();
+    assert!(r.report.validation.is_empty(), "{}: {:?}", f.display(), r.report.validation);
+    let text = std::fs::read_to_string(&r.ron_path).unwrap();
+    let _ = std::fs::remove_dir_all(&out);
+    text
+}
+
+#[test]
+fn emitter_stack_curves_sample_the_emitter_age() {
+    // NS_Explosion's spark emitter ramps its Spawn Rate down with a curve in
+    // Emitter Update, indexed by the emitter's normalised age.
+    let Some(f) = find_file("niagara_examples", "NS_Explosion.uasset") else { return };
+    let text = convert_text(&f, "explosion");
+    let line = text.lines().find(|l| l.contains("module: \"Spawn Rate\"") && l.contains("from Curve")).expect("Spawn Rate over a curve");
+    assert!(line.contains("\"Normalized Emitter Age\""), "{line}");
+}
+
+#[test]
+fn ue5_spawn_spacing_becomes_spawn_per_unit() {
+    // Epic's trails save Spawn Spacing (cm between particles); ours takes
+    // particles per metre.
+    let Some(f) = find_file("niagara_examples", "NS_BulletTracer.uasset") else { return };
+    let text = convert_text(&f, "tracer");
+    let line = text.lines().find(|l| l.contains("module: \"Spawn Per Unit\"")).expect("Spawn Per Unit");
+    assert!(line.contains("\"Spawn Per Unit\":") && !line.contains("Spawn Spacing"), "{line}");
 }
 
 #[test]

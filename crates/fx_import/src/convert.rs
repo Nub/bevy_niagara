@@ -516,6 +516,139 @@ fn system_loops(sys: &NSystem) -> Loops {
     l
 }
 
+/// Unreal's /Engine/BasicShapes/Plane (100 cm square in XY, facing +Z) in
+/// our convention: 1 m square in XZ facing +Y, UVs across it.
+fn engine_plane() -> crate::mesh::MeshData {
+    crate::mesh::MeshData {
+        positions: vec![[-0.5, 0.0, -0.5], [0.5, 0.0, -0.5], [0.5, 0.0, 0.5], [-0.5, 0.0, 0.5]],
+        normals: vec![[0.0, 1.0, 0.0]; 4],
+        uv0: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        colors: None,
+        indices: vec![0, 2, 1, 0, 3, 2],
+        triangle_slots: vec![0, 0],
+        slot_names: vec!["Plane".into()],
+    }
+}
+
+/// User parameters the GPU path takes (fx_gpu::MAX_USER_PARAMS).
+const USER_PARAM_LIMIT: usize = 16;
+
+/// Fits the user parameters to the GPU path: removes the declarations of
+/// those nothing in the effect reads
+/// (Niagara systems often keep leftovers), then folds constants.
+fn fit_user_limit<'a>(text: &str, names: impl Iterator<Item = &'a str>, notes: &mut Vec<String>) -> String {
+    let mut dropped = Vec::new();
+    for n in names {
+        let q = quote(n);
+        if text.matches(q.as_str()).count() <= 1 {
+            dropped.push(q);
+        }
+    }
+    if !dropped.is_empty() {
+        notes.push(format!(
+            "unused user parameters left out (the GPU path takes {USER_PARAM_LIMIT}): {}",
+            dropped.join(", ")
+        ));
+    }
+    // Still too many: fold the least used into their links as constants
+    // (their declared defaults), when every use is a plain `Link(T, "User.X")`.
+    let decls: Vec<(String, String)> = text
+        .lines()
+        .skip_while(|l| !l.starts_with("    user_parameters: {"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("    },"))
+        .filter_map(|l| {
+            let t = l.trim().trim_end_matches(',');
+            let (n, v) = t.split_once(": ")?;
+            Some((n.to_string(), v.to_string()))
+        })
+        .filter(|(n, _)| !dropped.contains(n))
+        .collect();
+    let mut text = text.to_string();
+    let mut folded = Vec::new();
+    if decls.len() > USER_PARAM_LIMIT {
+        let mut cands: Vec<(usize, &String, &String)> = decls
+            .iter()
+            .filter_map(|(n, val)| {
+                let ty = val.split('(').next()?;
+                let link = format!("Link({ty}, {n})");
+                let links = text.matches(link.as_str()).count();
+                // The declaration is the one other mention.
+                (links > 0 && text.matches(n.as_str()).count() == links + 1).then_some((links, n, val))
+            })
+            .collect();
+        cands.sort_by_key(|(k, n, _)| (*k, (*n).clone()));
+        for (_, n, val) in cands.into_iter().take(decls.len() - USER_PARAM_LIMIT) {
+            let ty = val.split('(').next().unwrap_or("");
+            text = text.replace(&format!("Link({ty}, {n})"), val);
+            dropped.push(n.clone());
+            folded.push(n.clone());
+        }
+        if !folded.is_empty() {
+            notes.push(format!(
+                "user parameters folded into constants (the GPU path takes {USER_PARAM_LIMIT}): {}",
+                folded.join(", ")
+            ));
+        }
+    }
+    if dropped.is_empty() {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let t = line.trim_start();
+        if dropped.iter().any(|q| t.starts_with(&format!("{q}:"))) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The loop duration an emitter's Emitter State gives (its own, or the
+/// system's when it follows the system), 1 s when there is none.
+fn emitter_loop_duration(e: &NEmitter, loops: &Loops) -> f32 {
+    for st in &e.stacks {
+        for m in &st.modules {
+            if m.script_name() == "EmitterState" && m.enabled {
+                let own = m.has("Loop Duration") || m.switch("Life Cycle Mode") == Some("NewEnumerator1");
+                let d = if own { lit_f(m.input("Loop Duration")) } else { loops.duration };
+                return d.filter(|d| *d > 0.0).unwrap_or(1.0);
+            }
+        }
+    }
+    loops.duration.filter(|d| *d > 0.0).unwrap_or(1.0)
+}
+
+/// Rewrites `CurveOverAge` (particle age) into a curve sampled at the
+/// owner's normalised age, for emitter and system scripts.
+fn owner_age_curves(v: &mut Fx, dynamic: &str, duration: f32) {
+    match v {
+        Fx::CurveOverAge(c) => {
+            let c = c.clone();
+            *v = Fx::Dyn(
+                format!("{} from Curve", c.ty.name()),
+                vec![
+                    ("Curve".into(), Fx::Curve(c)),
+                    ("Curve Index".into(), Fx::Dyn(dynamic.into(), vec![("Duration".into(), Fx::Lit(Lit::Float(duration)))])),
+                ],
+            );
+        }
+        Fx::Dyn(_, args) => {
+            for (_, a) in args.iter_mut() {
+                owner_age_curves(a, dynamic, duration);
+            }
+        }
+        Fx::List(items) => {
+            for a in items.iter_mut() {
+                owner_age_curves(a, dynamic, duration);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn lit_f(i: Option<&NInput>) -> Option<f32> {
     match i? {
         NInput::Value(v) => v.floats().and_then(|f| f.first().copied()),
@@ -691,6 +824,20 @@ impl<'a> Cx<'a> {
                                 res = Err(format!("{} cannot run in {} here: left out", wrong.join(", "), stack_name(&st.usage)));
                             } else {
                                 o.changes.push(format!("{} cannot run in {} here: left out", wrong.join(", "), stack_name(&st.usage)));
+                            }
+                        }
+                    }
+                    // Niagara's curve default index in emitter and system
+                    // scripts is the owner's normalised (loop) age.
+                    let age = match st.usage {
+                        Usage::EmitterSpawn | Usage::EmitterUpdate => Some(("Normalized Emitter Age", emitter_loop_duration(e, loops))),
+                        Usage::SystemSpawn | Usage::SystemUpdate => Some(("Normalized System Age", loops.duration.unwrap_or(1.0))),
+                        _ => None,
+                    };
+                    if let Some((dynamic, duration)) = age {
+                        for x in o.mods.iter_mut() {
+                            for (_, v) in x.inputs.iter_mut() {
+                                owner_age_curves(v, dynamic, duration);
                             }
                         }
                     }
@@ -1448,6 +1595,19 @@ impl<'a> Cx<'a> {
         if let Some(m) = a.meshes.get(path) {
             return m.clone();
         }
+        // Engine content packs borrow but do not ship: the basic plane.
+        if path == "/Engine/BasicShapes/Plane.Plane" && a.store.load(path).is_none() {
+            let glb = format!("{}/Plane.glb", a.dir);
+            a.files.insert(glb.clone(), crate::mesh::write_glb(&engine_plane()));
+            let res = Ok(MeshOut {
+                name: "Plane".into(),
+                glb,
+                material: None,
+                summary: "Unreal's /Engine/BasicShapes/Plane rebuilt: 1 m square facing up".into(),
+            });
+            a.meshes.insert(path.to_string(), res.clone());
+            return res;
+        }
         let res = (|| {
             let l = a.store.load(path).ok_or_else(|| "its package is not in the package folders".to_string())?;
             let data = crate::mesh::read_static_mesh(&l.pkg, &l.bytes)?;
@@ -1638,7 +1798,7 @@ impl<'a> Cx<'a> {
 
     // ---- writing ----
 
-    fn write(&self, emitters: &[FxEmitter]) -> String {
+    fn write(&mut self, emitters: &[FxEmitter]) -> String {
         let mut o = String::new();
         let r = &self.report;
         let _ = writeln!(o, "// Converted from the Unreal Niagara system {} ({}) by `fximport convert`.", self.sys.name, r.source);
@@ -1740,6 +1900,9 @@ impl<'a> Cx<'a> {
         }
         let _ = writeln!(o, "    ],");
         let _ = writeln!(o, ")");
+        if users.len() > USER_PARAM_LIMIT {
+            o = fit_user_limit(&o, users.keys().copied(), &mut self.report.notes);
+        }
         o
     }
 
@@ -1869,9 +2032,33 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
         }
         "SpawnPerUnit" => {
             let mut x = FxModule::new("Spawn Per Unit");
-            used.push("Spawn Spacing");
-            if let Some(v) = cx.input(e, m, "Spawn Spacing", Unit::Len, Ty::Float, o) {
-                x.set("Spawn Spacing", v);
+            // UE5 saves Spawn Spacing (cm between particles); ours takes
+            // particles per metre. UE4's Spawn Per Unit is particles per cm.
+            used.extend(["Spawn Spacing", "Spawn Per Unit", "Max Movement Threshold", "Use Max Movement Threshold"]);
+            if m.has("Spawn Spacing") || !m.has("Spawn Per Unit") {
+                match cx.input(e, m, "Spawn Spacing", Unit::Len, Ty::Float, o) {
+                    Some(Fx::Lit(Lit::Float(s))) => x.set("Spawn Per Unit", Fx::Lit(Lit::Float(if s > 0.0 { 1.0 / s } else { 0.0 }))),
+                    Some(v) => x.set(
+                        "Spawn Per Unit",
+                        Fx::Dyn("Divide Float".into(), vec![("A".into(), Fx::Lit(Lit::Float(1.0))), ("B".into(), v)]),
+                    ),
+                    // The module's default spacing (10 cm).
+                    None => x.set("Spawn Per Unit", Fx::Lit(Lit::Float(10.0))),
+                }
+            } else {
+                match cx.input(e, m, "Spawn Per Unit", Unit::None, Ty::Float, o) {
+                    Some(Fx::Lit(Lit::Float(s))) => x.set("Spawn Per Unit", Fx::Lit(Lit::Float(s * 100.0))),
+                    Some(v) => x.set(
+                        "Spawn Per Unit",
+                        Fx::Dyn("Multiply Float".into(), vec![("A".into(), v), ("B".into(), Fx::Lit(Lit::Float(100.0)))]),
+                    ),
+                    None => {}
+                }
+            }
+            if matches!(m.input("Use Max Movement Threshold"), Some(NInput::Value(NValue::Bool(true)))) {
+                if let Some(v) = cx.input(e, m, "Max Movement Threshold", Unit::Len, Ty::Float, o) {
+                    x.set("Max Movement Threshold", v);
+                }
             }
             o.mods.push(x);
         }

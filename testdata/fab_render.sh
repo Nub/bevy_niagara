@@ -11,7 +11,8 @@
 # Run from the repository root inside the fork's dev shell, after
 #   cargo build --release -p fx_import --bin fximport -p fx_preview --bin fxpreview
 #   nix develop /home/zach/helm-projects/bevy-solari-opt -c sh testdata/fab_render.sh [pack ...]
-# Packs: perfect_fire arrow_trail lightning portals mixed_vfx mayu_basic (default: the first two). GPU: claim graybeard heavy.
+# Packs: perfect_fire arrow_trail lightning portals mixed_vfx mayu_basic
+# niagara_examples m5_fire fire_explosion sparkles loot_drops (default: the first two). GPU: claim graybeard heavy.
 set -eu
 out=${OUT:-testdata/fab/_look}
 bin=${BIN:-target/release}
@@ -32,6 +33,14 @@ view() {
 	portals) echo "--camera -3.5,1.6,5 --target 0,1.4,0 --fov 59 --duration 3" ;;
 	mixed_vfx) echo "--camera 0,2.5,7 --target 0,1,0 --fov 59 --duration 3" ;;
 	mayu_basic) echo "--camera 0,1.5,5 --target 0,1,0 --fov 59 --duration 3 --at 0,1,0" ;;
+	# Epic's Niagara Examples: impacts, explosions, buffs at human scale; M5
+	# fires on the floor like Perfect Fire; DeepBlues explosions up to ~8 m
+	# tall; SoftTofu sparkles and Targi loot beams around a 1 m pickup.
+	niagara_examples) echo "--camera 0,2,7 --target 0,1,0 --fov 59 --duration 3" ;;
+	m5_fire) echo "--camera 0,2.0,5.75 --target 0,0.9,0 --fov 59 --duration 3" ;;
+	fire_explosion) echo "--camera 0,4,16 --target 0,3,0 --fov 59 --duration 4" ;;
+	sparkles) echo "--camera 0,1.5,5 --target 0,1,0 --fov 59 --duration 3 --at 0,1,0" ;;
+	loot_drops) echo "--camera 0,2,6 --target 0,1.2,0 --fov 59 --duration 3" ;;
 	esac
 }
 # The Unreal-like look. Exposure matched by eye to the listings; arrows fly at
@@ -57,6 +66,11 @@ src() {
 	portals) echo testdata/fab/portals/Content/PortalFX/FX ;;
 	mixed_vfx) echo testdata/fab/mixed_vfx/Content/MixedVFX/Particles ;;
 	mayu_basic) echo testdata/fab/mayu_basic/Content/MayuAssets ;;
+	niagara_examples) echo testdata/fab/niagara_examples/Content/NiagaraExamples ;;
+	m5_fire) echo testdata/fab/m5_fire/Content/M5VFXVOL2/Niagara ;;
+	fire_explosion) echo testdata/fab/fire_explosion/Content/Fire_EXP_Vol01_Free/Niagara ;;
+	sparkles) echo testdata/fab/sparkles/Content/FreeParticle_SoftTofu/Niagara ;;
+	loot_drops) echo testdata/fab/loot_drops/Content/LootDropVFX/Systems ;;
 	esac
 }
 
@@ -65,14 +79,17 @@ for pack in $packs; do
 	[ -d "$dir" ] || { echo "skip $pack: $dir missing (sh testdata/fab_assets.sh)"; continue; }
 	n=0
 	inputs="" labels=""
-	# Systems in subfolders too (Mixed VFX, Mayu), in name order.
-	for f in $(find "$dir" -name 'NS_*.uasset' | sort); do
+	# Systems in subfolders too (Mixed VFX, Mayu), in name order. M5 names
+	# them NFire_*; its _for_BP / _for_Dir copies and Epic's sprite-baking
+	# utilities are left out.
+	for f in $(find "$dir" -name 'NS_*.uasset' -o -name 'NFire_*.uasset' | grep -v -e _for_ -e SpriteGeneration | sort); do
 		s=$(basename "$f" .uasset)
 		o=$out/$pack/$s
 		mkdir -p "$o"
 		"$bin/fximport" convert "$f" --out "$o" >"$o/convert.log" 2>&1 || true
+		# An effect the GPU path refuses keeps fxpreview logging forever: give up after 5 min.
 		# shellcheck disable=SC2046
-		"$bin/fxpreview" "$o/$s.fx.ron" --out "$o" --size 640x360 \
+		timeout 300 "$bin/fxpreview" "$o/$s.fx.ron" --out "$o" --size 640x360 \
 			--times ${TIMES:-0.5,1,1.5,2} $(view "$pack") $(look "$pack") >"$o/render.log" 2>&1 ||
 			echo "render failed: $s (see $o/render.log)"
 		echo "HELM-PROGRESS $((n + 1)) $s"

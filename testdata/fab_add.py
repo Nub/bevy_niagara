@@ -39,7 +39,7 @@ def go(url, data=None, headers=None, method=None):
         r = opener.open(req, timeout=30)
         return r.status, r.geturl(), r.read()
     except urllib.error.HTTPError as e:
-        return e.code, url, e.read()
+        return e.code, e.geturl() or url, e.read()
 
 
 def cookie(name):

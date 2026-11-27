@@ -150,10 +150,12 @@ fn enum_tail(v: Option<&Value>) -> Option<String> {
 /// the row above, except the first row of each block of rows, stored as is; the
 /// payload's own compression (Oodle) is undone by the bulk reader.
 fn undelta_rows(data: &[u8], w: u32, h: u32, format: &str) -> Result<Vec<u8>, String> {
-    let bpp = match format {
-        "TSF_G8" => 1,
-        "TSF_BGRA8" | "TSF_BGRE8" => 4,
-        // 16-bit formats: not seen yet (byte-wise or word-wise deltas unknown).
+    // Bytes per pixel and bytes per channel.
+    let (bpp, bpc) = match format {
+        "TSF_G8" => (1, 1),
+        "TSF_BGRA8" | "TSF_BGRE8" => (4, 1),
+        "TSF_G16" => (2, 2),
+        "TSF_RGBA16" | "TSF_RGBA16F" => (8, 2),
         other => return Err(format!("TSCF_UEDELTA with source format {other} not supported")),
     };
     let row = (w * bpp) as usize;
@@ -162,8 +164,10 @@ fn undelta_rows(data: &[u8], w: u32, h: u32, format: &str) -> Result<Vec<u8>, St
     }
     // Rows are delta-coded in blocks of 32768 pixels, at least 32 rows (as
     // seen: 128 rows at 256 px wide, 64 at 512, 32 at 1024 and 2048, for G8
-    // and BGRA8 alike); each block starts raw.
-    let block = (32768 / w as usize).max(32);
+    // and BGRA8 alike), twice that for 16-bit channels (64 rows for a
+    // 2048-wide RGBA16 in Loot Drops VFX, UE 5.8); each block starts raw.
+    // Deltas are byte-wise for 16-bit channels too.
+    let block = (32768 / w as usize).max(32) * bpc;
     let mut out = data.to_vec();
     for y in 1..h as usize {
         if y % block == 0 {
@@ -1299,7 +1303,7 @@ impl<'a> Gen<'a> {
                     2,
                 )
             }
-            "TextureSample" | "TextureSampleParameter2D" | "TextureObject" | "TextureObjectParameter" | "ParticleSubUV" => {
+            "TextureSample" | "TextureSampleParameter2D" | "TextureObject" | "TextureObjectParameter" | "ParticleSubUV" | "TextureSampleParameterSubUV" => {
                 // A texture object (parameter) wired into the sampler wins.
                 let tex = self.texture_of(e);
                 if class.starts_with("TextureObject") {
@@ -1317,7 +1321,7 @@ impl<'a> Gen<'a> {
                 let full = if slot.is_none() {
                     self.note("a texture sampler without a texture samples white");
                     v("vec4<f32>(1.0)", 4)
-                } else if class == "ParticleSubUV" {
+                } else if class == "ParticleSubUV" || class == "TextureSampleParameterSubUV" {
                     let slot = slot.unwrap();
                     let a = self.sample(slot, &v("in.uv0", 2));
                     let b = self.sample(slot, &v("in.uv1", 2));
@@ -1557,6 +1561,9 @@ impl<'a> Gen<'a> {
                     1,
                 )
             }
+            // Temporal dithering of a masked opacity: the threshold as is
+            // (no dither pattern; TAA would blend it to about this).
+            "DitherTemporalAA" => cast(&self.input(e, "AlphaThreshold").unwrap_or(v("0.5", 1)), 1),
             "DepthFade" => {
                 self.note("Depth Fade: opacity is not faded near scene geometry");
                 self.input(e, "InOpacity").unwrap_or_else(|| v(lit(fprop("OpacityDefault", 1.0)), 1))
