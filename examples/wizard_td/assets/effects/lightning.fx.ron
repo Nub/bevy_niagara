@@ -1,0 +1,195 @@
+// Lightning: one-shot (~0.35 s) violet-white bolt from the effect origin
+// along local +Y to User.Length metres. Three re-shaped flickers (new jagged
+// shape at 0, 0.1 and 0.2 s), each a main strand plus two thinner forks,
+// drawn as ribbons over a wide soft glow; a flash, a point light and a burst
+// of sparks at the far end (0, User.Length, 0), and a small flash at the
+// hand. Place it at the caster's hand rotated so +Y points at the target.
+// No textures or custom materials (the bolt shape is a custom WGSL module).
+// User parameters:
+//   User.Length  Float  bolt length in metres (default 10.0)
+(
+    name: "Lightning",
+    user_parameters: { "User.Length": Float(10.0) },
+    scalability: (
+        max_distance: 120.0,
+        bounds_radius: 12.0,
+        max_instances: 24,
+        quality: (
+            Low: (max_instances: 8),
+            Medium: (max_instances: 16),
+        ),
+    ),
+    custom_modules: [
+        (
+            // Particle i of a burst of Strands * Points: strand i / Points,
+            // point i % Points along it. Strand 0 runs the whole length,
+            // forks stop part-way. Fractal side offsets, pinched at the ends,
+            // are a hash of (strand, flicker), so emitters with the same Seed
+            // draw the same shape.
+            name: "Bolt Points",
+            inputs: {
+                "Length": Float(10.0),
+                "Points": Float(32.0),
+                "Strands": Float(3.0),
+                "FlickerInterval": Float(0.1),
+                "Amplitude": Float(0.06),
+                "Width": Float(0.12),
+                "ForkWidth": Float(0.05),
+                "Seed": Float(5.0),
+            },
+            outputs: ["Particles.Position", "Particles.RibbonID", "Particles.RibbonWidth"],
+            wgsl: r#"
+    let n = u32(max(Points, 2.0));
+    let ns = u32(max(Strands, 1.0));
+    let i = u32(UniqueID) % (n * ns);
+    let strand = i / n;
+    let t = f32(i % n) / f32(n - 1u);
+    let flicker = u32(floor(EmitterAge / FlickerInterval + 0.5));
+    let base = (flicker * 31u + strand * 7u + u32(Seed) * 101u) * 1000u;
+    var reach = 1.0;
+    var amp_scale = 1.0;
+    if (strand > 0u) {
+        reach = 0.35 + 0.45 * to_unit(pcg(base + 999u));
+        amp_scale = 1.6;
+    }
+    var off = vec2<f32>(0.0, 0.0);
+    var amp = 1.0;
+    var freq = 4.0;
+    for (var o = 0u; o < 5u; o = o + 1u) {
+        let x = t * freq;
+        let i0 = floor(x);
+        let fr = x - i0;
+        let c = u32(i0) * 2u + base + o * 97u;
+        let a = vec2<f32>(to_unit(pcg(c)), to_unit(pcg(c + 1u)));
+        let b = vec2<f32>(to_unit(pcg(c + 2u)), to_unit(pcg(c + 3u)));
+        off += (mix(a, b, fr) * 2.0 - 1.0) * amp;
+        amp = amp * 0.6;
+        freq = freq * 2.1;
+    }
+    var pinch = sin(t * 3.14159265);
+    if (strand > 0u) {
+        // Forks leave the main strand near the start and end free.
+        pinch = min(t * 3.0, 1.0);
+    }
+    let len = Length * reach;
+    let side = off * Amplitude * Length * amp_scale * pinch;
+    Position = vec3<f32>(side.x, t * len, side.y);
+    RibbonID = i32((flicker * ns + strand) % 250u);
+    RibbonWidth = select(ForkWidth, Width, strand == 0u);
+"#,
+        ),
+    ],
+    emitters: [
+        (
+            name: "Glow",
+            max_particles: 80,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(32), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(32), "Spawn Time": Float(0.1) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(32), "Spawn Time": Float(0.2) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(0.12), "Color": Color((0.35, 0.12, 0.9, 0.3)) }),
+                (module: "Initialize Ribbon"),
+                (module: "Bolt Points", inputs: {
+                    "Length": Link(Float, "User.Length"),
+                    "Strands": Float(1.0),
+                    "Width": Float(0.55),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.4, 0.5), (0.6, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive, tessellation_factor: 2))],
+        ),
+        (
+            name: "Bolt",
+            max_particles: 200,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(96), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(96), "Spawn Time": Float(0.1) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(96), "Spawn Time": Float(0.2) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: { "Lifetime": Float(0.12), "Color": Color((1.5, 1.2, 2.6, 1.0)) }),
+                (module: "Initialize Ribbon"),
+                (module: "Bolt Points", inputs: { "Length": Link(Float, "User.Length") }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.4, 0.6), (0.6, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Ribbon((blend_mode: Additive))],
+        ),
+        (
+            name: "Impact Flash",
+            max_particles: 2,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.35),
+                    "Position": Dynamic("Make Vec3 from Floats", { "X": Float(0.0), "Y": Link(Float, "User.Length"), "Z": Float(0.0) }),
+                    "Color": Color((0.7, 0.35, 1.6, 1.0)),
+                    "Sprite Size": Vec2((2.0, 2.0)),
+                }),
+                (module: "Initialize Light", inputs: { "Light Radius": Float(7.0) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (0.2, (1.0, 1.0)), (1.0, (1.2, 1.2))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.3, 0.6), (0.5, 0.9), (1.0, 0.0)])) }),
+            ],
+            renderers: [
+                Sprite((blend_mode: Additive)),
+                Light((max_lights: 1, intensity: 20000.0)),
+            ],
+        ),
+        (
+            name: "Hand Flash",
+            max_particles: 2,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.3),
+                    "Color": Color((0.8, 0.5, 1.8, 1.0)),
+                    "Sprite Size": Vec2((0.7, 0.7)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+        (
+            name: "Sparks",
+            local_space: false,
+            max_particles: 48,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(40), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.25), Float(0.5)),
+                    "Position": Dynamic("Make Vec3 from Floats", { "X": Float(0.0), "Y": Link(Float, "User.Length"), "Z": Float(0.0) }),
+                    "Color": Color((1.4, 1.0, 2.8, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.03, 0.12)), Vec2((0.05, 0.25))),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(180.0), "Velocity Strength": RandomRange(Float(2.0), Float(6.0)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(2.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+    ],
+)

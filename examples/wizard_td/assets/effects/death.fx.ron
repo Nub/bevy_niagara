@@ -1,0 +1,123 @@
+// Death: one-shot (~2 s) enemy death, placed on the ground (+Y up). A dozen
+// lit brown/grey cube chunks burst up, tumble, fall and bounce on the ground
+// plane (y = 0) before shrinking away, with a dust puff at the start. Each
+// chunk bounce writes a Collision event; the "Hit Dust" emitter receives
+// them and spawns a small dust puff where the chunk hit (Niagara-style
+// collision events). No textures or custom materials.
+// User parameters: none.
+(
+    name: "Death",
+    scalability: (
+        max_distance: 70.0,
+        spawn_count_scale_by_distance: [(15.0, 1.0), (50.0, 0.5)],
+        bounds_radius: 3.0,
+        max_instances: 32,
+        quality: (
+            Low: (spawn_count_scale: 0.5, max_instances: 12),
+            Medium: (spawn_count_scale: 0.75, max_instances: 20),
+        ),
+    ),
+    emitters: [
+        (
+            name: "Chunks",
+            max_particles: 16,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(12), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.6), Float(2.0)),
+                    "Position": RandomRange(Vec3((-0.25, 0.3, -0.25)), Vec3((0.25, 0.8, 0.25))),
+                    "Color": Dynamic("Random Color from List", { "Values": [
+                        Color((0.32, 0.22, 0.14, 1.0)),
+                        Color((0.42, 0.3, 0.2, 1.0)),
+                        Color((0.3, 0.3, 0.3, 1.0)),
+                        Color((0.45, 0.43, 0.4, 1.0)),
+                    ] }),
+                }),
+                (module: "Initialize Mesh", inputs: {
+                    "Mesh Scale": RandomRange(Vec3((0.08, 0.07, 0.08)), Vec3((0.18, 0.14, 0.18))),
+                    "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((360.0, 360.0, 360.0))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(55.0),
+                    "Velocity Strength": RandomRange(Float(2.5), Float(5.0)),
+                }),
+                (module: "Add Rotational Velocity", inputs: { "Rotational Velocity": RandomRange(Vec3((-400.0, -400.0, -400.0)), Vec3((400.0, 400.0, 400.0))) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(0.3) }),
+                (module: "Rotational Drag", inputs: { "Rotational Drag": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": Plane,
+                    "Particle Radius": Float(0.06),
+                    "Restitution": Float(0.4),
+                    "Friction": Float(0.4),
+                    "Rest Speed": Float(0.4),
+                }),
+                (module: "Generate Collision Event"),
+                (module: "Scale Mesh Size", inputs: { "Scale Factor": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (0.8, (1.0, 1.0, 1.0)), (1.0, (0.0, 0.0, 0.0))])) }),
+            ],
+            renderers: [Mesh((mesh: "cube", blend_mode: Opaque, lit: true))],
+        ),
+        (
+            name: "Puff",
+            max_particles: 12,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(8), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.9), Float(1.4)),
+                    "Color": Color((0.34, 0.29, 0.24, 0.6)),
+                    "Sprite Size": RandomRange(Vec2((0.6, 0.6)), Vec2((0.9, 0.9))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Sphere, "Sphere Radius": Float(0.3), "Offset": Vec3((0.0, 0.45, 0.0)) }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Origin": Vec3((0.0, 0.3, 0.0)),
+                    "Velocity Strength": RandomRange(Float(1.0), Float(2.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(3.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sprite Rotation Rate", inputs: { "Rotation Rate": Float(20.0) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (2.0, 2.0))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.1, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, lit: true, sort_mode: ViewDepth, soft_particle_fade_distance: 0.3))],
+        ),
+        (
+            name: "Hit Dust",
+            max_particles: 64,
+            event_handlers: [
+                (source: "Chunks", event: Collision, spawn_number: 2, modules: [
+                    (module: "Receive Collision Event", inputs: { "Position Offset": Vec3((0.0, 0.05, 0.0)) }),
+                ]),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.5), Float(0.8)),
+                    "Color": Color((0.36, 0.31, 0.26, 0.55)),
+                    "Sprite Size": RandomRange(Vec2((0.18, 0.18)), Vec2((0.28, 0.28))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Add Velocity in Cone", inputs: { "Cone Angle": Float(70.0), "Velocity Strength": RandomRange(Float(0.3), Float(0.8)) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(3.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (2.2, 2.2))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, lit: true, sort_mode: ViewDepth, soft_particle_fade_distance: 0.2))],
+        ),
+    ],
+)

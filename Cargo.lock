@@ -6020,6 +6020,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wizard_td"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "fx_core",
+ "fx_render",
+ "png 0.17.16",
+ "web-sys",
+]
+
+[[package]]
 name = "wl-clipboard-rs"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

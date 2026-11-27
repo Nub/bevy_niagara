@@ -1,0 +1,20 @@
+[package]
+name = "wizard_td"
+description = "Example game: a first-person wizard defends a tower against waves of foxes with spells that are fx effects (desktop and web, touch controls)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fx_core = { path = "../../crates/fx_core" }
+fx_render = { path = "../../crates/fx_render" }
+bevy = { workspace = true, features = ["ui_bevy_render", "bevy_text", "default_font"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+png = "0.17"
+
+# WebGPU instead of WebGL2 in the browser build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { workspace = true, features = ["ui_bevy_render", "bevy_text", "default_font", "webgpu", "web"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Location"] }
