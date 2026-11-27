@@ -15,3 +15,6 @@ miniz_oxide = "0.8"
 [[bin]]
 name = "fximport"
 path = "src/bin/fximport.rs"
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }

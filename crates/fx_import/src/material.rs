@@ -494,6 +494,11 @@ pub struct Material {
     /// Material function packages the graph calls (directly or nested),
     /// by package path (`/Game/A/MF_X`); engine functions are not on disk.
     pub functions: HashMap<String, Rc<Loaded>>,
+    /// Parameters read from dynamic material parameters instead of baked:
+    /// name -> (parameter index 0..4, first component). Scalars read one
+    /// component, vectors the whole vector (component 0). Set by callers
+    /// (prefab meshes whose parameters animate).
+    pub bound: HashMap<String, (usize, usize)>,
 }
 
 /// Loads the material functions `l`'s graph calls, and theirs, into `out`.
@@ -542,6 +547,7 @@ impl Material {
             base: None,
             missing: None,
             functions: HashMap::new(),
+            bound: HashMap::new(),
         };
         let mut path = object_path.to_string();
         let mut blend_override: Option<Blend> = None;
@@ -784,6 +790,8 @@ struct Gen<'a> {
     cur: usize,
     /// Frame of each inlined call: (parent frame, call export) -> frame.
     call_frames: HashMap<(usize, usize), usize>,
+    /// Module-level WGSL functions (translated Custom nodes), emitted before the fragment.
+    functions: Vec<String>,
 }
 
 /// Unreal's component count for a function input type (None: not a float vector).
@@ -1058,6 +1066,19 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The particle field a bound parameter reads (`in.dynamic_param_k`),
+    /// when bound and its dynamic parameter reaches the material.
+    fn bound_field(&mut self, name: &str) -> Option<String> {
+        let &(k, _) = self.m.bound.get(name)?;
+        let k = k.min(3);
+        if !(self.needs.dynamic_written[k] && self.needs.dynamic_available[k]) {
+            self.note(format!("parameter {name}: bound to dynamic parameter {k}, which does not reach the material; baked"));
+            return None;
+        }
+        self.dynamic_read[k] = true;
+        Some(if k == 0 { "in.dynamic_param".to_string() } else { format!("in.dynamic_param_{k}") })
+    }
+
     /// Expression `e`'s value (output `out` for multi-output nodes without a
     /// mask), emitted once as a `let`.
     fn expr(&mut self, e: usize, out: usize) -> V {
@@ -1201,12 +1222,22 @@ impl<'a> Gen<'a> {
             }
             "ScalarParameter" | "CollectionParameter" => {
                 let name = find(p, "ParameterName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if let Some(field) = self.bound_field(&name) {
+                    let c = self.m.bound[&name].1.min(3);
+                    return v(format!("{field}.{}", &"xyzw"[c..c + 1]), 1);
+                }
                 let x = self.m.scalars.get(&name).copied().unwrap_or(fprop("DefaultValue", 0.0));
                 v(lit(x), 1)
             }
             "VectorParameter" => {
                 let name = find(p, "ParameterName").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let c = self.m.vectors.get(&name).copied().or_else(|| color_prop("DefaultValue")).unwrap_or([0.0; 4]);
+                if let Some(field) = self.bound_field(&name) {
+                    return match out {
+                        1..=4 => v(format!("{field}.{}", &"xyzw"[out - 1..out]), 1),
+                        _ => v(field, 4),
+                    };
+                }
                 let full = v(format!("vec4<f32>({}, {}, {}, {})", lit(c[0]), lit(c[1]), lit(c[2]), lit(c[3])), 4);
                 match out {
                     1..=4 => v(lit(c[out - 1]), 1),
@@ -1553,6 +1584,7 @@ impl<'a> Gen<'a> {
                     None => order,
                 }
             }
+            "Custom" => self.custom(e, out),
             "MaterialFunctionCall" => self.function_call(e, out),
             "FunctionInput" => self.function_input(e),
             "FunctionOutput" => self.input(e, "A").unwrap_or(v("0.0", 1)),
@@ -1560,6 +1592,56 @@ impl<'a> Gen<'a> {
                 self.note(format!("{other}: not translated (taken as 1)"));
                 v("1.0", 1)
             }
+        }
+    }
+
+    /// A Custom expression: its HLSL translated to a WGSL function
+    /// (`custom_<export>`) called with the node's inputs; untranslatable
+    /// code is taken as 1, as before.
+    fn custom(&mut self, e: usize, out: usize) -> V {
+        let p = self.props(e);
+        let desc = find(p, "Description").and_then(|v| v.as_str()).unwrap_or("Custom").to_string();
+        let code = find(p, "Code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let n = match find(p, "OutputType").and_then(|v| v.as_str()) {
+            Some(s) if s.ends_with("CMOT_Float1") => 1,
+            Some(s) if s.ends_with("CMOT_Float2") => 2,
+            Some(s) if s.ends_with("CMOT_Float4") => 4,
+            Some(s) if !s.ends_with("CMOT_Float3") => 0,
+            // CMOT_Float3 is the default (not saved).
+            _ => 3,
+        };
+        let fallback = |g: &mut Self, why: String| {
+            g.note(format!("Custom node `{desc}`: not translated ({why}); taken as 1"));
+            v("1.0", 1)
+        };
+        if n == 0 {
+            return fallback(self, "output type not supported".into());
+        }
+        if !arr(find(p, "AdditionalOutputs")).is_empty() || out > 0 {
+            return fallback(self, "additional outputs are not supported".into());
+        }
+        if !arr(find(p, "IncludeFilePaths")).is_empty() || !arr(find(p, "AdditionalDefines")).is_empty() {
+            return fallback(self, "include files and defines are not supported".into());
+        }
+        let mut names = Vec::new();
+        let mut args = Vec::new();
+        for ci in arr(find(p, "Inputs")) {
+            let name = ci.field("InputName").and_then(|v| v.as_str()).unwrap_or("");
+            // Unreal skips inputs without a name.
+            if name.is_empty() || name == "None" {
+                continue;
+            }
+            let x = ci.field("Input").and_then(|inp| self.link(inp)).unwrap_or(v("0.0", 1));
+            names.push((name.to_string(), x.n as usize));
+            args.push(x.code);
+        }
+        let fn_name = if self.cur == 0 { format!("custom_{e}") } else { format!("custom_f{}_{e}", self.cur) };
+        match crate::hlsl_material::translate_custom(&code, &names, n as usize, &fn_name) {
+            Ok(f) => {
+                self.functions.push(f);
+                v(format!("{fn_name}({})", args.join(", ")), n)
+            }
+            Err(why) => fallback(self, why),
         }
     }
 
@@ -1598,6 +1680,46 @@ impl<'a> Gen<'a> {
 }
 
 /// Translates the material's graph to a WESL particle material.
+/// A scalar or vector parameter of the base material's graph.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParamInfo {
+    pub name: String,
+    pub vector: bool,
+    /// Custom primitive data index when the parameter reads it.
+    pub primitive_data: Option<u32>,
+    /// The value with the instance chain's overrides applied.
+    pub value: [f32; 4],
+}
+
+/// The scalar and vector parameters of `m`'s base graph (not its functions).
+pub fn parameters(m: &Material) -> Vec<ParamInfo> {
+    let Some((l, _)) = m.base.as_ref() else { return Vec::new() };
+    let mut out: Vec<ParamInfo> = Vec::new();
+    for (i, e) in l.pkg.exports.iter().enumerate() {
+        let class = l.pkg.export_class(i);
+        let vector = match class.as_str() {
+            "MaterialExpressionScalarParameter" => false,
+            "MaterialExpressionVectorParameter" => true,
+            _ => continue,
+        };
+        let p = &e.object.properties;
+        let Some(name) = find(p, "ParameterName").and_then(|v| v.as_str()).map(String::from) else { continue };
+        if out.iter().any(|x| x.name == name) {
+            continue;
+        }
+        let cpd = matches!(find(p, "bUseCustomPrimitiveData"), Some(Value::Bool(true)));
+        let index = find(p, "PrimitiveDataIndex").and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+        let value = if vector {
+            m.vectors.get(&name).copied().or_else(|| find(p, "DefaultValue").and_then(color4)).unwrap_or([0.0; 4])
+        } else {
+            let x = m.scalars.get(&name).copied().unwrap_or(find(p, "DefaultValue").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32);
+            [x, 0.0, 0.0, 0.0]
+        };
+        out.push(ParamInfo { name, vector, primitive_data: cpd.then_some(index), value });
+    }
+    out
+}
+
 pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
     let (l, editor) = m.base.as_ref().ok_or("base material not loaded")?;
     let mut g = Gen {
@@ -1613,6 +1735,7 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
         frames: vec![Frame { l, call: None }],
         cur: 0,
         call_frames: HashMap::new(),
+        functions: Vec::new(),
     };
     let emissive = g.material_input(*editor, "EmissiveColor").map(|x| cast(&x, 3));
     // Unreal clamps Emissive at 0 (GetMaterialEmissive) unless the material
@@ -1695,6 +1818,9 @@ pub fn compile(m: &Material, needs: &Needs) -> Result<Compiled, String> {
     }
     let _ = writeln!(w);
     let _ = writeln!(w, "{}", HELPERS);
+    for f in &g.functions {
+        let _ = writeln!(w, "{f}");
+    }
     let _ = writeln!(w, "@fragment");
     let _ = writeln!(w, "fn fragment(in: FxVertexOutput) -> @location(0) vec4<f32> {{");
     for line in &body {
@@ -1991,6 +2117,7 @@ mod tests {
             base: Some((loaded(pkg), 0)),
             missing: None,
             functions: HashMap::new(),
+            bound: HashMap::new(),
         }
     }
 
@@ -2158,6 +2285,33 @@ mod tests {
         let w = compile(&m, &needs).unwrap().wesl;
         for s in ["vec3<f32>(40.0)", "vec2<f32>(0.5, 0.5);", "vec2<f32>(2.0, 2.0)", "* 1.2)"] {
             assert!(w.contains(s), "{s}\n{w}");
+        }
+    }
+
+    /// The Fab portal materials' Custom HLSL nodes translate to WGSL that
+    /// naga accepts (local-only test files; skipped when absent).
+    #[test]
+    fn fab_portal_custom_nodes() {
+        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fab/portals/Content/PortalFX/Materials/M_PRT_Portal.uasset");
+        if !file.is_file() {
+            eprintln!("skipped: {} is absent", file.display());
+            return;
+        }
+        let mut store = Store::for_system(&file);
+        let needs = Needs { dynamic_written: [true; 4], dynamic_available: [true; 4], mesh: true };
+        for name in ["MI_PRT_Portal_Red", "MI_PRT_Rays_Red", "MI_PRT_Spark_Red"] {
+            let m = Material::load(&mut store, &format!("/Game/PortalFX/Materials/Instances/{name}.{name}")).unwrap();
+            let c = compile(&m, &needs).unwrap();
+            assert!(!c.notes.iter().any(|n| n.contains("Custom")), "{name}: {:?}", c.notes);
+            // The translated functions sit between the helpers and the fragment.
+            let start = c.wesl.find("fn custom_").unwrap_or_else(|| panic!("{name}: no Custom function\n{}", c.wesl));
+            let end = c.wesl.find("@fragment").unwrap();
+            let functions = &c.wesl[start..end];
+            let module = naga::front::wgsl::parse_str(functions).unwrap_or_else(|e| panic!("{name}: {}\n{functions}", e.emit_to_string(functions)));
+            naga::valid::Validator::new(Default::default(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {}\n{functions}", e.emit_to_string(functions)));
+            assert!(c.wesl.contains("= custom_"), "{name}: not called\n{}", c.wesl);
         }
     }
 
