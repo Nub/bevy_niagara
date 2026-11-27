@@ -479,6 +479,22 @@ fn decode_mesh(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option<M
     if let Some(v) = f.take("sort_mode") {
         m.sort_mode = ident_enum(v, "sort_mode", d).unwrap_or_default();
     }
+    if let Some(v) = f.take("ray_tracing") {
+        m.ray_tracing = boolean(v, "ray_tracing", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("ray_tracing_max_particles") {
+        m.ray_tracing_max_particles = whole_in_range(
+            v,
+            "ray_tracing_max_particles",
+            1..=16383,
+            "write e.g. `ray_tracing_max_particles: 256` (meshes its rays see; past it an even subset)",
+            d,
+        )
+        .unwrap_or(m.ray_tracing_max_particles);
+    }
+    if let Some(v) = f.take("ray_tracing_lights") {
+        m.ray_tracing_lights = boolean(v, "ray_tracing_lights", d).unwrap_or_default();
+    }
     if let Some(v) = f.take("texture") {
         m.texture = asset_path(
             v,

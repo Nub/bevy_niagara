@@ -152,7 +152,7 @@ fn renderers_survive_the_cooked_binary() {
     ));
     let bytes = cook::to_bytes(&sys);
     assert_eq!(cook::from_bytes(&bytes).unwrap(), sys);
-    assert_eq!(cook::COOKED_FORMAT_VERSION, 14);
+    assert_eq!(cook::COOKED_FORMAT_VERSION, 15);
 }
 
 #[test]
@@ -288,6 +288,8 @@ fn ribbon_mesh_light_defaults() {
     assert_eq!(m.facing_mode, MeshFacingMode::Default);
     assert!(m.lit);
     assert_eq!(m.sort_mode, SortMode::None);
+    assert!(!m.ray_tracing && !m.ray_tracing_lights);
+    assert_eq!(m.ray_tracing_max_particles, 256);
     assert_eq!((m.texture.clone(), m.material.clone()), (None, None));
 
     let l = CookedLight::default();
@@ -329,6 +331,9 @@ fn every_ribbon_mesh_light_field_decodes() {
             facing_mode: CameraPlane,
             lit: false,
             sort_mode: ViewDistance,
+            ray_tracing: true,
+            ray_tracing_max_particles: 40,
+            ray_tracing_lights: true,
             texture: "textures/rock.png",
             material: "shaders/rock.wesl",
         )),
@@ -363,6 +368,9 @@ fn every_ribbon_mesh_light_field_decodes() {
                 facing_mode: MeshFacingMode::CameraPlane,
                 lit: false,
                 sort_mode: SortMode::ViewDistance,
+                ray_tracing: true,
+                ray_tracing_max_particles: 40,
+                ray_tracing_lights: true,
                 texture: Some("textures/rock.png".into()),
                 material: Some("shaders/rock.wesl".into()),
             }),

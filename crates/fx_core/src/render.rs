@@ -417,6 +417,24 @@ pub const MESH_FIELDS: &[RendererField] = &[
         "draw order of translucent meshes",
     ),
     field(
+        "ray_tracing",
+        "bool",
+        "false",
+        "Solari: seen in reflections and bounce light, casts shadows; unlit/additive meshes light the scene (needs fx_solari)",
+    ),
+    field(
+        "ray_tracing_max_particles",
+        "1..=16383",
+        "256",
+        "Solari: most meshes rays see (an even subset past it; capped at 65535 triangles per emitter)",
+    ),
+    field(
+        "ray_tracing_lights",
+        "bool",
+        "false",
+        "Solari: also sample unlit/additive meshes as lights (less noise, costs more)",
+    ),
+    field(
         "texture",
         "\"asset/path.png\"",
         "none",

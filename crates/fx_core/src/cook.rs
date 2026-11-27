@@ -13,7 +13,7 @@ use crate::params::{self, Namespace, ParamRef, attr};
 use crate::types::{Value, ValueType};
 
 /// Bumped whenever the cooked layout changes.
-pub const COOKED_FORMAT_VERSION: u32 = 14;
+pub const COOKED_FORMAT_VERSION: u32 = 15;
 /// File extension of cooked effects.
 pub const COOKED_EXTENSION: &str = "fxb";
 
@@ -377,6 +377,12 @@ pub struct CookedMesh {
     pub facing_mode: MeshFacingMode,
     pub lit: bool,
     pub sort_mode: SortMode,
+    /// In Solari's ray-traced scene (needs fx_solari).
+    pub ray_tracing: bool,
+    /// Most particles traced (an even subset stands for the rest).
+    pub ray_tracing_max_particles: u32,
+    /// Solari samples emissive meshes as lights.
+    pub ray_tracing_lights: bool,
     /// Asset path; `None` draws plain colour.
     pub texture: Option<String>,
     /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
@@ -396,6 +402,9 @@ fn cook_mesh(m: &MeshSource) -> CookedMesh {
         facing_mode: m.facing_mode,
         lit: m.lit,
         sort_mode: m.sort_mode,
+        ray_tracing: m.ray_tracing,
+        ray_tracing_max_particles: m.ray_tracing_max_particles,
+        ray_tracing_lights: m.ray_tracing_lights,
         texture: m.texture.clone(),
         material: m.material.clone(),
     }

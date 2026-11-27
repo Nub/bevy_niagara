@@ -351,6 +351,13 @@ pub struct MeshSource {
     pub facing_mode: MeshFacingMode,
     pub lit: bool,
     pub sort_mode: SortMode,
+    /// Visible to Solari's rays (reflections, bounce light, shadows); unlit
+    /// and additive meshes light the scene. Off by default, as in Niagara.
+    pub ray_tracing: bool,
+    /// Most particles of the emitter its rays see (an even subset past it).
+    pub ray_tracing_max_particles: u32,
+    /// Solari also samples emissive meshes as lights (see the sprite setting).
+    pub ray_tracing_lights: bool,
     /// Asset path; `None` draws plain colour.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -375,6 +382,9 @@ impl Default for MeshSource {
             facing_mode: MeshFacingMode::default(),
             lit: true,
             sort_mode: SortMode::default(),
+            ray_tracing: false,
+            ray_tracing_max_particles: 256,
+            ray_tracing_lights: false,
             texture: None,
             material: None,
             span: Span::default(),
