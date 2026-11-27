@@ -558,9 +558,9 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
                 key: r.fstring()?,
                 source: r.fstring()?,
             };
-            // UE 5.8 (UE5 1018) saves add a 32-bit field after the source
-            // (zero in Loot Drops VFX).
-            if ctx.v.ue5 >= 1018 {
+            // Saves by UE 5.8 add a 32-bit field after the source (zero in
+            // Loot Drops VFX); 5.7 ones with the same file version do not.
+            if ctx.v.engine >= (5, 8) {
                 r.u32()?;
             }
             t

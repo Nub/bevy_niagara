@@ -377,6 +377,8 @@ pub struct Versions {
     pub ue5_main_stream: Option<i32>,
     pub ue5_release_stream: Option<i32>,
     pub filter_editor_only: bool,
+    /// The engine that saved the package (major, minor); (0, 0) when unknown.
+    pub engine: (u16, u16),
 }
 
 impl Versions {
@@ -391,6 +393,7 @@ impl Versions {
             ue5_main_stream: s.custom_version(custom::UE5_MAIN_STREAM),
             ue5_release_stream: s.custom_version(custom::UE5_RELEASE_STREAM),
             filter_editor_only: s.filter_editor_only(),
+            engine: if s.saved_by.major > 0 { (s.saved_by.major, s.saved_by.minor) } else { (s.compatible_with.major, s.compatible_with.minor) },
         }
     }
 }
