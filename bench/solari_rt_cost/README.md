@@ -39,3 +39,19 @@ even at 16 particles.
 
 Raw span output: `raw.txt` (first sweep, 32/16 and light modes), `raw2.txt`
 (24 and 32, and a second RT-off run).
+
+## Mesh particles (task_b0bcd13f30)
+
+`fxsolari bench --effect crates/fx_solari/scenes/debris_rt.fx.ron --mode off|on [--copies 4]`,
+1920x1080, RTX 3080, 300 frames, median GPU ms. The debris chunks (80 lit opaque
+cubes per burst, `ray_tracing: true`, one merged proxy mesh + opaque BLAS per emitter):
+
+| span | off, 1 | on, 1 | off, 4 | on, 4 |
+|---|---|---|---|---|
+| fx_rt_proxy | - | 0.034 | - | 0.103 |
+| solari_deform/blas_build | - | 0.191 | - | 0.196 |
+| lighting/initial_path | 1.039 | 1.088 | 1.104 | 1.216 |
+
+Extra cost: ~0.27 ms for one emitter, ~0.41 ms for four (BLAS rebuild is a
+fixed ~0.19 ms per frame for any number of deformed meshes; opaque BLAS hits
+skip the hit function's alpha test).

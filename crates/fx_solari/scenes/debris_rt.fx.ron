@@ -1,0 +1,43 @@
+// Mesh ray-tracing cost test (`fxsolari bench --effect crates/fx_solari/scenes/debris_rt.fx.ron --mode off|on`):
+// the library debris chunks alone (80 lit opaque cubes per burst), ray traced.
+(
+    name: "Debris RT",
+    emitters: [
+        (
+            name: "Chunks",
+            sim_target: Gpu,
+            max_particles: 256,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80), "Spawn Time": Float(2.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80), "Spawn Time": Float(4.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80), "Spawn Time": Float(6.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(80), "Spawn Time": Float(8.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.4), Float(1.9)),
+                    "Position": RandomRange(Vec3((-0.2, 0.1, -0.2)), Vec3((0.2, 0.3, 0.2))),
+                    "Color": Color((0.36, 0.29, 0.22, 1.0)),
+                }),
+                (module: "Initialize Mesh", inputs: {
+                    "Mesh Scale": RandomRange(Vec3((0.05, 0.04, 0.05)), Vec3((0.16, 0.12, 0.16))),
+                    "Mesh Rotation": RandomRange(Vec3((0.0, 0.0, 0.0)), Vec3((360.0, 360.0, 360.0))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(50.0),
+                    "Velocity Strength": RandomRange(Float(3.0), Float(6.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(0.3) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Update Mesh Orientation", inputs: { "Rotation Rate": Vec3((300.0, 120.0, 210.0)) }),
+            ],
+            renderers: [Mesh((mesh: "cube", blend_mode: Opaque, lit: true, ray_tracing: true))],
+        ),
+    ],
+)

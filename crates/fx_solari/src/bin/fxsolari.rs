@@ -184,6 +184,13 @@ fn load_path(path: &Path, ray_tracing: bool) -> Result<CookedSystem, String> {
                     s.ray_tracing &= ray_tracing;
                     s.ray_tracing_lights |= rt.1;
                 }
+                CookedRenderer::Mesh(s) => {
+                    s.ray_tracing &= ray_tracing;
+                    s.ray_tracing_lights |= rt.1;
+                    if let Some(n) = rt.0 {
+                        s.ray_tracing_max_particles = n;
+                    }
+                }
                 _ => {}
             }
         }
