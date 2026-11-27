@@ -159,13 +159,22 @@ const ZLIB_CHUNK_TAG: i64 = crate::summary::PACKAGE_FILE_TAG as i64;
 
 /// The UE4 texture source art of a Texture2D export (packages without a
 /// trailer, legacy file version -7): its native data starts with the
-/// UTexture strip flags, then the source's FByteBulkData. The payload sits
-/// inline or at the end of the file (`BulkDataStartOffset` + offset), and
-/// may be zlib-compressed in FArchive::SerializeCompressed chunks.
+/// UTexture strip flags, then the source's FByteBulkData (see
+/// [`ue4_bulk_data`]).
 pub fn ue4_texture_source(pkg: &Package, bytes: &[u8], obj: &Object) -> Result<Vec<u8>> {
     let end = (obj.native_offset + obj.native_size).min(bytes.len());
     let mut r = Reader::new(bytes).window(obj.native_offset, end)?;
     r.bytes(2)?; // FStripDataFlags (global, class)
+    ue4_bulk_data(pkg, bytes, &mut r)
+}
+
+/// A UE4 FByteBulkData read at `r` (a reader over the package file, so
+/// its positions are file offsets): u32 flags, element count and size on
+/// disk (i32, or i64 with BULKDATA_Size64Bit), i64 offset. The payload
+/// sits inline or at the end of the file (`BulkDataStartOffset` + offset),
+/// and may be zlib-compressed in FArchive::SerializeCompressed chunks.
+/// Leaves `r` after the header (and after an inline payload).
+pub fn ue4_bulk_data(pkg: &Package, bytes: &[u8], r: &mut Reader) -> Result<Vec<u8>> {
     let flags = r.u32()?;
     let (count, on_disk) = if flags & BULKDATA_SIZE_64BIT != 0 {
         (r.i64()?, r.i64()?)
@@ -174,21 +183,27 @@ pub fn ue4_texture_source(pkg: &Package, bytes: &[u8], obj: &Object) -> Result<V
     };
     let offset = r.i64()?;
     if flags & BULKDATA_UNUSED != 0 || count == 0 {
-        return Err(r.err("texture source bulk data is empty"));
+        return Err(r.err("bulk data is empty"));
     }
     if flags & BULKDATA_PAYLOAD_IN_SEPARATE_FILE != 0 {
-        return Err(r.err("texture source bulk data is in a separate file"));
+        return Err(r.err("bulk data is in a separate file"));
+    }
+    if count < 0 || on_disk < 0 || on_disk as usize > bytes.len() {
+        return Err(r.err(format!("bad bulk data sizes {count}, {on_disk}")));
     }
     let start = if flags & BULKDATA_PAYLOAD_AT_END_OF_FILE != 0 {
         let fix = if flags & BULKDATA_NO_OFFSET_FIX_UP != 0 { 0 } else { pkg.summary.bulk_data_start_offset };
-        (offset + fix) as usize
+        usize::try_from(offset + fix).map_err(|_| r.err("bad bulk data offset"))?
     } else {
         r.pos()
     };
     let data = start
-        .checked_add(on_disk.max(0) as usize)
+        .checked_add(on_disk as usize)
         .and_then(|e| bytes.get(start..e))
         .ok_or_else(|| Error::new(start, "bulk data past the end of the file"))?;
+    if flags & BULKDATA_PAYLOAD_AT_END_OF_FILE == 0 {
+        r.bytes(on_disk as usize)?;
+    }
     let out = if flags & BULKDATA_SERIALIZE_COMPRESSED_ZLIB != 0 { inflate_chunks(data)? } else { data.to_vec() };
     if out.len() as i64 != count {
         return Err(Error::new(start, format!("bulk data is {} bytes, expected {count}", out.len())));

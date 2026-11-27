@@ -26,10 +26,12 @@ view() {
 	arrow_trail) echo "--camera -7,3,-3.5 --target -1,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -3.5" ;;
 	# Lightning and portals stand about 2 m tall, seen from the front; Mixed
 	# VFX (projectiles in place, fires, explosions) and Mayu from a few metres.
-	lightning) echo "--camera 0,1.5,6 --target 0,1,0 --fov 59 --duration 3" ;;
+	# Rings, spheres and the saw blade are centred on the system origin: lifted
+	# 1 m so they clear the floor, as placed in the listings.
+	lightning) echo "--camera 0,1.5,6 --target 0,1,0 --fov 59 --duration 3 --at 0,1,0" ;;
 	portals) echo "--camera -3.5,1.6,5 --target 0,1.4,0 --fov 59 --duration 3" ;;
 	mixed_vfx) echo "--camera 0,2.5,7 --target 0,1,0 --fov 59 --duration 3" ;;
-	mayu_basic) echo "--camera 0,1.5,5 --target 0,1,0 --fov 59 --duration 3" ;;
+	mayu_basic) echo "--camera 0,1.5,5 --target 0,1,0 --fov 59 --duration 3 --at 0,1,0" ;;
 	esac
 }
 # The Unreal-like look. Exposure matched by eye to the listings; arrows fly at
@@ -71,7 +73,7 @@ for pack in $packs; do
 		"$bin/fximport" convert "$f" --out "$o" >"$o/convert.log" 2>&1 || true
 		# shellcheck disable=SC2046
 		"$bin/fxpreview" "$o/$s.fx.ron" --out "$o" --size 640x360 \
-			--times 0.5,1,1.5,2 $(view "$pack") $(look "$pack") >"$o/render.log" 2>&1 ||
+			--times ${TIMES:-0.5,1,1.5,2} $(view "$pack") $(look "$pack") >"$o/render.log" 2>&1 ||
 			echo "render failed: $s (see $o/render.log)"
 		echo "HELM-PROGRESS $((n + 1)) $s"
 		if [ -f "$o/$s.mp4" ]; then
@@ -97,7 +99,8 @@ for pack in $packs; do
 	ffmpeg -y -loglevel error $inputs -filter_complex \
 		"$filter${stack}xstack=inputs=$n:layout=$layout:fill=black,pad=$((cols * 640)):$((rows * 360)):0:0:black,scale=iw/2:-2[out]" \
 		-map "[out]" -t 3 -c:v libx264 -pix_fmt yuv420p -crf 20 "$out/${pack}_grid.mp4"
-	case $pack in arrow_trail) grid_t=${GRID_T:-0.9} ;; *) grid_t=${GRID_T:-1.5} ;; esac
+	# Mixed VFX hits, slashes and explosions are one-shot bursts over by ~1 s.
+	case $pack in arrow_trail) grid_t=${GRID_T:-0.9} ;; mixed_vfx) grid_t=${GRID_T:-0.35} ;; *) grid_t=${GRID_T:-1.5} ;; esac
 	ffmpeg -y -loglevel error -ss "$grid_t" -i "$out/${pack}_grid.mp4" -frames:v 1 "$out/${pack}_grid.png"
 	echo "$out/${pack}_grid.mp4 ($n systems)"
 	# The whole pack in one scene, laid out like the listing's showcase shot:

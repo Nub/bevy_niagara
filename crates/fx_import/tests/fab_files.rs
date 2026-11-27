@@ -211,3 +211,54 @@ fn engine_noise_textures_get_a_stand_in() {
     assert!(md.contains("LowResBlurredNoise not in the pack"), "{md}");
     assert!(!md.contains("missing texture"), "{md}");
 }
+
+#[test]
+fn ue4_raw_mesh_static_meshes_read() {
+    // UE 4.x static meshes keep LOD0 as a zlib-compressed FRawMesh in the
+    // StaticMesh native data (no StaticMeshDescriptionBulkData export).
+    let Some(f) = find_file("mixed_vfx", "SM_Slash_01.uasset") else {
+        eprintln!("skipped: mixed_vfx is absent");
+        return;
+    };
+    for name in ["SM_Slash_01.uasset", "SM_Arrow.uasset", "SM_Shuriken.uasset"] {
+        let f = f.with_file_name(name);
+        let bytes = std::fs::read(&f).unwrap();
+        let pkg = Package::read(&bytes).unwrap();
+        assert!(!pkg.exports.iter().any(|e| e.object_name.starts_with("StaticMeshDescriptionBulkData")));
+        let m = fx_import::mesh::read_static_mesh(&pkg, &bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (lo, hi) = m.bounds();
+        let size = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f32, f32::max);
+        eprintln!("{name}: {} triangles, {} vertices, bounds {lo:?} .. {hi:?}", m.triangle_count(), m.positions.len());
+        assert!(m.triangle_count() >= 2 && m.triangle_count() < 200_000, "{name}: {} triangles", m.triangle_count());
+        assert_eq!(m.indices.len(), 3 * m.triangle_count());
+        assert_eq!(m.triangle_slots.len(), m.triangle_count());
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.positions.len()));
+        assert!((0.05..10.0).contains(&size), "{name}: largest extent {size} m");
+        assert!(m.positions.iter().flatten().chain(m.uv0.iter().flatten()).all(|v| v.is_finite()));
+        assert!(m.normals.iter().all(|n| ((n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt() - 1.0).abs() < 1e-3));
+        // Counter-clockwise fronts: face normals agree with the stored ones.
+        let (mut agree, mut faces) = (0, 0);
+        for t in m.indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.positions[i as usize]);
+            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+            let s: f32 = t.iter().map(|&i| (0..3).map(|k| n[k] * m.normals[i as usize][k]).sum::<f32>()).sum();
+            if s != 0.0 {
+                faces += 1;
+                agree += (s > 0.0) as usize;
+            }
+        }
+        eprintln!("{name}: {agree} of {faces} faces agree with their normals");
+        assert!(agree * 10 >= faces * 9, "{name}: {agree} of {faces} faces agree with their normals");
+        assert!(!fx_import::mesh::write_glb(&m).is_empty());
+    }
+    // The slash system draws the real mesh, not a built-in stand-in.
+    let Some(sys) = find_file("mixed_vfx", "NS_FireSlash.uasset") else { return };
+    let out = std::env::temp_dir().join(format!("fx_import_ue4_mesh_{}", std::process::id()));
+    let r = fx_import::convert_file(&sys, &out).unwrap();
+    let _ = std::fs::remove_dir_all(&out);
+    eprintln!("{:#?}", r.report.materials.iter().filter(|m| m.contains("mesh `")).collect::<Vec<_>>());
+    assert!(r.report.materials.iter().any(|m| m.contains("mesh `SM_Slash_01` -> `") && m.contains("SM_Slash_01.glb")));
+    assert!(!r.report.placeholders.iter().any(|p| p.contains("SM_Slash_01")), "{:?}", r.report.placeholders);
+}

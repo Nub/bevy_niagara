@@ -1114,7 +1114,7 @@ impl<'a> Cx<'a> {
         let mut mesh_paths: Vec<(String, String)> = r
             .refs
             .iter()
-            .filter(|(k, v)| k.starts_with("Meshes[") && k.ends_with("].Mesh") && is_asset(v))
+            .filter(|(k, v)| is_mesh_ref(k) && is_asset(v))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         mesh_paths.sort();
@@ -1325,7 +1325,7 @@ impl<'a> Cx<'a> {
         let Some(r) = e.renderers.iter().find(|r| r.class == "NiagaraMeshRendererProperties" && r.enabled) else {
             return PLACEHOLDER_MESH_SIZE;
         };
-        let mut meshes: Vec<_> = r.refs.iter().filter(|(k, v)| k.starts_with("Meshes[") && k.ends_with("].Mesh") && v.starts_with('/')).collect();
+        let mut meshes: Vec<_> = r.refs.iter().filter(|(k, v)| is_mesh_ref(k) && v.starts_with('/')).collect();
         meshes.sort();
         match meshes.first().map(|(_, v)| (*v).clone()) {
             Some(p) if self.mesh_asset(&p).is_ok() => 1.0,
@@ -3095,4 +3095,9 @@ pub fn guess_mesh(mesh: &str) -> &'static str {
     } else {
         "cube"
     }
+}
+
+/// A mesh renderer's mesh reference: UE5's `Meshes[i].Mesh`, UE4's `ParticleMesh`.
+fn is_mesh_ref(k: &str) -> bool {
+    (k.starts_with("Meshes[") && k.ends_with("].Mesh")) || k == "ParticleMesh"
 }

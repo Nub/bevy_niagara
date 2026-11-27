@@ -133,19 +133,21 @@ fn bit_array(r: &mut Reader) -> Result<Vec<bool>> {
     Ok((0..n).map(|i| b[i / 8] >> (i % 8) & 1 == 1).collect())
 }
 
-fn attribute(r: &mut Reader) -> Result<Attribute> {
+fn attribute(r: &mut Reader, ue4: bool) -> Result<Attribute> {
     let name = r.fstring()?.trim_end().to_string();
     let ty = r.u32()?;
     if ty > 6 {
         return Err(r.err(format!("attribute {name}: type {ty} not supported")));
     }
-    let extent = r.u32()? as usize;
+    let extent = if ue4 { 1 } else { r.u32()? as usize };
     let num_elements = r.u32()? as usize;
     let nch = r.count(4)?;
     let values = if ty == 6 {
         let mut chans = Vec::with_capacity(nch);
         for _ in 0..nch {
-            let _extent = r.u32()?;
+            if !ue4 {
+                r.u32()?; // extent
+            }
             let n = r.count(4)?;
             chans.push((0..n).map(|_| r.fstring()).collect::<Result<Vec<_>>>()?);
         }
@@ -155,7 +157,9 @@ fn attribute(r: &mut Reader) -> Result<Attribute> {
         let size = [16, 12, 8, 4, 4, 1][ty as usize];
         let mut chans = Vec::with_capacity(nch);
         for _ in 0..nch {
-            let _extent = r.u32()?;
+            if !ue4 {
+                r.u32()?; // extent
+            }
             let elem = r.u32()? as usize;
             if elem != size {
                 return Err(r.err(format!("attribute {name}: element size {elem}, expected {size}")));
@@ -190,7 +194,7 @@ pub fn read_mesh_description(data: &[u8]) -> Result<MeshDescription> {
             let _ = r.u32()?;
             let num_elements = r.u32()? as usize;
             let na = r.count(8)?;
-            let attributes = (0..na).map(|_| attribute(&mut r)).collect::<Result<Vec<_>>>()?;
+            let attributes = (0..na).map(|_| attribute(&mut r, false)).collect::<Result<Vec<_>>>()?;
             channels.push(Channel {
                 allocated,
                 num_elements,
@@ -245,13 +249,16 @@ impl MeshData {
 }
 
 /// Reads the editor mesh description of the static mesh in `pkg` (the
-/// package's file bytes in `bytes`) and converts it to [`MeshData`].
+/// package's file bytes in `bytes`) and converts it to [`MeshData`]. UE4
+/// packages (no `StaticMeshDescriptionBulkData` export) are read from the
+/// LOD0 source mesh in the StaticMesh native data instead
+/// ([`read_ue4_source_mesh`]).
 pub fn read_static_mesh(pkg: &Package, bytes: &[u8]) -> std::result::Result<MeshData, String> {
-    let export = pkg
-        .exports
-        .iter()
-        .find(|e| e.object_name.starts_with("StaticMeshDescriptionBulkData"))
-        .ok_or("no StaticMeshDescriptionBulkData export (not an editor static mesh)")?;
+    let Some(export) = pkg.exports.iter().find(|e| e.object_name.starts_with("StaticMeshDescriptionBulkData")) else {
+        return read_ue4_source_mesh(pkg, bytes).map_err(|e| {
+            format!("no StaticMeshDescriptionBulkData export and no UE4 source mesh ({e}): not an editor static mesh")
+        });
+    };
     let payloads = crate::bulk::payloads_of(pkg, bytes, &export.object).map_err(|e| e.to_string())?;
     let payload = payloads.first().ok_or("the mesh description has no payload in the package trailer")?;
     let data = crate::bulk::read_payload(bytes, payload).map_err(|e| e.to_string())?;
@@ -373,6 +380,272 @@ fn fix_normals(m: &mut MeshData) {
         let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         *n = if l.is_finite() && l > 1e-12 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0, 1.0, 0.0] };
     }
+}
+
+// ---- UE4 source meshes (FRawMesh, UE4 FMeshDescription) ----
+
+/// The UE4 editor source geometry of the static mesh in `pkg`, LOD0.
+/// UStaticMesh's native data (after the tagged properties) holds strip
+/// flags, bCooked, the body setup and nav collision references and, per
+/// source model, FRawMeshBulkData (FByteBulkData, FGuid, bool32
+/// bGuidIsHash) and, from UE 4.2x, bool32 bIsValid plus an
+/// FMeshDescriptionBulkData (FByteBulkData, FGuid, bool32 bGuidIsHash,
+/// ...) whose payload is a UE4 FMeshDescription ([`read_ue4_mesh_description`]);
+/// the raw mesh is then empty. What precedes them varies with the engine
+/// version, so the native data is scanned for bulk data headers, in
+/// order, and the first payload that reads as a whole [`RawMesh`] or UE4
+/// mesh description is LOD0's.
+pub fn read_ue4_source_mesh(pkg: &Package, bytes: &[u8]) -> std::result::Result<MeshData, String> {
+    let i = pkg.find_export_by_class("StaticMesh").ok_or("no StaticMesh export")?;
+    let obj = &pkg.exports[i].object;
+    let end = (obj.native_offset + obj.native_size).min(bytes.len());
+    // Bulk data flags this reader knows (0x1..0x10000); anything else is
+    // not a header.
+    const KNOWN_FLAGS: u32 = 0x1_FFFF;
+    let le32 = |o: usize| bytes.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut last = String::from("no source mesh bulk data in the StaticMesh native data");
+    for at in obj.native_offset..end.saturating_sub(20) {
+        let flags = le32(at).unwrap_or(u32::MAX);
+        if flags & !KNOWN_FLAGS != 0 || flags & 0x20 != 0 {
+            continue;
+        }
+        // Element count and size on disk: positive and within the file.
+        let (count, disk) = if flags & 0x2000 != 0 {
+            (le32(at + 4).unwrap_or(0), le32(at + 12).unwrap_or(0))
+        } else {
+            (le32(at + 4).unwrap_or(0), le32(at + 8).unwrap_or(0))
+        };
+        if count < 16 || disk == 0 || disk as usize > bytes.len() || (flags & 0x2 == 0 && count != disk) {
+            continue;
+        }
+        let Ok(mut r) = Reader::new(bytes).window(at, end) else { continue };
+        let Ok(data) = crate::bulk::ue4_bulk_data(pkg, bytes, &mut r) else { continue };
+        let raw_err = match read_raw_mesh(&data) {
+            Ok(m) => return Ok(mesh_from_raw(&m)),
+            Err(e) => e,
+        };
+        match read_ue4_mesh_description(&data) {
+            Ok(d) => return mesh_from_description(&d),
+            Err(e) => last = format!("bulk data at {at:#x}: not a raw mesh ({raw_err}) nor a UE4 mesh description ({e})"),
+        }
+    }
+    Err(last)
+}
+
+/// Parses a UE 4.2x FMeshDescription (MeshDescriptionNewSerialization), as
+/// found in the files:
+///
+/// ```text
+/// element arrays Vertices, VertexInstances, Edges, Polygons, PolygonGroups:
+///   TBitArray allocation (u32 bit count, then the u32 words), then per
+///   live element: vertex nothing, vertex instance i32 VertexID, edge
+///   2 x i32 VertexID, polygon 8 bytes (zeros in every file seen), polygon
+///   group nothing
+/// one attribute set per element array, in the same order:
+///   u32 element count, u32 attribute count, per attribute:
+///     FString name, u32 type (as UE5), u32 element count,
+///     u32 channel count, per channel: FName: TArray<FString>;
+///       others: u32 element size, u32 count, data
+///     default value (bool as u32, FName as FString), u32 flags
+/// triangle array: allocation, per live triangle 3 x i32 VertexInstanceID
+///   and i32 PolygonID; then its attribute set
+/// ```
+///
+/// The result uses the UE5 names [`mesh_from_description`] reads: the
+/// vertex instance's vertex becomes `VertexInstances.VertexIndex`, the
+/// triangle corners `Triangles.VertexInstanceIndex` and the triangle's
+/// polygon group `Triangles.PolygonGroupIndex` (polygon groups are taken
+/// from the polygon's second i32 when it is a valid group, else 0).
+pub fn read_ue4_mesh_description(data: &[u8]) -> Result<MeshDescription> {
+    fn ids(name: &str, n: usize, per: usize, values: &[i32]) -> Attribute {
+        Attribute {
+            name: name.to_string(),
+            ty: 4,
+            extent: per,
+            num_elements: n,
+            values: Values::Raw { size: 4, channels: vec![values.iter().flat_map(|v| v.to_le_bytes()).collect()] },
+        }
+    }
+    fn live(bits: &[bool]) -> impl Iterator<Item = usize> + '_ {
+        bits.iter().enumerate().filter(|(_, b)| **b).map(|(i, _)| i)
+    }
+    let mut r = Reader::new(data);
+    let verts = bit_array(&mut r)?;
+    let vis = bit_array(&mut r)?;
+    let mut vi_vertex = vec![-1i32; vis.len()];
+    for i in live(&vis) {
+        vi_vertex[i] = r.i32()?;
+    }
+    let edges = bit_array(&mut r)?;
+    r.bytes(8 * live(&edges).count())?;
+    let polys = bit_array(&mut r)?;
+    let mut poly_group = vec![0i32; polys.len()];
+    for i in live(&polys) {
+        let _ = r.i32()?;
+        poly_group[i] = r.i32()?;
+    }
+    let groups = bit_array(&mut r)?;
+    if vi_vertex.iter().zip(&vis).any(|(&v, &l)| l && (v < 0 || v as usize >= verts.len())) {
+        return Err(r.err("vertex instance with a bad vertex"));
+    }
+    let mut sets = Vec::new();
+    for bits in [&verts, &vis, &edges, &polys, &groups] {
+        let n = r.u32()? as usize;
+        if n != bits.len() {
+            return Err(r.err(format!("attribute set of {n} elements for {} allocated", bits.len())));
+        }
+        let na = r.count(8)?;
+        sets.push((0..na).map(|_| attribute(&mut r, true)).collect::<Result<Vec<_>>>()?);
+    }
+    let tris = bit_array(&mut r)?;
+    let mut tri_vi = vec![0i32; 3 * tris.len()];
+    let mut tri_group = vec![0i32; tris.len()];
+    for t in live(&tris) {
+        for k in 0..3 {
+            tri_vi[3 * t + k] = r.i32()?;
+        }
+        let p = r.i32()?;
+        let g = poly_group.get(p as usize).copied().unwrap_or(0);
+        tri_group[t] = if g >= 0 && groups.get(g as usize) == Some(&true) { g } else { 0 };
+    }
+    let n = r.u32()? as usize;
+    if n != tris.len() {
+        return Err(r.err(format!("triangle attribute set of {n} elements for {}", tris.len())));
+    }
+    let na = r.count(8)?;
+    let mut tri_attrs = (0..na).map(|_| attribute(&mut r, true)).collect::<Result<Vec<_>>>()?;
+    if r.remaining() != 0 {
+        return Err(r.err(format!("{} bytes after the mesh description", r.remaining())));
+    }
+    tri_attrs.push(ids("VertexInstanceIndex", tris.len(), 3, &tri_vi));
+    tri_attrs.push(ids("PolygonGroupIndex", tris.len(), 1, &tri_group));
+    let mut sets = sets.into_iter();
+    let mut elements = Vec::new();
+    for (name, bits) in [("Vertices", verts), ("VertexInstances", vis), ("Edges", edges), ("Polygons", polys), ("PolygonGroups", groups)] {
+        let mut attributes = sets.next().unwrap_or_default();
+        if name == "VertexInstances" {
+            attributes.push(ids("VertexIndex", bits.len(), 1, &vi_vertex));
+        }
+        elements.push(Elements { name: name.to_string(), channels: vec![Channel { num_elements: bits.len(), allocated: bits, attributes }] });
+    }
+    elements.push(Elements {
+        name: "Triangles".to_string(),
+        channels: vec![Channel { num_elements: tris.len(), allocated: tris, attributes: tri_attrs }],
+    });
+    Ok(MeshDescription { elements })
+}
+
+/// FRawMesh (UE4 editor source geometry): faces of three wedges (corners).
+#[derive(Clone, Debug, Default)]
+pub struct RawMesh {
+    pub version: i32,
+    pub face_material_indices: Vec<i32>,
+    pub face_smoothing_masks: Vec<u32>,
+    pub vertex_positions: Vec<[f32; 3]>,
+    pub wedge_indices: Vec<u32>,
+    pub wedge_tangent_x: Vec<[f32; 3]>,
+    pub wedge_tangent_y: Vec<[f32; 3]>,
+    pub wedge_tangent_z: Vec<[f32; 3]>,
+    /// MAX_MESH_TEXTURE_COORDS (8) channels, each empty or one per wedge.
+    pub wedge_tex_coords: Vec<Vec<[f32; 2]>>,
+    /// FColor bytes as B, G, R, A.
+    pub wedge_colors: Vec<[u8; 4]>,
+    pub material_index_to_import_index: Vec<i32>,
+}
+
+/// Reads an FRawMesh: i32 version, i32 licensee version, then TArrays
+/// FaceMaterialIndices (i32), FaceSmoothingMasks (u32), VertexPositions
+/// (FVector, 3 x f32), WedgeIndices (u32), WedgeTangentX/Y/Z (FVector),
+/// 8 x WedgeTexCoords (FVector2D, 2 x f32), WedgeColors (FColor) and,
+/// from version 1, MaterialIndexToImportIndex (i32). The whole buffer
+/// must be consumed and the arrays must agree in size.
+pub fn read_raw_mesh(data: &[u8]) -> Result<RawMesh> {
+    let mut r = Reader::new(data);
+    let version = r.i32()?;
+    let _licensee = r.i32()?;
+    if !(0..=16).contains(&version) {
+        return Err(r.err(format!("raw mesh version {version}")));
+    }
+    fn arr<T>(r: &mut Reader, size: usize, f: impl Fn(&mut Reader) -> Result<T>) -> Result<Vec<T>> {
+        let n = r.count(size)?;
+        (0..n).map(|_| f(r)).collect()
+    }
+    let v3 = |r: &mut Reader| Ok([r.f32()?, r.f32()?, r.f32()?]);
+    let mut m = RawMesh { version, ..Default::default() };
+    m.face_material_indices = arr(&mut r, 4, |r| r.i32())?;
+    m.face_smoothing_masks = arr(&mut r, 4, |r| r.u32())?;
+    m.vertex_positions = arr(&mut r, 12, v3)?;
+    m.wedge_indices = arr(&mut r, 4, |r| r.u32())?;
+    m.wedge_tangent_x = arr(&mut r, 12, v3)?;
+    m.wedge_tangent_y = arr(&mut r, 12, v3)?;
+    m.wedge_tangent_z = arr(&mut r, 12, v3)?;
+    for _ in 0..8 {
+        m.wedge_tex_coords.push(arr(&mut r, 8, |r| Ok([r.f32()?, r.f32()?]))?);
+    }
+    m.wedge_colors = arr(&mut r, 4, |r| r.array::<4>())?;
+    if version >= 1 {
+        m.material_index_to_import_index = arr(&mut r, 4, |r| r.i32())?;
+    }
+    if r.remaining() != 0 {
+        return Err(r.err(format!("{} bytes after the raw mesh", r.remaining())));
+    }
+    let wedges = m.wedge_indices.len();
+    let faces = m.face_material_indices.len();
+    if wedges == 0 || wedges != 3 * faces {
+        return Err(r.err(format!("{wedges} wedges for {faces} faces")));
+    }
+    let per_wedge = |n: usize| n == 0 || n == wedges;
+    if !per_wedge(m.wedge_tangent_z.len())
+        || !per_wedge(m.wedge_colors.len())
+        || !m.wedge_tex_coords.iter().all(|c| per_wedge(c.len()))
+    {
+        return Err(r.err("wedge arrays disagree in size"));
+    }
+    if m.wedge_indices.iter().any(|&i| i as usize >= m.vertex_positions.len()) {
+        return Err(r.err("wedge index past the vertex positions"));
+    }
+    Ok(m)
+}
+
+/// Builds [`MeshData`] from an FRawMesh, the same way
+/// [`mesh_from_description`] does: one vertex per wedge, centimetres to
+/// metres, Unreal X, Y, Z -> X, Z, Y with the winding kept, normals from
+/// TangentZ, UV channel 0, vertex colours (sRGB FColor -> linear) only when
+/// not all white, one slot per material index.
+pub fn mesh_from_raw(raw: &RawMesh) -> MeshData {
+    let mut out = MeshData::default();
+    let mut slot_of = std::collections::BTreeMap::new();
+    for &mi in &raw.face_material_indices {
+        slot_of.insert(mi, 0u32);
+    }
+    for (s, (mi, slot)) in slot_of.iter_mut().enumerate() {
+        *slot = s as u32;
+        out.slot_names.push(format!("slot{mi}"));
+    }
+    if out.slot_names.is_empty() {
+        out.slot_names.push("default".to_string());
+    }
+    let srgb = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let mut colors = Vec::with_capacity(raw.wedge_indices.len());
+    for (w, &vi) in raw.wedge_indices.iter().enumerate() {
+        let p = raw.vertex_positions[vi as usize];
+        out.positions.push([p[0] * 0.01, p[2] * 0.01, p[1] * 0.01]);
+        out.normals.push(raw.wedge_tangent_z.get(w).map(|n| [n[0], n[2], n[1]]).unwrap_or([0.0; 3]));
+        out.uv0.push(raw.wedge_tex_coords.first().and_then(|c| c.get(w)).copied().unwrap_or([0.0; 2]));
+        colors.push(
+            raw.wedge_colors.get(w).map(|c| [srgb(c[2]), srgb(c[1]), srgb(c[0]), c[3] as f32 / 255.0]).unwrap_or([1.0; 4]),
+        );
+        out.indices.push(w as u32);
+    }
+    out.triangle_slots = raw.face_material_indices.iter().map(|mi| slot_of[mi]).collect();
+    if colors.iter().any(|c| *c != [1.0; 4]) {
+        out.colors = Some(colors);
+    }
+    fix_normals(&mut out);
+    out
 }
 
 fn json_str(s: &str) -> String {
