@@ -557,6 +557,18 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
             key: r.fstring()?,
             source: r.fstring()?,
         },
+        h @ 1..=3 => {
+            // Formatted text (NamedFormat, OrderedFormat, ArgumentFormat):
+            // the format text, then its arguments; kept raw.
+            let start = r.pos();
+            skip_formatted(r, ctx, h)?;
+            let end = r.pos();
+            r.seek(start)?;
+            Text::Other {
+                history: h,
+                bytes: r.bytes(end - start)?.to_vec(),
+            }
+        }
         h if !owns_rest => return Err(r.err(format!("FText history type {h} is not supported here"))),
         h => {
             // Kept raw: the text owns the rest of the reader.
@@ -566,6 +578,43 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
             }
         }
     })
+}
+
+/// Reads past a formatted FText history's payload (history 1: a format
+/// text and a map of named argument values; 2: a list of values; 3: a list
+/// of named argument data).
+fn skip_formatted(r: &mut Reader, ctx: &Ctx, history: i8) -> Result<()> {
+    fn value(r: &mut Reader, ctx: &Ctx, ty: i8) -> Result<()> {
+        match ty {
+            0 | 1 => {
+                r.i64()?;
+            }
+            2 => {
+                r.f32()?;
+            }
+            3 => {
+                r.f64()?;
+            }
+            4 => {
+                read_text(r, ctx, false)?;
+            }
+            5 => {
+                r.u8()?;
+            }
+            t => return Err(r.err(format!("format argument type {t}"))),
+        }
+        Ok(())
+    }
+    read_text(r, ctx, false)?;
+    let n = r.count(0)?;
+    for _ in 0..n {
+        if history != 2 {
+            r.fstring()?;
+        }
+        let ty = r.i8()?;
+        value(r, ctx, ty)?;
+    }
+    Ok(())
 }
 
 /// ArrayProperty: i32 count, then elements. Before UE5 1012 an array of

@@ -77,12 +77,40 @@ pub fn payloads_of(pkg: &Package, bytes: &[u8], obj: &Object) -> Result<Vec<Payl
     let all = trailer(pkg, bytes)?;
     let end = (obj.native_offset + obj.native_size).min(bytes.len());
     let native = bytes.get(obj.native_offset..end).unwrap_or(&[]);
+    if all.is_empty() {
+        return Ok(inline_payload(bytes, native).into_iter().collect());
+    }
     let mut found: Vec<(usize, Payload)> = all
         .into_iter()
         .filter_map(|p| native.windows(20).position(|w| w == p.id).map(|at| (at, p)))
         .collect();
     found.sort_by_key(|(at, _)| *at);
     Ok(found.into_iter().map(|(_, p)| p).collect())
+}
+
+/// UE 5.0 (before the package trailer): `FEditorBulkData` native data is
+/// flags (u32), bulk data id (16), payload hash (20), raw size (i64) and the
+/// payload's absolute file offset (i64), the payload an FCompressedBuffer
+/// after the exports. Empty payloads (size 0) are left out.
+fn inline_payload(bytes: &[u8], native: &[u8]) -> Option<Payload> {
+    let mut r = Reader::new(native);
+    let _flags = r.u32().ok()?;
+    let _guid = r.array::<16>().ok()?;
+    let id = r.array::<20>().ok()?;
+    let raw_size = usize::try_from(r.i64().ok()?).ok()?;
+    let offset = usize::try_from(r.i64().ok()?).ok()?;
+    if raw_size == 0 {
+        return None;
+    }
+    let head = bytes.get(offset..offset + 64)?;
+    if u32::from_be_bytes([head[0], head[1], head[2], head[3]]) != COMPRESSED_MAGIC {
+        return None;
+    }
+    let compressed = u64::from_be_bytes(head[24..32].try_into().ok()?) as usize;
+    let method = head[8];
+    let blocks = u32::from_be_bytes([head[12], head[13], head[14], head[15]]) as usize;
+    let size = 64 + if method == 0 { raw_size } else { 4 * blocks + compressed };
+    Some(Payload { id, offset, compressed_size: size.min(bytes.len() - offset), raw_size })
 }
 
 /// A payload's raw bytes.
