@@ -530,6 +530,22 @@ fn engine_plane() -> crate::mesh::MeshData {
     }
 }
 
+/// Niagara Particle State's Loop Particles Lifetime: past its lifetime a
+/// particle starts its age again (a burst that keeps cycling), as a custom
+/// module run right after Particle State.
+const LOOP_LIFETIME: &str = "Loop Particle Lifetime";
+const LOOP_LIFETIME_SRC: &str = r##"(
+    name: "Loop Particle Lifetime",
+    outputs: ["Particles.Age", "Particles.NormalizedAge"],
+    wgsl: r#"
+    if (Lifetime > 0.0 && Age >= Lifetime) {
+        Age = Age - Lifetime * floor(Age / Lifetime);
+        NormalizedAge = Age / Lifetime;
+    }
+"#,
+),
+"##;
+
 /// User parameters the GPU path takes (fx_gpu::MAX_USER_PARAMS).
 const USER_PARAM_LIMIT: usize = 16;
 
@@ -919,6 +935,17 @@ impl<'a> Cx<'a> {
                 }
             }
         }
+        // Loop Particles Lifetime restarts ages with a custom module, which
+        // runs on the GPU only.
+        if out.stacks.iter().any(|(_, mods)| mods.iter().any(|m| m.name == LOOP_LIFETIME)) {
+            if !out.gpu {
+                self.report.notes.push(format!("{}: simulated on the GPU (Loop Particles Lifetime needs a custom module)", e.name));
+            }
+            out.gpu = true;
+            if !self.custom.iter().any(|(n, _)| n == LOOP_LIFETIME) {
+                self.custom.push((LOOP_LIFETIME.into(), LOOP_LIFETIME_SRC.into()));
+            }
+        }
         // Dynamic Material Parameter indices the emitter writes.
         let mut written = [false; 4];
         for (_, mods) in out.stacks.iter().chain(out.events.iter()) {
@@ -1160,10 +1187,13 @@ impl<'a> Cx<'a> {
                 let v = get(self, "Value", unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0)));
                 coerce(v, ty)
             }
-            "Multiply_Float" | "Multiply_VectorByFloat" | "Multiply_Vector" | "Multiply_LinearColor" => {
+            "Multiply_Float" | "Multiply_VectorByFloat" | "Multiply_Vector2D_ByFloat" | "Multiply_Vector" | "Multiply_LinearColor" => {
+                // The first input present of a few names (UE versions differ).
+                let pick = |ks: &[&'static str]| ks.iter().copied().find(|k| d.has(k)).unwrap_or(ks[0]);
                 let (ta, ka, kb, tb) = match name.as_str() {
                     "Multiply_Float" => (Ty::Float, "A", "B", Ty::Float),
                     "Multiply_VectorByFloat" => (Ty::Vec3, "Vector", "Float", Ty::Float),
+                    "Multiply_Vector2D_ByFloat" => (Ty::Vec2, pick(&["Vector2D", "Vector", "Vector 2D", "A"]), pick(&["Float", "B"]), Ty::Float),
                     "Multiply_Vector" => (Ty::Vec3, "A", "B", Ty::Vec3),
                     _ => (Ty::Color, "A", "B", Ty::Color),
                 };
@@ -1180,6 +1210,7 @@ impl<'a> Cx<'a> {
                 let n = match (ta, tb) {
                     (Ty::Float, _) => "Multiply Float",
                     (Ty::Vec3, Ty::Float) => "Multiply Vec3 by Float",
+                    (Ty::Vec2, _) => "Multiply Vec2 by Float",
                     (Ty::Vec3, _) => "Multiply Vec3",
                     _ => "Multiply Color",
                 };
@@ -1231,6 +1262,26 @@ impl<'a> Cx<'a> {
                     "Make Vec3 from Floats".into(),
                     vec![("X".into(), comp("R")), ("Y".into(), comp("G")), ("Z".into(), comp("B"))],
                 ))
+            }
+            "Abs_Float" => {
+                // Constants and non-negative ranges fold; there is no Abs here.
+                let key = ["Float", "A", "Value"].into_iter().find(|k| d.has(k)).unwrap_or("Float");
+                match get(self, key, unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0))) {
+                    Fx::Lit(Lit::Float(x)) => Ok(Fx::Lit(Lit::Float(x.abs()))),
+                    Fx::Range(Lit::Float(a), Lit::Float(b)) if a >= 0.0 && b >= 0.0 => Ok(Fx::Range(Lit::Float(a), Lit::Float(b))),
+                    Fx::Range(Lit::Float(a), Lit::Float(b)) if a <= 0.0 && b <= 0.0 => Ok(Fx::Range(Lit::Float(-b), Lit::Float(-a))),
+                    other => Err(format!("Abs of a value that is not a constant ({other:?})")),
+                }
+            }
+            "MakeLinearColorFromVectorAndFloat" => {
+                let rgb_key = ["Vector", "RGB", "Color"].into_iter().find(|k| d.has(k)).unwrap_or("Vector");
+                let a_key = ["Float", "Alpha", "A"].into_iter().find(|k| d.has(k)).unwrap_or("Float");
+                let rgb = get(self, rgb_key, Unit::None, Ty::Vec3)?.unwrap_or(Fx::Lit(Lit::Vec3([1.0; 3])));
+                let a = get(self, a_key, Unit::None, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(1.0)));
+                if let (Fx::Lit(Lit::Vec3(c)), Fx::Lit(Lit::Float(a))) = (&rgb, &a) {
+                    return Ok(Fx::Lit(Lit::Color([c[0], c[1], c[2], *a])));
+                }
+                Ok(Fx::Dyn("Make Color from Vec3 and Float".into(), vec![("RGB".into(), rgb), ("Alpha".into(), a)]))
             }
             "MakeCustomVectorFromBool" => {
                 let c = get(self, "Bool", Unit::None, Ty::Bool)?.unwrap_or(Fx::Lit(Lit::Bool(false)));
@@ -2283,11 +2334,14 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
                 x.set("Kill Particles When Lifetime Has Elapsed", Fx::Lit(Lit::Bool(false)));
             }
             used.push("Loop Particles Lifetime");
-            if matches!(m.input("Loop Particles Lifetime"), Some(NInput::Value(NValue::Bool(true)))) {
+            let looped = matches!(m.input("Loop Particles Lifetime"), Some(NInput::Value(NValue::Bool(true))));
+            if looped {
                 x.set("Kill Particles When Lifetime Has Elapsed", Fx::Lit(Lit::Bool(false)));
-                o.changes.push("Loop Particles Lifetime: particles are kept alive instead of restarting their age".into());
             }
             o.mods.push(x);
+            if looped {
+                o.mods.push(FxModule::new(LOOP_LIFETIME));
+            }
         }
         "SolveForcesAndVelocity" => {
             o.mods.push(FxModule::new("Solve Forces and Velocity"));
