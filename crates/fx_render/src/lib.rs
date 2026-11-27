@@ -111,7 +111,7 @@ use fx_gpu::gather::{GatherPipelines, ParticleGather};
 use fx_gpu::lights::{GpuLight, LightGather, LightPipelines};
 use fx_gpu::volume::{VolumeParams, VolumePipelines, VolumeSplat};
 use fx_gpu::ribbon::{RibbonBuild, RibbonPipelines};
-use fx_gpu::view::{BatchDraw, CullRadius, ViewDraw, ViewDrawConfig, ViewParams, ViewPipelines};
+use fx_gpu::view::{BatchDraw, CullPhase, CullRadius, ViewDraw, ViewDrawConfig, ViewParams, ViewPipelines};
 use fx_gpu::wgpu;
 
 /// A particle system instance. Its particles are simulated in the entity's
@@ -2302,13 +2302,7 @@ fn simulate(
             for view in &views {
                 if let Some(vs) = rd.views.get_mut(&view.retained_view_entity) {
                     let vp = local_view(view, &Mat4::IDENTITY);
-                    vs.draw.record(
-                        &queue,
-                        encoder,
-                        &state.view_pipelines,
-                        &batch.copies[rd.emitter],
-                        &vp,
-                    );
+                    vs.draw.prepare(&queue, &batch.copies[rd.emitter], &vp);
                     payload |= vs.draw.payload_used(batch.copies[rd.emitter].len());
                 }
             }
@@ -2316,6 +2310,29 @@ fn simulate(
                 // FxRenderer.payload (word 43; write_uniform leaves it 0).
                 queue.write_buffer(&rd.uniform, 43 * 4, &1u32.to_le_bytes());
             }
+        }
+    }
+    // Every draw's cull and sort, phase by phase in one compute pass each, so
+    // the small dispatches of different emitters overlap on the GPU.
+    for phase in CullPhase::ALL {
+        let draws = || {
+            state
+                .batches
+                .iter()
+                .flatten()
+                .filter(|b| !b.members.is_empty())
+                .flat_map(|b| b.draws.iter())
+                .flat_map(|rd| views.iter().filter_map(|v| rd.views.get(&v.retained_view_entity)))
+        };
+        if !draws().any(|vs| vs.draw.phase_used(phase)) {
+            continue;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(phase.label()),
+            timestamp_writes: None,
+        });
+        for vs in draws() {
+            vs.draw.record_phase(phase, &mut pass, &state.view_pipelines);
         }
     }
     span.end(encoder);

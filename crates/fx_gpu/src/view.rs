@@ -653,6 +653,32 @@ fn write_params(
     put(40, entry_count);
 }
 
+/// The compute passes of a [`BatchDraw`]'s cull and sort, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CullPhase {
+    /// Draw-argument reset and dispatch sizes (and the cull of small emitters).
+    Prep,
+    /// The cull of larger emitters (indirect).
+    Cull,
+    /// Several instances sorted: sort length from the visible count.
+    SortPrep,
+    /// Tail padding, then the bitonic or radix passes.
+    Sort,
+}
+
+impl CullPhase {
+    pub const ALL: [CullPhase; 4] = [CullPhase::Prep, CullPhase::Cull, CullPhase::SortPrep, CullPhase::Sort];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CullPhase::Prep => "fx batch cull prep",
+            CullPhase::Cull => "fx batch cull",
+            CullPhase::SortPrep => "fx batch sort prep",
+            CullPhase::Sort => "fx batch sort",
+        }
+    }
+}
+
 /// One emitter of every instance of a [`GpuBatch`](crate::GpuBatch) seen
 /// from one view: one cull over all the instances drawn, one sort, one
 /// indirect draw. `indices` holds particle references `r * capacity + i`
@@ -673,6 +699,8 @@ pub struct BatchDraw {
     /// Sorted sprites: 64 bytes per particle position (see `payload_used`).
     pub payload: Option<wgpu::Buffer>,
     payload_bind_group: wgpu::BindGroup,
+    /// Instances drawn this frame (set by `prepare`).
+    copies: usize,
     params: wgpu::Buffer,
     entries: wgpu::Buffer,
     /// Visible particle references (`array<u32>`), sorted when sorting.
@@ -789,6 +817,7 @@ impl BatchDraw {
             radix,
             payload,
             payload_bind_group,
+            copies: 0,
             params,
             entries,
             indices,
@@ -804,7 +833,9 @@ impl BatchDraw {
 
     /// Records culling (and sorting) of the instances `copies` (each
     /// `2 * slot + current`, as [`GpuEmitter::particles`]) for `view` (world
-    /// space). With no copies the draw is empty.
+    /// space). With no copies the draw is empty. Each [`CullPhase`] in a
+    /// compute pass of its own; [`BatchDraw::record_phase`] records one phase
+    /// of many draws in one pass instead.
     pub fn record(
         &mut self,
         queue: &wgpu::Queue,
@@ -813,6 +844,21 @@ impl BatchDraw {
         copies: &[u32],
         view: &ViewParams,
     ) {
+        self.prepare(queue, copies, view);
+        for phase in CullPhase::ALL {
+            if self.phase_used(phase) {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(phase.label()),
+                    timestamp_writes: None,
+                });
+                self.record_phase(phase, &mut pass, pipelines);
+            }
+        }
+    }
+
+    /// Writes the view and the instances drawn (`copies`) for this frame's
+    /// phases. Call before [`BatchDraw::record_phase`].
+    pub fn prepare(&mut self, queue: &wgpu::Queue, copies: &[u32], view: &ViewParams) {
         write_params(
             &mut self.scratch,
             view,
@@ -835,84 +881,101 @@ impl BatchDraw {
         if !copies.is_empty() {
             queue.write_buffer(&self.entries, 0, &self.entry_bytes);
         }
-        let sorted = !self.passes.is_empty();
-        let single_sorted = sorted && copies.len() == 1;
-        // Small emitters: the cull over the whole capacity, in the prep's pass.
-        let direct = !single_sorted && self.capacity <= DIRECT_CULL_MAX;
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("fx batch cull prep"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_bind_group(1, &self.args_bind_group, &[]);
-        pass.set_pipeline(&pipelines.batch_prep);
-        pass.dispatch_workgroups(1, 1, 1);
-        if copies.is_empty() {
+        self.copies = copies.len();
+    }
+
+    fn sorted(&self) -> bool {
+        !self.passes.is_empty()
+    }
+
+    fn single_sorted(&self) -> bool {
+        self.sorted() && self.copies == 1
+    }
+
+    /// Small emitters: the cull over the whole capacity, in the prep's pass.
+    fn direct(&self) -> bool {
+        !self.single_sorted() && self.capacity <= DIRECT_CULL_MAX
+    }
+
+    /// Whether `phase` records anything for the prepared frame.
+    pub fn phase_used(&self, phase: CullPhase) -> bool {
+        let drawn = self.copies > 0;
+        match phase {
+            CullPhase::Prep => true,
+            CullPhase::Cull => drawn && !self.direct(),
+            CullPhase::SortPrep => drawn && self.sorted() && !self.single_sorted(),
+            CullPhase::Sort => drawn && self.sorted(),
+        }
+    }
+
+    /// Records `phase` of the prepared frame into `pass` (nothing when
+    /// unused). Phases of different draws can share a pass; each draw's
+    /// phases must be recorded in [`CullPhase::ALL`] order, in passes of
+    /// their own (a later phase reads what the earlier one wrote).
+    pub fn record_phase(&self, phase: CullPhase, pass: &mut wgpu::ComputePass<'_>, pipelines: &ViewPipelines) {
+        if !self.phase_used(phase) {
             return;
         }
-        if !direct {
-            drop(pass);
-            pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx batch cull"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-        }
-        pass.set_bind_group(1, &self.payload_bind_group, &[]);
-        pass.set_pipeline(&pipelines.cull_batch);
-        if direct {
-            pass.dispatch_workgroups(self.capacity.div_ceil(BLOCK / 2), copies.len() as u32, 1);
-        } else {
-            pass.dispatch_workgroups_indirect(&self.args, self.args.size() - 16);
-        }
-        if !sorted {
-            return;
-        }
-        if !single_sorted {
-            // Several instances: sort length from the visible count, tail padded.
-            drop(pass);
-            let mut prep = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx batch sort prep"),
-                timestamp_writes: None,
-            });
-            prep.set_bind_group(0, &self.bind_group, &[]);
-            prep.set_bind_group(1, &self.args_bind_group, &[]);
-            prep.set_pipeline(&pipelines.sort_prep);
-            prep.dispatch_workgroups(1, 1, 1);
-            drop(prep);
-            pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx batch sort"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_pipeline(&pipelines.pad);
-            pass.dispatch_workgroups_indirect(&self.args, 0);
-        }
-        // Only the passes the drawn instances can need (later ones would get no workgroups).
-        let limit = (copies.len() as u64 * self.capacity as u64).next_power_of_two().max(BLOCK as u64);
-        for (i, p) in self.passes.iter().enumerate() {
-            match *p {
-                PassKind::MergeGlobal { k, .. } | PassKind::MergeLocal { k } if k as u64 > limit => break,
-                _ => {}
-            }
-            let args_offset = 16 * (1 + i as u64);
-            match p {
-                PassKind::Local => pass.set_pipeline(&pipelines.sort_local),
-                PassKind::MergeGlobal { .. } => {
-                    pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
-                    pass.set_pipeline(&pipelines.sort_merge_global);
-                }
-                PassKind::MergeLocal { .. } => {
-                    pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
-                    pass.set_pipeline(&pipelines.sort_merge_local);
+        let drawn = self.copies > 0;
+        match phase {
+            CullPhase::Prep => {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_bind_group(1, &self.args_bind_group, &[]);
+                pass.set_pipeline(&pipelines.batch_prep);
+                pass.dispatch_workgroups(1, 1, 1);
+                if drawn && self.direct() {
+                    pass.set_bind_group(1, &self.payload_bind_group, &[]);
+                    pass.set_pipeline(&pipelines.cull_batch);
+                    pass.dispatch_workgroups(self.capacity.div_ceil(BLOCK / 2), self.copies as u32, 1);
                 }
             }
-            pass.dispatch_workgroups_indirect(&self.args, args_offset);
-        }
-        if let Some(r) = &self.radix
-            && limit > RADIX_MIN_POW2 as u64 / 2
-        {
-            r.record(&mut pass, pipelines, &self.pass_bind_group, &self.args);
+            CullPhase::Cull => {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_bind_group(1, &self.payload_bind_group, &[]);
+                pass.set_pipeline(&pipelines.cull_batch);
+                pass.dispatch_workgroups_indirect(&self.args, self.args.size() - 16);
+            }
+            CullPhase::SortPrep => {
+                // Several instances: sort length from the visible count, tail padded.
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_bind_group(1, &self.args_bind_group, &[]);
+                pass.set_pipeline(&pipelines.sort_prep);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            CullPhase::Sort => {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                if !self.single_sorted() {
+                    pass.set_pipeline(&pipelines.pad);
+                    pass.dispatch_workgroups_indirect(&self.args, 0);
+                }
+                // Only the passes the drawn instances can need (later ones would get no workgroups).
+                let limit = (self.copies as u64 * self.capacity as u64).next_power_of_two().max(BLOCK as u64);
+                for (i, p) in self.passes.iter().enumerate() {
+                    match *p {
+                        PassKind::MergeGlobal { k, .. } | PassKind::MergeLocal { k } if k as u64 > limit => break,
+                        _ => {}
+                    }
+                    let args_offset = 16 * (1 + i as u64);
+                    match p {
+                        PassKind::Local => pass.set_pipeline(&pipelines.sort_local),
+                        PassKind::MergeGlobal { .. } => {
+                            pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                            pass.set_pipeline(&pipelines.sort_merge_global);
+                        }
+                        PassKind::MergeLocal { .. } => {
+                            pass.set_bind_group(1, &self.pass_bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                            pass.set_pipeline(&pipelines.sort_merge_local);
+                        }
+                    }
+                    pass.dispatch_workgroups_indirect(&self.args, args_offset);
+                }
+                if let Some(r) = &self.radix
+                    && limit > RADIX_MIN_POW2 as u64 / 2
+                {
+                    r.record(pass, pipelines, &self.pass_bind_group, &self.args);
+                    // Leave group 0 as the radix one: the next draw sets its own.
+                }
+            }
         }
     }
 
