@@ -1,0 +1,17 @@
+[package]
+name = "fx_web"
+description = "Browser demo (wasm32 + WebGPU): library effects loaded over HTTP, touch orbit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fx_render = { path = "../crates/fx_render" }
+bevy.workspace = true
+
+# WebGPU instead of WebGL2 in the browser build (wasm32 only; the native
+# build of this crate is a plain window for quick checks).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { workspace = true, features = ["webgpu", "web"] }
+web-sys = { version = "0.3", features = ["Window", "Location"] }

@@ -434,6 +434,20 @@ impl SceneBindings {
 /// Format of the depth texture SceneDepth collisions read.
 pub const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
+/// Storage buffers of the data interface (3) and scene (1) groups, bound
+/// by kernels running module code that reads them.
+const DATA_SCENE_STORAGE: u32 = 4;
+
+fn is_storage(e: &wgpu::BindGroupLayoutEntry) -> bool {
+    matches!(
+        e.ty,
+        wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { .. },
+            ..
+        }
+    )
+}
+
 fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -474,6 +488,10 @@ pub struct GpuProgram {
     pub ray_tracing: bool,
     /// The device's largest storage binding.
     storage_limit: u64,
+    /// The sim bind group has the event buffers (bindings 4, 5).
+    uses_events: bool,
+    /// The sim bind group has the grid buffer (binding 6).
+    uses_grids: bool,
 }
 
 impl GpuProgram {
@@ -501,35 +519,45 @@ impl GpuProgram {
             ));
         }
         let limit = device.limits().max_storage_buffer_binding_size;
+        // Event and grid buffers are bound only when the system has them, so
+        // that simple effects stay within WebGPU's 8 storage buffers per
+        // shader stage (see `check_storage_buffers`).
+        let uses_events = !EventLayout::new(&system).regions.is_empty();
+        let uses_grids = system.emitters.iter().any(|e| !e.grids.is_empty());
+        let mut entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(FRAME_BYTES as u64),
+                },
+                count: None,
+            },
+            storage_entry(1, false),
+            storage_entry(3, false),
+        ];
+        if uses_events {
+            entries.extend([storage_entry(4, false), storage_entry(5, false)]);
+        }
+        if uses_grids {
+            entries.push(storage_entry(6, false));
+        }
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(16),
+            },
+            count: None,
+        });
+        let sim_storage = entries.iter().filter(|e| is_storage(e)).count() as u32;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx_gpu sim"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(FRAME_BYTES as u64),
-                    },
-                    count: None,
-                },
-                storage_entry(1, false),
-                storage_entry(3, false),
-                storage_entry(4, false),
-                storage_entry(5, false),
-                storage_entry(6, false),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(16),
-                    },
-                    count: None,
-                },
-            ],
+            entries: &entries,
         });
         let args_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx_gpu sim args"),
@@ -622,6 +650,18 @@ impl GpuProgram {
             };
             // Kernels running module code read the data interfaces and the scene when used.
             let modules_read = shader.uses_scene || shader.uses_data;
+            // WebGPU guarantees only 8 storage buffers per shader stage; a
+            // program needing more than the device has fails here (the
+            // renderer logs it and skips the effect) instead of failing
+            // pipeline validation, which ends the app.
+            let needed = sim_storage + if modules_read { DATA_SCENE_STORAGE } else { 1 };
+            let allowed = device.limits().max_storage_buffers_per_shader_stage;
+            if needed > allowed {
+                return Err(format!(
+                    "emitter \"{}\" needs {needed} storage buffers in a compute shader, this GPU allows {allowed}",
+                    e.name
+                ));
+            }
             let pipe = |entry: &str| {
                 let writes_args = entry == "begin" || entry == "spawn_prep" || entry == "finish";
                 let runs_modules = entry == "update" || entry == "spawn" || entry.starts_with("stage_");
@@ -689,6 +729,8 @@ impl GpuProgram {
             iterations,
             ray_tracing: options.ray_tracing_layout.is_some(),
             storage_limit: limit,
+            uses_events,
+            uses_grids,
         })
     }
 
@@ -817,47 +859,52 @@ impl GpuBatch {
                     resource: args.as_entire_binding(),
                 }],
             });
+            let mut entries = vec![
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &frames,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(slots as u64 * FRAME_BYTES as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: particles.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &program.iterations,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(16),
+                    }),
+                },
+            ];
+            if program.uses_events {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: event_counts.as_entire_binding(),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: event_data.as_entire_binding(),
+                });
+            }
+            if program.uses_grids {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: grids.as_entire_binding(),
+                });
+            }
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fx sim"),
                 layout: &program.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &frames,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(slots as u64 * FRAME_BYTES as u64),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: particles.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: state.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: event_counts.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: event_data.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: grids.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &program.iterations,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(16),
-                        }),
-                    },
-                ],
+                entries: &entries,
             });
             emitters.push(BatchEmitter {
                 particles,

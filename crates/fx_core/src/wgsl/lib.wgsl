@@ -133,7 +133,7 @@ fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
 // q at unit length, or the identity if its length is 0 or not finite.
 fn quat_normalize(q: vec4<f32>) -> vec4<f32> {
     let rl = 1.0 / length(q);
-    if (rl > 0.0 && rl <= 3.4028235e38) {
+    if (rl > 0.0 && rl <= 0x1.fffffep+127f) {
         return q * rl;
     }
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
@@ -153,7 +153,7 @@ fn falloff(dist: f32, radius: f32, exponent: f32) -> f32 {
 // v normalised, or +Y if it has no direction.
 fn unit_or_y(v: vec3<f32>) -> vec3<f32> {
     let rl = 1.0 / length(v);
-    if (rl > 0.0 && rl <= 3.4028235e38) {
+    if (rl > 0.0 && rl <= 0x1.fffffep+127f) {
         return v * rl;
     }
     return vec3<f32>(0.0, 1.0, 0.0);
@@ -311,7 +311,7 @@ fn rotation_vector_quat(v: vec3<f32>) -> vec4<f32> {
 // v * (1 / length(v)) if that is finite and positive, else `fallback`.
 fn normalize_or(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let rl = 1.0 / length(v);
-    if (rl > 0.0 && rl <= 3.4028235e38) {
+    if (rl > 0.0 && rl <= 0x1.fffffep+127f) {
         return v * rl;
     }
     return fallback;

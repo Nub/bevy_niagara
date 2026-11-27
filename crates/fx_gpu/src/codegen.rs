@@ -364,7 +364,7 @@ impl Gen<'_> {
             }
             Op::Normalize => writeln!(
                 b,
-                "    let v = {};\n    let rl = 1.0 / length(v);\n    if (rl > 0.0 && rl <= 3.4028235e38) {{ return v * rl; }}\n    return vec3<f32>(0.0);",
+                "    let v = {};\n    let rl = 1.0 / length(v);\n    if (rl > 0.0 && rl <= 0x1.fffffep+127f) {{ return v * rl; }}\n    return vec3<f32>(0.0);",
                 args[0]
             )
             .unwrap(),
@@ -504,7 +504,7 @@ impl Gen<'_> {
                 writeln!(o, "    let rl = 1.0 / length(axis);").unwrap();
                 writeln!(
                     o,
-                    "    if (rl > 0.0 && rl <= 3.4028235e38) {{ axis = axis * rl; }} else {{ axis = vec3<f32>(0.0, 1.0, 0.0); }}"
+                    "    if (rl > 0.0 && rl <= 0x1.fffffep+127f) {{ axis = axis * rl; }} else {{ axis = vec3<f32>(0.0, 1.0, 0.0); }}"
                 )
                 .unwrap();
                 writeln!(

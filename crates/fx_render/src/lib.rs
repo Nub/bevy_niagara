@@ -38,6 +38,7 @@
 //! No particle counts are read back; the per-frame CPU→GPU traffic is a few
 //! uniform writes from fixed-size scratch arrays.
 
+pub mod asset;
 pub mod component;
 pub mod data;
 pub mod game;
@@ -51,6 +52,7 @@ pub use component::{
     FromParticle, FxComponentAppExt, ParticleAttributes, ParticleComponent,
     apply_particle_components,
 };
+pub use asset::{FxEffectAsset, FxEffectLoader};
 pub use data::DataBinding;
 pub use game::{
     CullReason, EffectControl, EffectMode, FxCommandsExt, FxPoolStats, FxQuality, FxScalability,
@@ -326,7 +328,9 @@ impl Plugin for FxPlugin {
         };
         let pool_stats = FxPoolStats::default();
         let done = game::DoneInbox::default();
-        app.init_resource::<FxClock>()
+        app.init_asset::<FxEffectAsset>()
+            .init_asset_loader::<FxEffectLoader>()
+            .init_resource::<FxClock>()
             .init_resource::<FxQuality>()
             .init_resource::<FxScalability>()
             .insert_resource(pool_stats.clone())
@@ -1086,20 +1090,25 @@ fn init_render(
     asset_server: Res<AssetServer>,
 ) {
     let stages = ShaderStages::VERTEX_FRAGMENT;
+    // Fragment shaders only see interpolated particle values, so the storage
+    // buffers are vertex-only: they do not count against the fragment stage's
+    // storage buffer limit, which Bevy's view bindings mostly use (WebGPU
+    // guarantees 8 per stage).
+    let vertex = ShaderStages::VERTEX;
     let layout = BindGroupLayoutDescriptor::new(
         "fx particles",
         &BindGroupLayoutEntries::sequential(
             stages,
             (
                 uniform_buffer_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None).visibility(vertex),
+                storage_buffer_read_only_sized(false, None).visibility(vertex),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None).visibility(vertex),
+                storage_buffer_read_only_sized(false, None).visibility(vertex),
+                storage_buffer_read_only_sized(false, None).visibility(vertex),
+                storage_buffer_read_only_sized(false, None).visibility(vertex),
             ),
         ),
     );

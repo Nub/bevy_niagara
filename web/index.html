@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link rel="icon" href="data:,">
+<title>animatey: particles in the browser</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #050508; color: #ccc; font: 14px system-ui, sans-serif; overflow: hidden; }
+  #fx-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 2em; pointer-events: none; }
+  #hint { position: fixed; left: 12px; bottom: 10px; opacity: .6; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="fx-canvas"></canvas>
+<div id="msg">Loading…</div>
+<div id="hint">Campfire and sparks · drag to orbit · pinch or scroll to zoom</div>
+<script type="module">
+  const msg = document.getElementById("msg");
+  if (!navigator.gpu) {
+    msg.textContent = "This page needs WebGPU (Chrome/Edge 113+, Safari 26+ on iPad and Mac), served over HTTPS or localhost.";
+  } else {
+    // Ask for an adapter once before Bevy does: Chromium sometimes answers the
+    // first request of a page with null ("A valid external Instance reference
+    // no longer exists"), and Bevy has no retry.
+    for (let i = 0; i < 3 && !(await navigator.gpu.requestAdapter({ powerPreference: "high-performance" })); i++) {}
+    const { default: init } = await import("./fx_web.js");
+    msg.textContent = "";
+    try {
+      await init();
+    } catch (e) {
+      // Bevy's winit loop hands control back to the browser by throwing; that one is expected.
+      if (!String(e).includes("Using exceptions for control flow")) {
+        msg.textContent = "Failed to start: " + e;
+        throw e;
+      }
+    }
+  }
+</script>
+</body>
+</html>

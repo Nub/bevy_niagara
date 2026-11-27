@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "examples/*"]
+members = ["crates/*", "examples/*", "web"]
 
 [workspace.package]
 edition = "2024"
@@ -29,3 +29,12 @@ bytemuck = { version = "1.5", features = ["derive"] }
 # wgpu-hal, and a [patch] only applies from the root workspace.
 [patch.crates-io]
 wgpu-hal = { path = "/home/zach/helm-projects/bevy-solari-opt/vendor/wgpu-hal" }
+
+# The browser build (web/build.sh): smallest download.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

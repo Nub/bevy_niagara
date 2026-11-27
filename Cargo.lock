@@ -692,6 +692,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_dev_tools"
+version = "0.20.0-dev"
+dependencies = [
+ "bevy_animation",
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_diagnostic",
+ "bevy_ecs",
+ "bevy_extract",
+ "bevy_image",
+ "bevy_input",
+ "bevy_light",
+ "bevy_log",
+ "bevy_math",
+ "bevy_mesh",
+ "bevy_picking",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_render",
+ "bevy_shader",
+ "bevy_sprite",
+ "bevy_state",
+ "bevy_text",
+ "bevy_time",
+ "bevy_transform",
+ "bevy_ui",
+ "bevy_ui_widgets",
+ "bevy_utils",
+ "bevy_window",
+ "bevy_world_serialization",
+ "strsim",
+ "tracing",
+]
+
+[[package]]
 name = "bevy_diagnostic"
 version = "0.20.0-dev"
 dependencies = [
@@ -785,6 +822,36 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "bevy_feathers"
+version = "0.20.0-dev"
+dependencies = [
+ "accesskit",
+ "bevy_a11y",
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_input",
+ "bevy_input_focus",
+ "bevy_log",
+ "bevy_math",
+ "bevy_picking",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_render",
+ "bevy_scene",
+ "bevy_shader",
+ "bevy_text",
+ "bevy_ui",
+ "bevy_ui_render",
+ "bevy_ui_widgets",
+ "bevy_window",
+ "smol_str",
 ]
 
 [[package]]
@@ -938,6 +1005,7 @@ dependencies = [
  "bevy_ecs",
  "bevy_input",
  "bevy_math",
+ "bevy_picking",
  "bevy_reflect",
  "bevy_window",
  "log",
@@ -961,9 +1029,11 @@ dependencies = [
  "bevy_core_pipeline",
  "bevy_curve",
  "bevy_derive",
+ "bevy_dev_tools",
  "bevy_diagnostic",
  "bevy_ecs",
  "bevy_extract",
+ "bevy_feathers",
  "bevy_fuzzy",
  "bevy_gizmos",
  "bevy_gizmos_render",
@@ -1174,6 +1244,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_picking"
+version = "0.20.0-dev"
+dependencies = [
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_input",
+ "bevy_math",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_shape",
+ "bevy_time",
+ "bevy_transform",
+ "bevy_window",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bevy_platform"
 version = "0.20.0-dev"
 dependencies = [
@@ -1323,6 +1414,35 @@ name = "bevy_render_macros"
 version = "0.20.0-dev"
 dependencies = [
  "bevy_extract_macros",
+ "bevy_macro_utils",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "bevy_scene"
+version = "0.20.0-dev"
+dependencies = [
+ "bevy_app",
+ "bevy_asset",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_scene_macros",
+ "bevy_utils",
+ "smallvec",
+ "thiserror 2.0.21",
+ "tracing",
+ "variadics_please",
+]
+
+[[package]]
+name = "bevy_scene_macros"
+version = "0.20.0-dev"
+dependencies = [
+ "bevy_ecs_macro_logic",
  "bevy_macro_utils",
  "proc-macro2",
  "quote",
@@ -1561,6 +1681,7 @@ dependencies = [
  "bevy_input_focus",
  "bevy_log",
  "bevy_math",
+ "bevy_picking",
  "bevy_platform",
  "bevy_reflect",
  "bevy_sprite",
@@ -1576,6 +1697,7 @@ dependencies = [
  "taffy",
  "thiserror 2.0.21",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1613,6 +1735,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_ui_widgets"
+version = "0.20.0-dev"
+dependencies = [
+ "accesskit",
+ "bevy_a11y",
+ "bevy_app",
+ "bevy_camera",
+ "bevy_ecs",
+ "bevy_input",
+ "bevy_input_focus",
+ "bevy_log",
+ "bevy_math",
+ "bevy_picking",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_text",
+ "bevy_time",
+ "bevy_ui",
+ "bevy_window",
+ "parley",
+ "smol_str",
+ "thiserror 2.0.21",
+ "web-sys",
+]
+
+[[package]]
 name = "bevy_utils"
 version = "0.20.0-dev"
 dependencies = [
@@ -1628,8 +1776,10 @@ name = "bevy_window"
 version = "0.20.0-dev"
 dependencies = [
  "bevy_app",
+ "bevy_asset",
  "bevy_color",
  "bevy_ecs",
+ "bevy_image",
  "bevy_input",
  "bevy_math",
  "bevy_platform",
@@ -1905,6 +2055,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
+ "serde",
+ "termcolor",
  "unicode-width",
 ]
 
@@ -2616,6 +2768,15 @@ dependencies = [
  "fx_render",
  "fx_solari",
  "serde_json",
+]
+
+[[package]]
+name = "fx_web"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "fx_render",
+ "web-sys",
 ]
 
 [[package]]
@@ -4676,6 +4837,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 
 [[package]]
+name = "strsim"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
 name = "swash"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4735,6 +4902,15 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "test-log"
@@ -5396,12 +5572,17 @@ dependencies = [
  "cfg_aliases",
  "document-features",
  "hashbrown 0.17.2",
+ "js-sys",
  "log",
+ "naga",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
  "smallvec",
  "static_assertions",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu-core",
  "wgpu-hal",
  "wgpu-types",
