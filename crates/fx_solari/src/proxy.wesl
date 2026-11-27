@@ -69,7 +69,13 @@ fn write_texel(t: u32, value: vec4<f32>) {
 fn proxy(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = id.x;
     if k >= p.slots { return; }
-    if k >= draw_args[1] {
+    // Dead slots, and particles too faint to see (colour alpha under 2%):
+    // every ray crossing a quad runs the alpha test, so skip what adds nothing.
+    var faint = false;
+    if k < draw_args[1] {
+        faint = pw(9u, indices[k]) < 0.02;
+    }
+    if k >= draw_args[1] || faint {
         // At the effect's origin, not the world's: keeps the BLAS bounds tight.
         let anchor = p.world_from_local[3].xyz;
         for (var v = 0u; v < 8u; v++) {
