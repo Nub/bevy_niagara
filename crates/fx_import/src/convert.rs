@@ -228,6 +228,109 @@ impl AssetOut {
     }
 }
 
+/// Material changes a Blueprint makes on a mesh component: parameter
+/// values (custom primitive data, constant parameter calls) and the
+/// parameters read from dynamic material parameters (name, parameter index
+/// 0..4, first component) because something animates them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MatTweak {
+    pub scalars: Vec<(String, f32)>,
+    pub vectors: Vec<(String, [f32; 4])>,
+    pub bound: Vec<(String, usize, usize)>,
+}
+
+impl MatTweak {
+    fn is_empty(&self) -> bool {
+        self.scalars.is_empty() && self.vectors.is_empty() && self.bound.is_empty()
+    }
+}
+
+/// A static mesh as an effect: one still mesh particle at the origin.
+pub struct MeshEffect {
+    pub ron: String,
+    /// What was read and what stands in, for the report.
+    pub notes: Vec<String>,
+}
+
+impl AssetOut {
+    /// The parameters of material `path`'s base graph (its instance
+    /// chain's values applied).
+    pub fn material_parameters(&mut self, path: &str) -> Result<Vec<crate::material::ParamInfo>, String> {
+        let m = crate::material::Material::load(&mut self.store, path)?;
+        Ok(crate::material::parameters(&m))
+    }
+
+    /// Effect `name` drawing static mesh `mesh` (an object path) with
+    /// `material` (its own first material when `None`), changed by `tweak`.
+    /// `user` declares the `User.` Vec4 parameters (name, default) feeding
+    /// dynamic material parameters 0..4 in order. Mesh and material files go
+    /// to this output's folder.
+    pub fn mesh_effect(&mut self, name: &str, mesh: &str, material: Option<&str>, tweak: &MatTweak, user: &[(String, [f32; 4])]) -> MeshEffect {
+        let mut notes = Vec::new();
+        let m = Cx::mesh_asset_in(self, mesh);
+        let shape = match &m {
+            Ok(m) => {
+                notes.push(format!("mesh `{}` -> `{}` ({})", m.name, m.glb, m.summary));
+                m.glb.clone()
+            }
+            Err(why) => {
+                let s = guess_mesh(mesh);
+                notes.push(format!("mesh `{mesh}` -> built-in \"{s}\" ({why})"));
+                s.to_string()
+            }
+        };
+        let material = material.map(String::from).or_else(|| m.as_ref().ok().and_then(|m| m.material.clone()));
+        let mut written = [false; 4];
+        for k in 0..user.len().min(4) {
+            written[k] = true;
+        }
+        let mut fields = vec![format!("mesh: {}", quote(&shape))];
+        match material.as_deref().map(|p| (p, Cx::material_asset_in(self, p, true, written, tweak))) {
+            Some((_, Ok(mt))) => {
+                fields.push(format!("blend_mode: {}", mt.blend.ours(true)));
+                if let Some(t) = &mt.texture {
+                    fields.push(format!("texture: {}", quote(t)));
+                }
+                fields.push(format!("material: {}", quote(&mt.wesl)));
+                notes.push(format!("material `{}` -> `{}`{}", mt.name, mt.wesl, mt.describe()));
+            }
+            Some((p, Err(why))) => {
+                fields.push("blend_mode: Opaque, lit: true".into());
+                notes.push(format!("material `{p}` -> built-in lit grey ({why})"));
+            }
+            None => {
+                fields.push("blend_mode: Opaque, lit: true".into());
+                notes.push("no material -> built-in lit grey".into());
+            }
+        }
+        let mut o = String::new();
+        let _ = writeln!(o, "// A static mesh of a Blueprint, drawn as one still mesh particle (`fximport blueprint`).");
+        let _ = writeln!(o, "(\n    name: {},", quote(name));
+        if !user.is_empty() {
+            let _ = writeln!(o, "    user_parameters: {{");
+            for (n, v) in user {
+                let _ = writeln!(o, "        {}: Vec4(({}, {}, {}, {})),", quote(n), f(v[0]), f(v[1]), f(v[2]), f(v[3]));
+            }
+            let _ = writeln!(o, "    }},");
+        }
+        let _ = writeln!(o, "    emitters: [\n        (\n            name: {},\n            max_particles: 1,", quote(name));
+        let _ = writeln!(o, "            emitter_update: [(module: \"Spawn Burst Instantaneous\", inputs: {{ \"Spawn Count\": Int(1) }})],");
+        let _ = writeln!(o, "            particle_spawn: [(module: \"Initialize Particle\", inputs: {{ \"Lifetime\": Float(1000000.0), \"Color\": Color((1.0, 1.0, 1.0, 1.0)) }})],");
+        let _ = writeln!(o, "            particle_update: [\n                (module: \"Particle State\", inputs: {{ \"Kill Particles When Lifetime Has Elapsed\": Bool(false) }}),");
+        for (k, (n, _)) in user.iter().enumerate().take(4) {
+            let (module, input) = match k {
+                0 => ("Dynamic Material Parameters".to_string(), "Dynamic Material Parameter".to_string()),
+                k => (format!("Dynamic Material Parameters {}", k + 1), format!("Dynamic Material Parameter {k}")),
+            };
+            let _ = writeln!(o, "                (module: {}, inputs: {{ {}: Link(Vec4, {}) }}),", quote(&module), quote(&input), quote(n));
+        }
+        let _ = writeln!(o, "            ],");
+        let _ = writeln!(o, "            renderers: [Mesh(({}))],", fields.join(", "));
+        let _ = writeln!(o, "        ),\n    ],\n)");
+        MeshEffect { ron: o, notes }
+    }
+}
+
 #[derive(Clone)]
 struct MeshOut {
     name: String,
@@ -1335,9 +1438,13 @@ impl<'a> Cx<'a> {
 
     /// A static mesh written as glTF beside the effect (once per mesh).
     fn mesh_asset(&mut self, path: &str) -> Result<MeshOut, String> {
-        let Some(a) = self.assets.as_mut() else {
-            return Err("asset packages not searched".into());
-        };
+        match self.assets.as_mut() {
+            Some(a) => Self::mesh_asset_in(a, path),
+            None => Err("asset packages not searched".into()),
+        }
+    }
+
+    fn mesh_asset_in(a: &mut AssetOut, path: &str) -> Result<MeshOut, String> {
         if let Some(m) = a.meshes.get(path) {
             return m.clone();
         }
@@ -1381,16 +1488,29 @@ impl<'a> Cx<'a> {
     /// A material translated to WESL plus its texture atlas, written beside
     /// the effect (once per material and use).
     fn material_asset(&mut self, path: &str, mesh: bool, written: [bool; 4]) -> Result<MatOut, String> {
-        let Some(a) = self.assets.as_mut() else {
-            return Err("asset packages not searched".into());
-        };
-        let key = (path.to_string(), mesh, written);
+        match self.assets.as_mut() {
+            Some(a) => Self::material_asset_in(a, path, mesh, written, &MatTweak::default()),
+            None => Err("asset packages not searched".into()),
+        }
+    }
+
+    fn material_asset_in(a: &mut AssetOut, path: &str, mesh: bool, written: [bool; 4], tweak: &MatTweak) -> Result<MatOut, String> {
+        let key = (if tweak.is_empty() { path.to_string() } else { format!("{path} {tweak:?}") }, mesh, written);
         if let Some(m) = a.mats.get(&key) {
             return m.clone();
         }
         let res = (|| {
             use crate::material as mt;
-            let m = mt::Material::load(&mut a.store, path)?;
+            let mut m = mt::Material::load(&mut a.store, path)?;
+            for (n, x) in &tweak.scalars {
+                m.scalars.insert(n.clone(), *x);
+            }
+            for (n, x) in &tweak.vectors {
+                m.vectors.insert(n.clone(), *x);
+            }
+            for (n, k, c) in &tweak.bound {
+                m.bound.insert(n.clone(), (*k, *c));
+            }
             if let Some(miss) = &m.missing {
                 return Err(format!("parent material `{miss}` is not in the package folders"));
             }

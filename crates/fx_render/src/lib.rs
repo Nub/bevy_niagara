@@ -43,6 +43,7 @@ pub mod component;
 pub mod data;
 pub mod game;
 pub mod mesh_data;
+pub mod prefab;
 mod scene;
 pub mod stats;
 mod textures;
@@ -53,6 +54,7 @@ pub use component::{
     apply_particle_components,
 };
 pub use asset::{FxEffectAsset, FxEffectLoader};
+pub use prefab::{FxPrefab, FxPrefabCamera, FxPrefabInstance, FxPrefabNode, FxPrefabPlayer, FxPrefabPlugin};
 pub use data::DataBinding;
 pub use game::{
     CullReason, EffectControl, EffectMode, FxCommandsExt, FxPoolStats, FxQuality, FxScalability,
@@ -328,6 +330,7 @@ impl Plugin for FxPlugin {
         };
         let pool_stats = FxPoolStats::default();
         let done = game::DoneInbox::default();
+        app.add_plugins(FxPrefabPlugin);
         app.init_asset::<FxEffectAsset>()
             .init_asset_loader::<FxEffectLoader>()
             .init_resource::<FxClock>()
@@ -410,7 +413,7 @@ impl Plugin for FxPlugin {
     }
 }
 
-fn advance_clock(mut clock: ResMut<FxClock>, time: Res<Time>) {
+pub(crate) fn advance_clock(mut clock: ResMut<FxClock>, time: Res<Time>) {
     let max = fx_gpu::MAX_STEPS_PER_SUBMIT;
     let n = if clock.paused {
         0

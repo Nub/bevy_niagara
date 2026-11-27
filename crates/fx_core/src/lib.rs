@@ -17,6 +17,7 @@ pub mod lifecycle;
 pub mod model;
 pub mod modules;
 pub mod params;
+pub mod prefab;
 pub mod render;
 pub mod ron_parse;
 pub mod scalability;

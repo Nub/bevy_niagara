@@ -4,6 +4,7 @@
 //!                 [--max-elems N] [--max-bytes N]
 //!   fximport niagara <file.uasset>
 //!   fximport convert <file.uasset> --out DIR
+//!   fximport blueprint <file.uasset>... --out DIR
 //!   fximport mesh <file.uasset> --out FILE.glb
 //!   fximport texture <file.uasset> --out FILE.png
 //!
@@ -22,7 +23,7 @@ use fx_import::{dump, DumpOptions, Package};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)\n       fximport mesh <file.uasset> --out FILE.glb  (a static mesh as glTF binary, metres, Y up)\n       fximport texture <file.uasset> --out FILE.png  (a texture's source art, decoded; under a Content folder)"
+        "usage: fximport dump <file.uasset> [--only CLASS_OR_NAME]... [--no-imports] [--max-elems N] [--max-bytes N]\n       fximport niagara <file.uasset>            (the interpreted system: stacks, modules, inputs)\n       fximport convert <file.uasset> --out DIR  (writes DIR/<name>.fx.ron and DIR/<name>.report.md)\n       fximport blueprint <file.uasset>... --out DIR  (Blueprint actors: DIR/<name>.prefab.ron, report, effects)\n       fximport mesh <file.uasset> --out FILE.glb  (a static mesh as glTF binary, metres, Y up)\n       fximport texture <file.uasset> --out FILE.png  (a texture's source art, decoded; under a Content folder)"
     );
     ExitCode::from(64)
 }
@@ -59,6 +60,35 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         };
+    }
+    if cmd == "blueprint" {
+        // fximport blueprint FILE... --out DIR: prefabs (+ effects, assets, reports).
+        let mut files = Vec::new();
+        let mut out = None;
+        let mut it = args[1..].iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--out" => out = it.next().cloned(),
+                f if !f.starts_with("--") => files.push(f.to_string()),
+                _ => return usage(),
+            }
+        }
+        let Some(out) = out else { return usage() };
+        if files.is_empty() {
+            return usage();
+        }
+        let mut effects = fx_import::blueprint::Effects::default();
+        let mut failed = false;
+        for file in &files {
+            match fx_import::blueprint::import_file(std::path::Path::new(file), std::path::Path::new(&out), &mut effects) {
+                Ok((_, s)) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("{file}: {e}");
+                    failed = true;
+                }
+            }
+        }
+        return if failed { ExitCode::from(1) } else { ExitCode::SUCCESS };
     }
     if cmd == "niagara" {
         let Some(file) = args.get(1) else { return usage() };

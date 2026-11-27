@@ -14,11 +14,13 @@
 //! print!("{}", fx_import::dump(&pkg, &Default::default()));
 //! ```
 
+pub mod blueprint;
 pub mod bulk;
 pub mod convert;
 pub mod dump;
 pub mod fx;
 pub mod hlsl;
+pub mod hlsl_material;
 pub mod material;
 pub mod mesh;
 pub mod niagara;

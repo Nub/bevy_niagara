@@ -1164,3 +1164,9 @@ pub fn module_script_hlsl(pkg: &Package) -> Result<Vec<HlslNode>, String> {
     }
     Ok(hlsl)
 }
+
+/// Values of a Niagara parameter store struct in `pkg` (a system's
+/// `ExposedParameters`, a component's `OverrideParameters`), by name.
+pub fn parameter_store(pkg: &Package, store: &Value) -> Vec<(String, NValue)> {
+    Interp { pkg }.store(store)
+}

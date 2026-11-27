@@ -10,9 +10,9 @@ bevy_math.workspace = true
 rkyv.workspace = true
 naga = { version = "30", features = ["wgsl-in"] }
 serde.workspace = true
+ron.workspace = true
 
 [dev-dependencies]
-ron.workspace = true
 
 [[bin]]
 name = "fxc"

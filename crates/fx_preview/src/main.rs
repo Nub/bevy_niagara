@@ -30,6 +30,12 @@
 //! turn per SECONDS of simulated time), so effects reading
 //! Engine.Owner.Velocity (Spawn Per Unit, Inherit Velocity) see it move.
 //!
+//! A `.prefab.ron` (from `fximport blueprint`) can stand in for any effect
+//! file (main or `--also`): its effects, lights and animation play, Bevy
+//! time (what materials read) then follows the frames. `--look-through NODE`
+//! puts the camera at a prefab camera node; `--play-timeline NAME[:RATE]`
+//! (repeatable) plays a prefab timeline from the first frame.
+//!
 //! `--test-scene` adds an opaque pillar through the effect and a translucent
 //! glass pane in front of part of it, to check depth and ordering against
 //! scene geometry and other transparents.
@@ -51,7 +57,7 @@ use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::window::ExitCondition;
-use fx_render::{FxClock, FxPlugin, FxReady, ParticleAttributes, ParticleComponent, ParticleEffect};
+use fx_render::{FxClock, FxPlugin, FxPrefab, FxPrefabCamera, FxPrefabInstance, FxPrefabNode, FxPrefabPlayer, FxReady, ParticleAttributes, ParticleComponent, ParticleEffect};
 
 /// Simulation step: fixed, whatever the output frame rate.
 const SIM_HZ: u32 = 60;
@@ -76,6 +82,10 @@ struct Options {
     /// Flies the effect in a straight line at this velocity (m/s), turned to
     /// face it (local +X forward), passing the origin halfway through.
     fly: Option<Vec3>,
+    /// Look through this prefab camera node (`--look-through`).
+    look_through: Option<String>,
+    /// Timelines to play from the first frame (`--play-timeline NAME[:RATE]`).
+    play: Vec<(String, Option<f32>)>,
     /// More effects drawn in the same scene at fixed positions (`--also`).
     also: Vec<(PathBuf, Vec3)>,
     /// Where the main effect sits (`--at`), added to `--orbit` and `--fly`.
@@ -127,6 +137,8 @@ fn parse_args() -> Result<Options, String> {
         test_scene: false,
         orbit: None,
         fly: None,
+        look_through: None,
+        play: Vec::new(),
         also: Vec::new(),
         at: Vec3::ZERO,
         fov: 45.0,
@@ -173,6 +185,14 @@ fn parse_args() -> Result<Options, String> {
                 let (f, p) = v.rsplit_once('@').ok_or("--also is FILE@X,Y,Z")?;
                 o.also.push((PathBuf::from(f), parse_vec3(p)?));
             }
+            "--look-through" => o.look_through = Some(val()?),
+            "--play-timeline" => {
+                let v = val()?;
+                o.play.push(match v.split_once(':') {
+                    Some((n, r)) => (n.to_string(), Some(r.trim().parse::<f32>().map_err(|e| format!("--play-timeline: {e}"))?)),
+                    None => (v, None),
+                });
+            }
             "--fly" => o.fly = Some(parse_vec3(&val()?)?),
             "--orbit" => {
                 let v = val()?;
@@ -204,7 +224,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--look default|ue] [--exposure EV] [--bloom I] [--floor grid|proto] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--at X,Y,Z] [--also FILE@X,Y,Z ...]";
+const USAGE: &str = "usage: fxpreview <effect.fx.ron> [--out DIR] [--times 0,0.5,1] [--duration S] [--fps N] [--size WxH] [--seed N] [--backdrop dark|grey] [--camera X,Y,Z] [--target X,Y,Z] [--fov DEG] [--ground Y] [--look default|ue] [--exposure EV] [--bloom I] [--floor grid|proto] [--no-mp4] [--test-scene] [--orbit RADIUS,SECONDS] [--fly VX,VY,VZ] [--at X,Y,Z] [--also FILE@X,Y,Z ...] [--look-through NODE] [--play-timeline NAME[:RATE]]";
 
 fn main() -> ExitCode {
     let o = match parse_args() {
@@ -222,7 +242,16 @@ fn main() -> ExitCode {
     let files: Vec<&Path> = std::iter::once(o.effect.as_path()).chain(o.also.iter().map(|(f, _)| f.as_path())).collect();
     let root = asset_root(&files);
     let mut effects = Vec::new();
+    let mut prefabs = Vec::new();
     for (k, f) in files.iter().enumerate() {
+        if f.to_string_lossy().ends_with(".prefab.ron") {
+            // Loaded by the asset server (its effects resolve beside it).
+            let full = std::fs::canonicalize(f).unwrap_or_else(|_| f.to_path_buf());
+            let rel = full.strip_prefix(&root).map(|p| p.to_path_buf()).unwrap_or(full.clone());
+            let at = if k == 0 { None } else { Some(o.also[k - 1].1) };
+            prefabs.push((rel.to_string_lossy().into_owned(), at, o.seed.wrapping_add(1000 * k as u32)));
+            continue;
+        }
         match cook(f, &root) {
             Ok(system) => {
                 let at = if k == 0 { None } else { Some(o.also[k - 1].1) };
@@ -258,9 +287,12 @@ fn main() -> ExitCode {
         },
     ))
     .insert_resource(FxClock::manual(1.0 / SIM_HZ as f32))
+    .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(Duration::ZERO))
     .insert_resource(Preview {
         o: o.clone(),
         effects,
+        prefab_time: !prefabs.is_empty(),
+        prefabs,
         image: Handle::default(),
         frames: frames.clone(),
         n_frames,
@@ -300,6 +332,10 @@ struct Preview {
     o: Options,
     /// The effects to spawn: the main one (None: at `effect_transform`), then `--also`.
     effects: Vec<(ParticleEffect, Option<Vec3>)>,
+    /// Prefabs to spawn (asset path, `--also` position, seed).
+    prefabs: Vec<(String, Option<Vec3>, u32)>,
+    /// Prefabs were given: Bevy time (what materials read) follows the frames.
+    prefab_time: bool,
     image: Handle<Image>,
     frames: Arc<Mutex<Vec<Vec<u8>>>>,
     n_frames: usize,
@@ -309,6 +345,7 @@ struct Preview {
 
 fn setup(
     mut commands: Commands,
+    assets: Res<AssetServer>,
     mut preview: ResMut<Preview>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -462,6 +499,10 @@ fn setup(
             })),
             Transform::from_xyz(-0.9, 1.2, 1.4),
         ));
+    }
+    for (path, at, seed) in std::mem::take(&mut preview.prefabs) {
+        let p = at.unwrap_or(o.at);
+        commands.spawn((FxPrefabInstance { prefab: assets.load(path), seed }, PreviewEffect(p), offset(effect_transform(&o, 0.0), p)));
     }
     for (effect, at) in std::mem::take(&mut preview.effects) {
         match at {
@@ -642,19 +683,49 @@ fn drive(
     mut commands: Commands,
     mut preview: ResMut<Preview>,
     mut effect: Query<(&mut Transform, &PreviewEffect)>,
+    pending: Query<(), (With<FxPrefabInstance>, Without<FxPrefabPlayer>)>,
+    mut players: Query<&mut FxPrefabPlayer>,
+    prefab_assets: Res<Assets<FxPrefab>>,
+    mut camera: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<PreviewEffect>, Without<FxPrefabNode>)>,
+    prefab_cameras: Query<(&FxPrefabNode, &GlobalTransform, &FxPrefabCamera)>,
+    mut strategy: ResMut<bevy::time::TimeUpdateStrategy>,
     mut clock: ResMut<FxClock>,
     ready: Res<FxReady>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let steps_per_frame = SIM_HZ / preview.o.fps;
+    // `--look-through`: the camera at a prefab camera node (Unreal cameras look along their +X).
+    if let Some(name) = &preview.o.look_through {
+        if let Some((_, g, c)) = prefab_cameras.iter().find(|(n, _, _)| &n.name == name) {
+            for (mut tf, mut proj) in &mut camera {
+                let (_, r, t) = g.to_scale_rotation_translation();
+                *tf = Transform { translation: t, rotation: r * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2), scale: Vec3::ONE };
+                if let Projection::Perspective(p) = &mut *proj {
+                    p.fov = c.fov.to_radians();
+                }
+            }
+        }
+    }
     match preview.phase {
         Phase::Warmup(n) => {
-            if !ready.get() {
+            if !ready.get() || !pending.is_empty() {
                 preview.phase = Phase::Warmup(0);
             } else if n < 10 {
                 preview.phase = Phase::Warmup(n + 1);
             } else {
                 // Frame 0 is t = 0: no steps this frame.
+                for mut pl in &mut players {
+                    let Some(p) = prefab_assets.get(pl.prefab()) else { continue };
+                    for (name, rate) in &preview.o.play {
+                        pl.play(&p.prefab, name, true);
+                        if let Some(r) = rate {
+                            pl.set_rate(&p.prefab, name, *r);
+                        }
+                    }
+                }
+                if preview.prefab_time {
+                    *strategy = bevy::time::TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / preview.o.fps as f64));
+                }
                 let frames = preview.frames.clone();
                 commands
                     .spawn(Readback::texture(preview.image.clone()))
@@ -720,7 +791,7 @@ fn write_outputs(o: &Options, frames: &[Vec<u8>]) -> Result<String, String> {
         .effect
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.trim_end_matches(".fx.ron").to_string())
+        .map(|n| n.trim_end_matches(".fx.ron").trim_end_matches(".prefab.ron").to_string())
         .unwrap_or_else(|| "effect".into());
 
     // Frame strip: the frames at the requested times, left to right, 4 px apart.
