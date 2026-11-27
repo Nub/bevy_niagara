@@ -168,7 +168,7 @@
     const submit = QueueProto.submit;
     QueueProto.submit = function (bufs) {
       if (submits++ === 0) D.log("ok", "first command buffer submitted");
-      if (submits % 60 === 0) D.draw();
+      if (submits % 30 === 0) D.draw();
       return submit.call(this, bufs);
     };
   }

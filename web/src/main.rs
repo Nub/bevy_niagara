@@ -118,7 +118,15 @@ fn setup(
         orbit,
     ));
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
+        // No UVs: with VERTEX_UVS the fork's pbr_fragment binds textures with
+        // `let texture = pbr_bindings::base_color_texture;`, which needs the
+        // WGSL language feature texture_and_sampler_let. Chrome has it, Safari
+        // 26/27 does not, and the invalid pipeline blanks the whole pass.
+        Mesh3d(meshes.add({
+            let mut m: Mesh = Plane3d::default().mesh().size(12.0, 12.0).into();
+            m.remove_attribute(Mesh::ATTRIBUTE_UV_0);
+            m
+        })),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.08, 0.08, 0.09),
             perceptual_roughness: 0.9,
