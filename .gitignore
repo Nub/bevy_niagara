@@ -7,5 +7,5 @@
 # testdata/niagara_assets.sh, never committed).
 /testdata/niagara
 # Third-party tools (fab-downloader) and Fab downloads: local only, never committed.
-/testdata/tools/
+/testdata/tools
 /testdata/fab

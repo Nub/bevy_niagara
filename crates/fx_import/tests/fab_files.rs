@@ -30,6 +30,26 @@ fn packages() -> Vec<PathBuf> {
     v
 }
 
+/// The packs fab_assets.sh fetches and their Niagara system counts.
+const PACKS: &[(&str, usize)] = &[
+    ("perfect_fire", 15),
+    ("arrow_trail", 10),
+    ("lightning", 17),
+    ("portals", 11),
+    ("mixed_vfx", 67),
+    ("mayu_basic", 4),
+];
+
+/// The pack folder a file is in (`testdata/fab/<pack>/...`).
+fn pack_of(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    s.split("/fab/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("").to_string()
+}
+
+fn find_file(pack: &str, name: &str) -> Option<PathBuf> {
+    packages().into_iter().find(|p| pack_of(p) == pack && p.file_name().is_some_and(|n| n == name))
+}
+
 fn is_system(p: &Path) -> bool {
     p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("NS_"))
 }
@@ -56,18 +76,20 @@ fn every_effect_package_reads_without_problems() {
 #[test]
 fn every_system_converts_validates_and_finds_its_textures() {
     let out = std::env::temp_dir().join(format!("fx_import_fab_{}", std::process::id()));
-    let mut n = 0;
+    let mut n: std::collections::BTreeMap<String, usize> = Default::default();
     for f in packages().into_iter().filter(|p| is_system(p)) {
         let r = fx_import::convert_file(&f, &out).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
         assert!(r.report.validation.is_empty(), "{}: {:?}", f.display(), r.report.validation);
         let md = r.report.markdown();
         assert!(!md.contains("missing texture"), "{}: dependencies from Content/ not found\n{md}", f.display());
         assert!(r.report.percent() >= 75.0, "{}: {}", f.display(), r.summary());
-        n += 1;
+        *n.entry(pack_of(&f)).or_default() += 1;
     }
     let _ = std::fs::remove_dir_all(&out);
-    if n > 0 {
-        assert_eq!(n, 25, "Perfect Fire has 15 systems, Free Arrow Trail 10");
+    for (pack, count) in PACKS {
+        if let Some(got) = n.get(*pack) {
+            assert_eq!(got, count, "{pack}: systems converted");
+        }
     }
 }
 
@@ -93,4 +115,99 @@ fn ue4_zlib_bulk_chunks_inflate() {
     assert_eq!(fx_import::bulk::inflate_chunks(&b).unwrap(), raw);
     b[0] = 0;
     assert!(fx_import::bulk::inflate_chunks(&b).is_err());
+}
+
+fn system(f: &Path) -> fx_import::niagara::NSystem {
+    let bytes = std::fs::read(f).unwrap();
+    let pkg = Package::read(&bytes).unwrap();
+    fx_import::niagara::read_system(&pkg).unwrap()
+}
+
+#[test]
+fn ue4_era_modules_of_mixed_vfx_all_map() {
+    // Mixed VFX ships UE 4.x saves with the UE4 module scripts
+    // (AddVelocityInCone, BoxLocation, TorusLocation, InitializeRibbon,
+    // Generate/ReceiveLocationEvent, SpriteRotationRate, ...).
+    let out = std::env::temp_dir().join(format!("fx_import_fab_mix_{}", std::process::id()));
+    let mut n = 0;
+    for f in packages().into_iter().filter(|p| is_system(p) && pack_of(p) == "mixed_vfx") {
+        let r = fx_import::convert_file(&f, &out).unwrap();
+        for m in &r.report.modules {
+            if let fx_import::convert::Status::Unmapped(why) = &m.status {
+                // Set Variables of attributes we lack and one spawn-stage force are the known gaps.
+                assert!(
+                    m.script.ends_with("SetVariables") || why.contains("cannot run in"),
+                    "{}: {} / {} not mapped: {why}",
+                    f.display(),
+                    m.emitter,
+                    m.module
+                );
+            }
+        }
+        assert!(r.report.unmapped_dynamic.iter().all(|(_, s)| s.contains("Lerp")), "{}: {:?}", f.display(), r.report.unmapped_dynamic);
+        n += 1;
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    if n > 0 {
+        assert_eq!(n, 67);
+    }
+}
+
+#[test]
+fn ue4_event_handlers_with_a_zero_source_id_find_their_generator() {
+    // NS_Wind's ribbon emitter keeps SourceEmitterID 0 in its own handler
+    // copy; the Location events come from emitter "Empty".
+    let Some(f) = find_file("mixed_vfx", "NS_Wind.uasset") else { return };
+    let sys = system(&f);
+    let ribbon = sys.emitters.iter().find(|e| e.name == "LocationBasedRibbon").unwrap();
+    let ev = ribbon
+        .stacks
+        .iter()
+        .find_map(|s| match &s.usage {
+            fx_import::niagara::Usage::Event(ev) => Some(ev.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ev.source_emitter.as_deref(), Some("Empty"));
+}
+
+#[test]
+fn ue57_delta_coded_texture_source_decodes() {
+    // Mayu's Basic VFX Pack (UE 5.7) saves source art as TSCF_UEDELTA.
+    let Some(f) = find_file("mayu_basic", "T_SawBlade_01.uasset") else { return };
+    let mut store = fx_import::material::Store::for_system(&f);
+    let path = "/Game/MayuAssets/SawBlade/Textures/T_SawBlade_01.T_SawBlade_01";
+    let rel = f.to_string_lossy().split("/Content/").nth(1).unwrap().trim_end_matches(".uasset").to_string();
+    assert_eq!(format!("/Game/{rel}.T_SawBlade_01"), path, "texture moved in the pack");
+    let img = fx_import::material::read_texture(&mut store, path).unwrap();
+    let px = |x: u32, y: u32| img.rgba[((y * img.width + x) * 4) as usize];
+    // A white saw blade on black: the centre is solid, the corners empty, and
+    // rows straddling a delta block (32 rows here) do not streak.
+    assert_eq!((img.width, img.height), (1024, 1024));
+    assert!(px(512, 300) > 200 && px(512, 700) > 200, "blade body");
+    assert!(px(5, 5) < 30 && px(1018, 1018) < 30, "corners");
+    for y in [31u32, 32, 63, 64, 479, 480] {
+        assert!(px(512, y + 200) > 200, "row {}", y + 200);
+    }
+}
+
+#[test]
+fn ue57_linear_color_material_inputs_read() {
+    // UE 5.7 saves FColorMaterialInput's constant as an FLinearColor.
+    let Some(f) = find_file("mayu_basic", "M_Fire.uasset") else { return };
+    let bytes = std::fs::read(&f).unwrap();
+    let pkg = Package::read(&bytes).unwrap();
+    assert!(pkg.problems.is_empty(), "{:#?}", pkg.problems);
+}
+
+#[test]
+fn engine_noise_textures_get_a_stand_in() {
+    // Mixed VFX fires sample the engine's LowResBlurredNoise, which no pack ships.
+    let Some(f) = find_file("mixed_vfx", "NS_Campfire.uasset") else { return };
+    let out = std::env::temp_dir().join(format!("fx_import_fab_noise_{}", std::process::id()));
+    let r = fx_import::convert_file(&f, &out).unwrap();
+    let _ = std::fs::remove_dir_all(&out);
+    let md = r.report.markdown();
+    assert!(md.contains("LowResBlurredNoise not in the pack"), "{md}");
+    assert!(!md.contains("missing texture"), "{md}");
 }

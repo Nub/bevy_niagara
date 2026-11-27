@@ -302,7 +302,41 @@ pub fn read_system(pkg: &Package) -> Result<NSystem, String> {
         };
         sys.emitters.push(r.emitter(ei, name, enabled, &ids));
     }
+    resolve_event_sources(&mut sys.emitters);
     Ok(sys)
+}
+
+/// Event handlers whose source emitter id is unset or unknown (UE4 saves
+/// often keep a zero SourceEmitterID in the emitter's own copy of the
+/// handler) read from the emitter that generates their kind of event: the
+/// handler's own emitter if it does, else the first emitter that does.
+fn resolve_event_sources(emitters: &mut [NEmitter]) {
+    let generator = |kind: &str| format!("Generate{kind}Event");
+    let writes = |e: &NEmitter, g: &str| {
+        e.stacks.iter().any(|s| !matches!(s.usage, Usage::Event(_)) && s.modules.iter().any(|m| m.enabled && m.script_name() == g))
+    };
+    for i in 0..emitters.len() {
+        for si in 0..emitters[i].stacks.len() {
+            let Usage::Event(ev) = &emitters[i].stacks[si].usage else { continue };
+            if ev.source_emitter.is_some() {
+                continue;
+            }
+            let kind = match ev.event_name.as_str() {
+                n if n.contains("Death") => "Death",
+                n if n.contains("Collision") => "Collision",
+                _ => "Location",
+            };
+            let g = generator(kind);
+            let src = if writes(&emitters[i], &g) {
+                None
+            } else {
+                emitters.iter().find(|e| e.enabled && writes(e, &g)).map(|e| e.name.clone())
+            };
+            if let Usage::Event(ev) = &mut emitters[i].stacks[si].usage {
+                ev.source_emitter = src;
+            }
+        }
+    }
 }
 
 fn obj(v: Option<&Value>) -> Option<usize> {

@@ -11,7 +11,7 @@
 # Run from the repository root inside the fork's dev shell, after
 #   cargo build --release -p fx_import --bin fximport -p fx_preview --bin fxpreview
 #   nix develop /home/zach/helm-projects/bevy-solari-opt -c sh testdata/fab_render.sh [pack ...]
-# Packs: perfect_fire arrow_trail (default both). GPU: claim graybeard heavy.
+# Packs: perfect_fire arrow_trail lightning portals mixed_vfx mayu_basic (default: the first two). GPU: claim graybeard heavy.
 set -eu
 out=${OUT:-testdata/fab/_look}
 bin=${BIN:-target/release}
@@ -24,6 +24,12 @@ view() {
 	case $1 in
 	perfect_fire) echo "--camera 0,2.0,5.75 --target 0,0.7,0 --fov 59 --duration 3" ;;
 	arrow_trail) echo "--camera -7,3,-3.5 --target -1,0,0 --fov 59 --duration 1.6 --fly 20,0,0 --ground -3.5" ;;
+	# Lightning and portals stand about 2 m tall, seen from the front; Mixed
+	# VFX (projectiles in place, fires, explosions) and Mayu from a few metres.
+	lightning) echo "--camera 0,1.5,6 --target 0,1,0 --fov 59 --duration 3" ;;
+	portals) echo "--camera -3.5,1.6,5 --target 0,1.4,0 --fov 59 --duration 3" ;;
+	mixed_vfx) echo "--camera 0,2.5,7 --target 0,1,0 --fov 59 --duration 3" ;;
+	mayu_basic) echo "--camera 0,1.5,5 --target 0,1,0 --fov 59 --duration 3" ;;
 	esac
 }
 # The Unreal-like look. Exposure matched by eye to the listings; arrows fly at
@@ -38,12 +44,17 @@ look() {
 	case $1 in
 	perfect_fire) echo "--look ue" ;;
 	arrow_trail) echo "--look ue --floor proto --bloom 0.1 --exposure 5.5" ;;
+	*) echo "--look ue" ;;
 	esac
 }
 src() {
 	case $1 in
 	perfect_fire) echo testdata/fab/perfect_fire/Content/Vefects/Free_Fire/Shared/Particles ;;
 	arrow_trail) echo testdata/fab/arrow_trail/Content/ArrowTrail/FX ;;
+	lightning) echo testdata/fab/lightning/Content/GrimzaFX_simple_lightning/Particles ;;
+	portals) echo testdata/fab/portals/Content/PortalFX/FX ;;
+	mixed_vfx) echo testdata/fab/mixed_vfx/Content/MixedVFX/Particles ;;
+	mayu_basic) echo testdata/fab/mayu_basic/Content/MayuAssets ;;
 	esac
 }
 
@@ -52,7 +63,8 @@ for pack in $packs; do
 	[ -d "$dir" ] || { echo "skip $pack: $dir missing (sh testdata/fab_assets.sh)"; continue; }
 	n=0
 	inputs="" labels=""
-	for f in "$dir"/NS_*.uasset; do
+	# Systems in subfolders too (Mixed VFX, Mayu), in name order.
+	for f in $(find "$dir" -name 'NS_*.uasset' | sort); do
 		s=$(basename "$f" .uasset)
 		o=$out/$pack/$s
 		mkdir -p "$o"
@@ -103,6 +115,7 @@ for pack in $packs; do
 		order="NS_ArrowTrail_Basic_02 NS_ArrowTrail_Basic NS_ArrowTrail_Fire NS_ArrowTrail_Ice NS_ArrowTrail_Magic NS_ArrowTrail_Magic_2 NS_ArrowTrail_Holy NS_ArrowTrail_Water NS_ArrowTrail_Nature NS_ArrowTrail_Fire_02"
 		lview="--camera -13.493,9.095,-11.783 --target -8.064,3.308,-5.697 --fov 38.6 --duration 2 --fly 20,0,0 --ground -3.5"
 		pos() { echo "0,0,$(echo "$1" | awk '{print -6.75 + $1 * 1.5}')"; } ;;
+	*) order="" ;;
 	esac
 	first="" also="" i=0
 	for s in $order; do

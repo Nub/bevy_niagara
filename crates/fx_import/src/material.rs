@@ -145,6 +145,39 @@ fn enum_tail(v: Option<&Value>) -> Option<String> {
 }
 
 /// Decodes a Texture2D's source art.
+/// UE 5.7's TSCF_UEDELTA source art (read off Mayu's Basic VFX Pack): the raw
+/// pixels with every row stored as its byte-wise difference (mod 256) from
+/// the row above, except the first row of each block of rows, stored as is; the
+/// payload's own compression (Oodle) is undone by the bulk reader.
+fn undelta_rows(data: &[u8], w: u32, h: u32, format: &str) -> Result<Vec<u8>, String> {
+    let bpp = match format {
+        "TSF_G8" => 1,
+        "TSF_BGRA8" | "TSF_BGRE8" => 4,
+        // 16-bit formats: not seen yet (byte-wise or word-wise deltas unknown).
+        other => return Err(format!("TSCF_UEDELTA with source format {other} not supported")),
+    };
+    let row = (w * bpp) as usize;
+    if data.len() != row * h as usize {
+        return Err(format!("TSCF_UEDELTA payload is {} bytes for {w}x{h} {format}", data.len()));
+    }
+    // Rows are delta-coded in blocks of 32768 pixels, at least 32 rows (as
+    // seen: 128 rows at 256 px wide, 64 at 512, 32 at 1024 and 2048, for G8
+    // and BGRA8 alike); each block starts raw.
+    let block = (32768 / w as usize).max(32);
+    let mut out = data.to_vec();
+    for y in 1..h as usize {
+        if y % block == 0 {
+            continue;
+        }
+        let (prev, cur) = out.split_at_mut(y * row);
+        let prev = &prev[(y - 1) * row..];
+        for (c, p) in cur[..row].iter_mut().zip(prev) {
+            *c = c.wrapping_add(*p);
+        }
+    }
+    Ok(out)
+}
+
 pub fn read_texture(store: &mut Store, object_path: &str) -> Result<Image, String> {
     let l = store.load(object_path).ok_or_else(|| format!("package of `{object_path}` not found"))?;
     let (_, name) = split_object_path(object_path);
@@ -177,6 +210,7 @@ pub fn read_texture(store: &mut Store, object_path: &str) -> Result<Image, Strin
         }
         "TSCF_PNG" => decode_png(&data)?.rgba,
         "TSCF_None" => raw_to_rgba(&data, w, h, &format)?,
+        "TSCF_UEDELTA" => raw_to_rgba(&undelta_rows(&data, w, h, &format)?, w, h, &format)?,
         other => return Err(format!("texture source compression {other} not supported")),
     };
     if rgba.len() != (w * h * 4) as usize {
@@ -1546,6 +1580,11 @@ impl<'a> Gen<'a> {
         if matches!(inp.field("UseConstant"), Some(Value::Bool(true))) {
             return match inp.field("Constant") {
                 Some(Value::Float(x)) => Some(v(lit(*x), 1)),
+                // UE 5.7: an FLinearColor, already linear.
+                Some(c @ Value::Struct { name, .. }) if name == "LinearColor" => {
+                    let b = |n: &str| c.field(n).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                    Some(v(format!("vec3<f32>({}, {}, {})", lit(b("R")), lit(b("G")), lit(b("B"))), 3))
+                }
                 Some(c @ Value::Struct { .. }) if c.field("R").is_some() => {
                     // An FColor: sRGB-encoded (Unreal linearizes it).
                     let b = |n: &str| srgb_to_linear(c.field(n).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32 / 255.0);
@@ -1797,6 +1836,52 @@ fn rotate_uv(uv: vec2<f32>, c: vec2<f32>, a: f32) -> vec2<f32> {
 /// Stands in for a texture whose package is missing: black, so the
 /// material terms it feeds drop out (erosion and distortion read 0), which
 /// is how the reference recordings of the test systems look.
+/// A generated stand-in for an engine texture packs use without shipping
+/// (engine content is not in Fab downloads), with what it is. Only noise
+/// textures, whose exact pixels do not matter, qualify.
+pub fn engine_stand_in(object_path: &str) -> Option<(Image, &'static str)> {
+    let (_, name) = split_object_path(object_path);
+    if !object_path.starts_with("/Engine/") {
+        return None;
+    }
+    match name.as_str() {
+        // Engine_MaterialFunctions02/ExampleContent/Textures: 128x128,
+        // independent soft noise in each channel, tiling.
+        "LowResBlurredNoise" => Some((value_noise(128, 8), "tiling soft value noise")),
+        _ => None,
+    }
+}
+
+/// Tiling value noise: a `cells` x `cells` lattice of random values per
+/// channel, smoothstep-interpolated, alpha 1.
+fn value_noise(size: u32, cells: u32) -> Image {
+    let hash = |x: u32, y: u32, c: u32| -> f32 {
+        let mut h = x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841) ^ c.wrapping_mul(0xcb1a_b31f) ^ 0x2545_f491;
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x5bd1_e995);
+        h ^= h >> 15;
+        (h & 0xffff) as f32 / 65535.0
+    };
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let s = |t: f32| t * t * (3.0 - 2.0 * t);
+    for py in 0..size {
+        for px in 0..size {
+            let fx = px as f32 * cells as f32 / size as f32;
+            let fy = py as f32 * cells as f32 / size as f32;
+            let (x0, y0) = (fx as u32, fy as u32);
+            let (tx, ty) = (s(fx - x0 as f32), s(fy - y0 as f32));
+            let (x1, y1) = ((x0 + 1) % cells, (y0 + 1) % cells);
+            for c in 0..3 {
+                let a = hash(x0, y0, c) + (hash(x1, y0, c) - hash(x0, y0, c)) * tx;
+                let b = hash(x0, y1, c) + (hash(x1, y1, c) - hash(x0, y1, c)) * tx;
+                rgba.push(((a + (b - a) * ty) * 255.0).round() as u8);
+            }
+            rgba.push(255);
+        }
+    }
+    Image { width: size, height: size, rgba, srgb: false }
+}
+
 pub fn stand_in_missing() -> Image {
     Image { width: 4, height: 4, rgba: [0, 0, 0, 255].repeat(16), srgb: false }
 }

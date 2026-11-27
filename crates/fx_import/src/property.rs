@@ -707,7 +707,7 @@ fn read_native_struct(r: &mut Reader, name: &str, ctx: &mut Ctx) -> Result<Optio
         "Vector3f" => reals(r, XYZ, false)?,
         "Vector3d" => reals(r, XYZ, true)?,
         "Vector2D" => reals(r, XY, lwc)?,
-        "Vector2f" => reals(r, XY, false)?,
+        "Vector2f" | "DeprecateSlateVector2D" => reals(r, XY, false)?,
         "Vector4" => reals(r, XYZW, lwc)?,
         "Vector4f" => reals(r, XYZW, false)?,
         "Vector4d" => reals(r, XYZW, true)?,
@@ -801,6 +801,12 @@ fn read_native_struct(r: &mut Reader, name: &str, ctx: &mut Ctx) -> Result<Optio
             match name {
                 "ColorMaterialInput" => {
                     f.push(field("UseConstant", "BoolProperty", Value::Bool(r.u32()? != 0)));
+                    // UE 5.7 saves the constant as an FLinearColor (16 bytes,
+                    // the tagged value's rest); earlier as an FColor.
+                    if r.remaining() == 16 {
+                        f.push(field("Constant", "StructProperty", Value::Struct { name: "LinearColor".into(), fields: reals(r, &["R", "G", "B", "A"], false)? }));
+                        return Ok(Some(f));
+                    }
                     let [b, g, rr, a] = r.array::<4>()?;
                     f.push(field("Constant", "StructProperty", Value::Struct {
                         name: "Color".into(),

@@ -562,7 +562,35 @@ impl<'a> Cx<'a> {
                     Status::Disabled
                 } else {
                     let mut o = Out::new();
-                    let res = self.module(e, st, m, loops, &mut o);
+                    let mut res = self.module(e, st, m, loops, &mut o);
+                    // A module ours cannot run in this stack (a force in
+                    // Particle Spawn, which Niagara applies once) is left out.
+                    let stage = match st.usage {
+                        Usage::SystemSpawn => Some(fx_core::model::Stage::SystemSpawn),
+                        Usage::SystemUpdate => Some(fx_core::model::Stage::SystemUpdate),
+                        Usage::EmitterSpawn => Some(fx_core::model::Stage::EmitterSpawn),
+                        Usage::EmitterUpdate => Some(fx_core::model::Stage::EmitterUpdate),
+                        Usage::ParticleSpawn => Some(fx_core::model::Stage::ParticleSpawn),
+                        Usage::ParticleUpdate => Some(fx_core::model::Stage::ParticleUpdate),
+                        Usage::Event(_) => Some(fx_core::model::Stage::ParticleEvent),
+                        _ => None,
+                    };
+                    if let Some(stage) = stage {
+                        let wrong: Vec<String> = o
+                            .mods
+                            .iter()
+                            .filter(|x| module_def(&x.name).is_some_and(|d| !d.stages.contains(&stage)))
+                            .map(|x| x.name.clone())
+                            .collect();
+                        if !wrong.is_empty() {
+                            o.mods.retain(|x| !wrong.contains(&x.name));
+                            if o.mods.is_empty() {
+                                res = Err(format!("{} cannot run in {} here: left out", wrong.join(", "), stack_name(&st.usage)));
+                            } else {
+                                o.changes.push(format!("{} cannot run in {} here: left out", wrong.join(", "), stack_name(&st.usage)));
+                            }
+                        }
+                    }
                     for x in &o.mods {
                         if x.name == "Initialize Particle" && x.get("Sprite Size").is_some() {
                             has_sprite_size = true;
@@ -778,6 +806,11 @@ impl<'a> Cx<'a> {
             return Err("disabled dynamic input".into());
         }
         let name = d.script_name().to_string();
+        // UE4 names: UniformRanged* are the RandomRange* of UE5 (same Minimum / Maximum).
+        let name = match name.strip_prefix("UniformRanged") {
+            Some(rest) => format!("RandomRange{rest}"),
+            None => name,
+        };
         let get = |cx: &mut Self, n: &str, unit: Unit, ty: Ty| -> Result<Option<Fx>, String> {
             match d.input(n) {
                 None => Ok(None),
@@ -810,20 +843,27 @@ impl<'a> Cx<'a> {
                     "Vector2DFromCurve" => (Ty::Vec2, "Vector2DCurve"),
                     _ => (Ty::Vec4, "Vector4Curve"),
                 };
-                let scale = lit_f(d.input("Scale Curve")).unwrap_or(1.0);
-                let curve = match d.input(key) {
+                // UE5 names the inputs `Vector2DCurve` / `Scale Curve` (a
+                // float); UE4's Vector2DFromCurve `Vector2Curve` / `ScaleCurve`
+                // (one scale per component).
+                let scale: Vec<f32> = match d.input("Scale Curve").or(d.input("ScaleCurve")) {
+                    Some(NInput::Value(v)) => v.floats().unwrap_or_else(|| vec![1.0]),
+                    _ => vec![1.0],
+                };
+                let scaled = scale.iter().any(|s| *s != 1.0);
+                let curve = match d.input(key).or(if ty == Ty::Vec2 { d.input("Vector2Curve") } else { None }) {
                     Some(NInput::Value(NValue::Curve(c))) => {
                         let mut c = curve(c, ty, unit);
                         for (_, v) in c.keys.iter_mut() {
-                            for x in v.iter_mut() {
-                                *x *= scale;
+                            for (i, x) in v.iter_mut().enumerate() {
+                                *x *= scale.get(i).or(scale.last()).copied().unwrap_or(1.0);
                             }
                         }
                         Fx::Curve(c)
                     }
                     Some(NInput::Link(l)) => {
                         let link = self.link(l, unit)?;
-                        if scale != 1.0 {
+                        if scaled {
                             return Err("a linked curve with a Scale Curve".into());
                         }
                         link
@@ -861,9 +901,14 @@ impl<'a> Cx<'a> {
                     _ => Ok(out),
                 }
             }
-            "VectorFromFloat" => {
+            "VectorFromFloat" | "Vector2DFromFloat" | "Vector4FromFloat" => {
+                let ty = match name.as_str() {
+                    "Vector2DFromFloat" => Ty::Vec2,
+                    "Vector4FromFloat" => Ty::Vec4,
+                    _ => Ty::Vec3,
+                };
                 let v = get(self, "Value", unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0)));
-                coerce(v, Ty::Vec3)
+                coerce(v, ty)
             }
             "Multiply_Float" | "Multiply_VectorByFloat" | "Multiply_Vector" | "Multiply_LinearColor" => {
                 let (ta, ka, kb, tb) = match name.as_str() {
@@ -1375,9 +1420,15 @@ impl<'a> Cx<'a> {
             let refraction_lost = wired("Refraction") && !refraction;
             let mut imgs = Vec::new();
             let mut missing = Vec::new();
+            let mut stand_ins = Vec::new();
             for t in &c.textures {
                 match mt::read_texture(&mut a.store, t) {
                     Ok(i) => imgs.push(i),
+                    Err(_) if mt::engine_stand_in(t).is_some() => {
+                        let (i, what) = mt::engine_stand_in(t).unwrap();
+                        stand_ins.push(format!("engine texture {} not in the pack: {what} stands in", mt::split_object_path(t).1));
+                        imgs.push(i);
+                    }
                     Err(why) => {
                         missing.push(format!("{} ({why})", mt::split_object_path(t).1));
                         imgs.push(mt::stand_in_missing());
@@ -1411,6 +1462,7 @@ impl<'a> Cx<'a> {
                 missing_textures: missing,
                 notes: {
                     let mut notes = c.notes.clone();
+                    notes.extend(stand_ins);
                     if refraction_lost {
                         notes.push("Refraction: the distortion offset is not drawn (colour kept)".into());
                     }
@@ -2309,8 +2361,36 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             for (k, _) in &m.inputs {
                 used.push(k.as_str());
             }
-            o.changes.push("flipbook settings not kept (placeholder sprite)".into());
-            let _ = &mut x;
+            // SubUV Animation Mode as saved (UE4 module and V2 alike):
+            // 0 Linear, 1 Random, 2 Infinite Loop, 3 Direct Set.
+            let anim = mode(m, "SubUV Animation Mode").or(mode(m, "Playback Mode")).unwrap_or(0);
+            match anim {
+                1 => x.set("SubUV Animation Mode", Fx::Choice("Random".into())),
+                2 => {
+                    x.set("SubUV Animation Mode", Fx::Choice("InfiniteLoop".into()));
+                    if let Some(f) = lit_f(m.input("Frames Per Second")) {
+                        x.set("Frames Per Second", Fx::Lit(Lit::Float(f)));
+                    }
+                }
+                3 => o.changes.push("SubUV Animation Mode Direct Set: frames play over the particle's life".into()),
+                _ => {}
+            }
+            let start = if m.switch("UseStartFrame") == Some("false") {
+                0
+            } else {
+                lit_f(m.input("Start Frame")).unwrap_or(0.0) as i32
+            };
+            if start > 0 {
+                x.set("Start Frame", Fx::Lit(Lit::Int(start)));
+            }
+            if m.switch("UseEndFrame") != Some("false") {
+                if let Some(end) = lit_f(m.input("End Frame")) {
+                    x.set("Number of Frames", Fx::Lit(Lit::Int((end as i32 - start + 1).max(1))));
+                }
+            }
+            if let Some(n) = lit_f(m.input("SubUV Loop Count")).filter(|n| *n != 1.0 && anim == 0) {
+                o.changes.push(format!("SubUV Loop Count {n}: the frames play once over the particle's life"));
+            }
             o.mods.push(x);
         }
         "SystemState" => return Ok(Some("system loop settings".into())),
@@ -2321,6 +2401,179 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
         "ScaleRibbonWidth" => {
             let mut x = FxModule::new("Scale Ribbon Width");
             put!(x, "Ribbon Width Scale", "Ribbon Width Scale", Unit::None);
+            o.mods.push(x);
+        }
+        // UE4-era modules (separate scripts later merged into Shape Location,
+        // Add Velocity and Initialize Particle in UE5), as Mixed VFX ships them.
+        "SpriteRotationRate" => {
+            // Particles.SpriteRotation += Rotation Rate * DeltaTime, in degrees.
+            let mut x = FxModule::new("Sprite Rotation Rate");
+            put!(x, "Rotation Rate", "Rotation Rate", Unit::None);
+            o.mods.push(x);
+        }
+        "ScaleSpriteSizeBySpeed" => {
+            let mut x = FxModule::new("Scale Sprite Size by Speed");
+            put!(x, "Velocity Threshold", "Velocity Threshold", Unit::Len);
+            put!(x, "Min Scale Factor", "Min Scale Factor", Unit::None);
+            put!(x, "Max Scale Factor", "Max Scale Factor", Unit::None);
+            used.extend(["Sample Scale Factor By Curve", "Scale Factor Curve"]);
+            if matches!(m.input("Sample Scale Factor By Curve"), Some(NInput::Value(NValue::Bool(true)))) {
+                o.changes.push("Scale Factor Curve: the speed-to-scale curve is drawn as a straight ramp".into());
+            }
+            o.mods.push(x);
+        }
+        "AddVelocityInCone" => {
+            let mut x = FxModule::new("Add Velocity in Cone");
+            put!(x, "Cone Axis", "Cone Axis", Unit::Dir);
+            put!(x, "Velocity Strength", "Velocity Strength", Unit::Len);
+            // Niagara's cone angles are full openings; ours are half-angles.
+            used.push("Cone Angle");
+            if let Some(v) = cx.input(e, m, "Cone Angle", Unit::None, Ty::Float, o) {
+                x.set("Cone Angle", scale_fx(v, 0.5));
+            }
+            put!(x, "Velocity Distribution Along Cone Axis", "Distribution Along Cone Axis", Unit::None);
+            used.push("Use Velocity Falloff On Cone Axis");
+            if matches!(m.input("Use Velocity Falloff On Cone Axis"), Some(NInput::Value(NValue::Bool(false)))) {
+                used.push("Velocity Falloff Away From Cone Axis");
+            } else {
+                put!(x, "Velocity Falloff Away From Cone Axis", "Speed Falloff", Unit::None);
+            }
+            o.mods.push(x);
+        }
+        "InitializeRibbon" => {
+            // UE4's ribbon initialiser: Lifetime, Color and Mass as Initialize
+            // Particle, then the ribbon's width and twist.
+            let mut p = FxModule::new("Initialize Particle");
+            put!(p, "Lifetime", "Lifetime", Unit::None);
+            put!(p, "Color", "Color", Unit::None);
+            put!(p, "Mass", "Mass", Unit::None);
+            o.mods.push(p);
+            let mut x = FxModule::new("Initialize Ribbon");
+            put!(x, "Ribbon Width", "Ribbon Width", Unit::Len);
+            used.push("Write RibbonTwist");
+            if matches!(m.input("Write RibbonTwist"), Some(NInput::Value(NValue::Bool(false)))) {
+                used.push("Ribbon Twist");
+            } else {
+                put!(x, "Ribbon Twist", "Ribbon Twist", Unit::None);
+            }
+            // Write Position puts the particle at the owner, where ours start.
+            used.push("Write Position");
+            o.mods.push(x);
+        }
+        "GenerateLocationEvent" => {
+            let mut x = FxModule::new("Generate Location Event");
+            for (k, _) in &m.inputs {
+                if k.contains("to Send as") || k.starts_with("Delay") || k == "Gap Correction Amount" {
+                    used.push(k.as_str());
+                }
+            }
+            used.push("Event Probability");
+            if m.switch("Use Event Probability") == Some("true") {
+                put!(x, "Event Probability", "Event Probability", Unit::None);
+            }
+            used.push("Event Send Rate");
+            if let Some(r) = lit_f(m.input("Event Send Rate")) {
+                o.changes.push(format!("Event Send Rate {r}/s: an event every step"));
+            }
+            o.mods.push(x);
+        }
+        "GenerateCollisionEvent" => {
+            for (k, _) in &m.inputs {
+                if k.contains("to Send as") || k.contains("to send as") {
+                    used.push(k.as_str());
+                }
+            }
+            used.extend(["Delay Between Collision Events", "Velocity Threshold"]);
+            o.changes.push("Delay Between Collision Events and Velocity Threshold: every collision sends an event".into());
+            o.mods.push(FxModule::new("Generate Collision Event"));
+        }
+        "ReceiveLocationEvent" | "ReceiveCollisionEvent" => {
+            let collision = script == "ReceiveCollisionEvent";
+            let mut x = FxModule::new(if collision { "Receive Collision Event" } else { "Receive Location Event" });
+            put!(x, "Inherited Velocity Scale", "Inherit Velocity Scale", Unit::None);
+            put!(x, "Inherited Collision Velocity Scale", "Inherit Velocity Scale", Unit::None);
+            // The handler's spawn number decides the count (SpawnCount repeats it).
+            used.push("SpawnCount");
+            for k in ["Add Velocity Along Collision Normal", "Randomize Velocity Direction Around Collision Normal"] {
+                used.push(k);
+                if lit_f(m.input(k)).is_some_and(|v| v != 0.0) {
+                    o.drop_input(k, "not carried over");
+                }
+            }
+            used.push("Inherit Parent Normalized Age");
+            if matches!(m.input("Inherit Parent Normalized Age"), Some(NInput::Value(NValue::Bool(true)))) {
+                o.changes.push("Inherit Parent Normalized Age: spawned particles start at age 0".into());
+            }
+            o.mods.push(x);
+        }
+        "BoxLocation" | "TorusLocation" | "CylinderLocation" => {
+            let mut x = FxModule::new("Shape Location");
+            used.extend(["Random Seed", "Spawn Group Mask", "Surface Only Band Thickness", "U Distribution", "V Distribution", "Surface Position"]);
+            if m.switch("Surface Only") == Some("true") {
+                x.set("Surface Only", Fx::Lit(Lit::Bool(true)));
+            }
+            used.push("Non Uniform Scale");
+            if let Some(NInput::Value(v)) = m.input("Non Uniform Scale") {
+                if v.floats().is_some_and(|f| f.iter().any(|c| *c != 1.0)) {
+                    o.drop_input("Non Uniform Scale", "not carried over");
+                }
+            }
+            match script.as_str() {
+                "BoxLocation" => {
+                    x.set("Shape Primitive", Fx::Choice("Box".into()));
+                    put!(x, "Box Size", "Box Size", Unit::Len);
+                    put!(x, "Box Offset", "Offset", Unit::Len);
+                    used.extend(["Rotate Box On Axis", "Normalized Box Rotation Angle"]);
+                    if m.switch("Rotate Box") == Some("true") {
+                        o.drop_input("Rotate Box On Axis", "box rotation not carried over");
+                    }
+                }
+                "TorusLocation" => {
+                    x.set("Shape Primitive", Fx::Choice("Torus".into()));
+                    put!(x, "Large Radius", "Large Radius", Unit::Len);
+                    put!(x, "Handle Radius", "Handle Radius", Unit::Len);
+                    put!(x, "Offset", "Offset", Unit::Len);
+                    used.extend(["Knot Helix Loops", "Knot Ring Loops", "Torus Knot Tube Radius", "Normalized Angle Around Torus Axis", "Torus Axis"]);
+                    // Unreal Z (ours Y) is the shape axis, as ours.
+                    let axis = match m.input("Torus Axis") {
+                        Some(NInput::Value(v)) => v.floats().unwrap_or_default(),
+                        _ => vec![0.0, 0.0, 1.0],
+                    };
+                    if m.switch("Align Torus With Axis") != Some("false") && axis.len() == 3 && (axis[0] != 0.0 || axis[1] != 0.0) {
+                        o.drop_input("Torus Axis", "a tilted torus is drawn around the up axis");
+                    }
+                    if mode(m, "Torus Distribution Mode").unwrap_or(0) != 0 {
+                        o.changes.push("Torus Distribution Mode: drawn as random".into());
+                    }
+                    if m.switch("Enable Torus Knot Radius") == Some("true") {
+                        o.changes.push("Enable Torus Knot Radius: drawn as a plain torus".into());
+                    }
+                }
+                _ => {
+                    x.set("Shape Primitive", Fx::Choice("Cylinder".into()));
+                    put!(x, "Cylinder Height", "Cylinder Height", Unit::Len);
+                    put!(x, "Cylinder Radius", "Cylinder Radius", Unit::Len);
+                    put!(x, "Offset", "Offset", Unit::Len);
+                    used.push("Lathe Profile");
+                    if m.switch("LatheCurve") == Some("true") {
+                        o.drop_input("Lathe Profile", "the lathe curve is not carried over (straight sides)");
+                    }
+                }
+            }
+            o.mods.push(x);
+        }
+        "AccelerationForce" => {
+            let mut x = FxModule::new("Acceleration Force");
+            put!(x, "Acceleration", "Acceleration", Unit::Len);
+            o.mods.push(x);
+        }
+        "JitterPosition" => {
+            let mut x = FxModule::new("Jitter Position");
+            used.push("Jitter Amount");
+            if let Some(v) = cx.input(e, m, "Jitter Amount", Unit::Len, Ty::Float, o) {
+                x.set("Jitter Amount", coerce(v, Ty::Vec3)?);
+            }
+            put!(x, "Jitter Delay", "Jitter Delay", Unit::None);
             o.mods.push(x);
         }
         _ => return Err(format!("{script} has no equivalent module here")),

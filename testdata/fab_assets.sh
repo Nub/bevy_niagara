@@ -31,13 +31,13 @@ if [ ! -d "$tool" ]; then
 	git -C "$tool" checkout -q 36e7dae
 fi
 
-# item  library asset id  listing id
+# item  library asset id  listing id  [engine, default 5.8]
 fetch() {
-	item=$1 asset=$2 listing=$3
+	item=$1 asset=$2 listing=$3 engine=${4:-5.8}
 	out=$root/fab/$item
 	if [ ! -d "$out/Content" ]; then
 		mkdir -p "$root/fab"
-		(cd "$tool" && nix shell nixpkgs#python3 -c python3 -m fabdl download "$asset" --engine 5.8 --out "$out" </dev/null)
+		(cd "$tool" && nix shell nixpkgs#python3 -c python3 -m fabdl download "$asset" --engine "$engine" --out "$out" </dev/null)
 	fi
 	ref=$out/reference
 	mkdir -p "$ref"
@@ -52,4 +52,8 @@ fetch() {
 
 fetch perfect_fire 6a60a866c89e4583bfed4f2d40a0900f d2136c01-8d35-403f-a637-146e8173bdb3
 fetch arrow_trail 477458f2e7a349e39d219eed300e2bd7 b8ff3ab4-0e81-4335-bbf0-fea15f6fcdfc
+fetch lightning 3ae510e26b08480ba417b1433973818c 90f37b0c-f672-4750-869a-5fa4452d5676
+fetch portals 3962952c2e944ef6b3475b3d89dbd4ba aeb9fe88-41d6-4ba7-947d-0bfa5c1e74e6
+fetch mixed_vfx f2fc93aa275241bf93c2b9fb66453962 6518971c-c8ca-47d7-8611-1ff068b78dd5 5.4
+fetch mayu_basic 091bf691081042308370fcaa9fb4e9a0 35636320-5ff4-42cc-a233-34ee16a4a7a4 5.7
 echo "testdata/fab ready"
