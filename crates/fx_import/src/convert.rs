@@ -1210,9 +1210,20 @@ impl<'a> Cx<'a> {
                     "Multiply_Vector" => (Ty::Vec3, "A", "B", Ty::Vec3),
                     _ => (Ty::Color, "A", "B", Ty::Color),
                 };
-                // The unit goes to the first operand only.
-                let a = get(self, ka, unit, ta)?.unwrap_or(Fx::Lit(Lit::from_floats(ta, &[1.0])));
-                let bu = if tb == Ty::Float { Unit::None } else { Unit::Dir };
+                // The unit goes to one operand only: the first, unless it is
+                // a constant direction (1, 1) scaled by a linked size, which
+                // then carries it (Sprite Size = (1, 1) * User.Flame_Size).
+                let konst = |k: &str| matches!(d.input(k), Some(NInput::Value(_)) | None);
+                let b_carries = tb == Ty::Float && ta != Ty::Float && unit == Unit::Len && konst(ka) && !konst(kb);
+                let au = if b_carries { Unit::Dir } else { unit };
+                let a = get(self, ka, au, ta)?.unwrap_or(Fx::Lit(Lit::from_floats(ta, &[1.0])));
+                let bu = if b_carries {
+                    unit
+                } else if tb == Ty::Float {
+                    Unit::None
+                } else {
+                    Unit::Dir
+                };
                 let b = get(self, kb, bu, tb)?.unwrap_or(Fx::Lit(Lit::from_floats(tb, &[1.0])));
                 if let (Fx::Lit(x), Fx::Lit(y)) = (&a, &b) {
                     let xs = x.floats();
@@ -2624,8 +2635,16 @@ fn map_module(cx: &mut Cx, e: &NEmitter, st: &NStack, m: &NModule, loops: &Loops
             let mut x = FxModule::new("Scale Color");
             // Scale Mode as saved: 0 RGB and alpha separately (Scale RGBA is
             // then a stale constant, as in NS_Fire), 1 RGBA.
+            // 2: Linear Color Curve over the particle's age (RGBA).
             let rgba = mode(m, "Scale Mode") == Some(1) || (m.has("Scale RGBA") && !m.has("Scale RGB") && !m.has("Scale Alpha"));
-            if rgba {
+            if mode(m, "Scale Mode") == Some(2) && matches!(m.input("Linear Color Curve"), Some(NInput::Value(NValue::Curve(_)))) {
+                used.extend(["Scale RGB", "Scale Alpha", "Scale RGBA", "Linear Color Curve"]);
+                if let Some(NInput::Value(NValue::Curve(c))) = m.input("Linear Color Curve") {
+                    let mut cv = curve(c, Ty::Color, Unit::None);
+                    cv.ty = Ty::Vec4;
+                    x.set("Scale RGBA", Fx::CurveOverAge(cv));
+                }
+            } else if rgba {
                 used.extend(["Scale RGB", "Scale Alpha"]);
                 put!(x, "Scale RGBA", "Scale RGBA", Unit::None);
             } else {
