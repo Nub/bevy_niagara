@@ -20,7 +20,7 @@ repo. Exit code 3 means a regression.
 | Scene | File | Budget (total GPU ms) |
 |---|---|---|
 | `sprites_1m` | `scenes/sprites_1m.fx.ron` | 2.0 (1M sprites simulated and drawn) |
-| `sprites_1m_sorted` | `scenes/sprites_1m_sorted.fx.ron` | none yet (tracks the bitonic sort) |
+| `sprites_1m_sorted` | `scenes/sprites_1m_sorted.fx.ron` | none yet (radix sort + sorted-sprite payload: 2.3 ms, was 5.0 with the bitonic sort) |
 | `fire` | `scenes/fire.fx.ron` | 0.2 |
 | `sparks` | `scenes/sparks.fx.ron` | 0.2 |
 | `lib_*` (6) | `../effects/library/*.fx.ron` | 0.2 each (reference effect library) |
@@ -39,6 +39,16 @@ fx_bench run --scenes fire,sparks --frames 300 --out FILE --base FILE --no-compa
 fx_bench compare BASE.json NEW.json   # exit 3 on regression
 fx_bench dashboard                    # tile data for the Performance dashboard
 fx_bench list
+```
+
+Showcase systems that cannot be committed (licensed imports, git-ignored)
+are benched opt-in from a folder: every `*.fx.ron` under it becomes a scene
+`show_<stem>` (camera at 0,2,6 looking at 0,1,0). The result must go to
+`--out` (never `bench/results`, so the dashboard history only holds
+committed scenes):
+
+```sh
+fx_bench run --scenes-dir DIR --out FILE [--scenes a,b] [--base FILE]
 ```
 
 A regression is a metric over 10% slower than the base AND over a noise floor

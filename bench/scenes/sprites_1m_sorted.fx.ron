@@ -1,6 +1,6 @@
-// Bench scene: 1M GPU sprites, alpha blended and depth sorted (bitonic). One burst that
+// Bench scene: 1M GPU sprites, alpha blended and depth sorted (radix sort over 16384). One burst that
 // lives for the whole run, so every measured frame simulates and draws 1M.
-// Tracks the bitonic sort at scale; no budget yet.
+// Tracks the radix sort and the sorted-sprite payload at scale; no budget yet.
 (
     name: "Sprites 1M Sorted",
     emitters: [(
