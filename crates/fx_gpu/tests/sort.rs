@@ -108,9 +108,13 @@ fn radix_unique_id() {
     check(70_000, SortMode::UniqueId);
 }
 
+/// The deterministic mode (headless preview): the same particles in the same
+/// order on every run, whatever slots the sim's atomic compaction gave them.
 #[test]
-fn radix_is_deterministic() {
-    let a = sorted(100_000, SortMode::ViewDepth).0;
-    let b = sorted(100_000, SortMode::ViewDepth).0;
-    assert_eq!(a, b);
+fn radix_unique_id_is_deterministic() {
+    let ids = || {
+        let (idx, ps) = sorted(100_000, SortMode::UniqueId);
+        idx.iter().map(|&i| ps[i as usize].unique_id).collect::<Vec<_>>()
+    };
+    assert_eq!(ids(), ids());
 }

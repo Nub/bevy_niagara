@@ -75,34 +75,59 @@ fn item_key(it: Items, k: u32) -> u32 {
     }
 }
 
+// Per-thread digit counts packed in 4-bit lanes (at most 8 each): digits
+// 0..8 in x, 8..16 in y.
+fn nibble(c: vec2<u32>, d: u32) -> u32 {
+    return (select(c.x, c.y, d >= 8u) >> ((d & 7u) * 4u)) & 15u;
+}
+
+fn bump(c: vec2<u32>, d: u32) -> vec2<u32> {
+    let one = 1u << ((d & 7u) * 4u);
+    return c + select(vec2<u32>(one, 0u), vec2<u32>(0u, one), d >= 8u);
+}
+
+// Column totals of the 32 row segments (8 rows each) per lane word.
+var<workgroup> seg: array<u32, 256>;
+
 // Writes the thread's counts to `lanes` and turns them into an inclusive
-// prefix over threads (Hillis-Steele; 16-bit lanes never carry: a tile has
-// at most 2048 keys).
+// prefix over threads (16-bit lanes never carry: a tile has at most 2048
+// keys). Thread t scans word t % 8 down rows 8 * (t / 8) ..+8, then the 32
+// segment totals of each word are scanned and added back.
 fn count_and_scan(t: u32, it: Items) {
-    var c = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    var c = vec2<u32>(0u);
     for (var k = 0u; k < it.count; k++) {
-        let d = digit(item_key(it, k));
-        c[d >> 1u] += 1u << ((d & 1u) * 16u);
+        c = bump(c, digit(item_key(it, k)));
     }
     for (var w = 0u; w < 8u; w++) {
-        lanes[t * 8u + w] = c[w];
+        lanes[t * 8u + w] = nibble(c, 2u * w) | (nibble(c, 2u * w + 1u) << 16u);
     }
     workgroupBarrier();
-    for (var off = 1u; off < RWG; off = off * 2u) {
-        var add = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    let w = t & 7u;
+    let s = t >> 3u;
+    var run = 0u;
+    for (var r = s * 8u; r < s * 8u + 8u; r++) {
+        run += lanes[r * 8u + w];
+        lanes[r * 8u + w] = run;
+    }
+    seg[t] = run;
+    workgroupBarrier();
+    // Inclusive scan of seg over s (stride 8 entries per segment).
+    for (var off = 8u; off < RWG; off = off * 2u) {
+        var add = 0u;
         if (t >= off) {
-            for (var w = 0u; w < 8u; w++) {
-                add[w] = lanes[(t - off) * 8u + w];
-            }
+            add = seg[t - off];
         }
         workgroupBarrier();
-        if (t >= off) {
-            for (var w = 0u; w < 8u; w++) {
-                lanes[t * 8u + w] += add[w];
-            }
-        }
+        seg[t] += add;
         workgroupBarrier();
     }
+    if (s > 0u) {
+        let before = seg[t - 8u];
+        for (var r = s * 8u; r < s * 8u + 8u; r++) {
+            lanes[r * 8u + w] += before;
+        }
+    }
+    workgroupBarrier();
 }
 
 // Inclusive count of digit d over threads 0..=t.
@@ -174,7 +199,7 @@ fn radix_scatter(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id)
     let first = tile * TILE + t * ITEMS;
     let v0 = src_vals[first / 4u];
     let v1 = src_vals[first / 4u + 1u];
-    var mine = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    var mine = vec2<u32>(0u);
     for (var k = 0u; k < it.count; k++) {
         let key = item_key(it, k);
         let d = digit(key);
@@ -182,9 +207,8 @@ fn radix_scatter(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id)
         if (t > 0u) {
             before = lane(t - 1u, d);
         }
-        let shift = (d & 1u) * 16u;
-        let rank = (mine[d >> 1u] >> shift) & 0xFFFFu;
-        mine[d >> 1u] += 1u << shift;
+        let rank = nibble(mine, d);
+        mine = bump(mine, d);
         let at = tile_base[d] + before + rank;
         var val = 0u;
         switch k {
