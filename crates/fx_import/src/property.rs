@@ -552,11 +552,19 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
             };
             Text::None { invariant }
         }
-        0 => Text::Base {
-            namespace: r.fstring()?,
-            key: r.fstring()?,
-            source: r.fstring()?,
-        },
+        0 => {
+            let t = Text::Base {
+                namespace: r.fstring()?,
+                key: r.fstring()?,
+                source: r.fstring()?,
+            };
+            // UE 5.8 (UE5 1018) saves add a 32-bit field after the source
+            // (zero in Loot Drops VFX).
+            if ctx.v.ue5 >= 1018 {
+                r.u32()?;
+            }
+            t
+        }
         h @ 1..=3 => {
             // Formatted text (NamedFormat, OrderedFormat, ArgumentFormat):
             // the format text, then its arguments; kept raw.
@@ -765,6 +773,33 @@ fn read_native_struct(r: &mut Reader, name: &str, ctx: &mut Ctx) -> Result<Optio
     let fields = match name {
         "Vector" | "Vector_NetQuantize" | "Vector_NetQuantize10" | "Vector_NetQuantize100" | "Vector_NetQuantizeNormal" => {
             reals(r, XYZ, lwc)?
+        }
+        // FInstancedStruct (editor metadata in UE 5.8 Niagara systems):
+        // [version byte,] the struct (package index), the payload size, the
+        // payload. Kept raw; the layout whose size fits wins.
+        "InstancedStruct" => {
+            let start = r.pos();
+            let mut found = None;
+            for with_version in [true, false] {
+                let mut rr = r.clone();
+                rr.seek(start)?;
+                if with_version && rr.u8()? > 1 {
+                    continue;
+                }
+                let strukt = rr.i32()?;
+                let size = rr.i32()?;
+                if size >= 0 && (size as usize) <= rr.remaining() {
+                    let bytes = rr.bytes(size as usize)?.to_vec();
+                    found = Some((rr, strukt, bytes));
+                    break;
+                }
+            }
+            let (rr, strukt, bytes) = found.ok_or_else(|| r.err("InstancedStruct layout not recognised"))?;
+            *r = rr;
+            vec![
+                field("ScriptStruct", "IntProperty", Value::Int(strukt)),
+                field("Payload", "ByteProperty", Value::Raw { bytes, note: "instanced struct payload".into() }),
+            ]
         }
         "Vector3f" => reals(r, XYZ, false)?,
         "Vector3d" => reals(r, XYZ, true)?,

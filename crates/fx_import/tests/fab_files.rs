@@ -105,10 +105,7 @@ fn every_effect_package_reads_without_problems() {
         }
         let bytes = std::fs::read(&f).unwrap();
         let pkg = Package::read(&bytes).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
-        // Known gap: a UE 5.8 material function's LibraryCategoriesText
-        // (editor-only FText metadata) has 13 unexplained trailing bytes.
-        let problems: Vec<_> = pkg.problems.iter().filter(|p| p.path != "LibraryCategoriesText").collect();
-        assert!(problems.is_empty(), "{}: {:#?}", f.display(), &problems[..problems.len().min(5)]);
+        assert!(pkg.problems.is_empty(), "{}: {:#?}", f.display(), &pkg.problems[..pkg.problems.len().min(5)]);
         for (i, e) in pkg.exports.iter().enumerate() {
             assert!(e.object.error.is_none(), "{} export {i}: {:?}", f.display(), e.object.error);
         }
