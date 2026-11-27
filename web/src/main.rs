@@ -64,7 +64,16 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .add_systems(Startup, setup)
         .add_systems(Update, (spawn_loaded, restart_sparks, orbit))
+        .add_systems(Update, forced_panic.run_if(|| query().contains("fail=panic")))
         .run();
+}
+
+/// `?fail=panic`: panics after 2 s, to check the page's diagnostics overlay
+/// shows a wasm panic.
+fn forced_panic(time: Res<Time>) {
+    if time.elapsed_secs() > 2.0 {
+        panic!("forced panic (?fail=panic)");
+    }
 }
 
 #[derive(Component)]
