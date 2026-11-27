@@ -615,6 +615,7 @@ fn loading(
     fx: Option<Res<Fx>>,
     warm: Query<Entity, With<Warmup>>,
     mut frames: Local<u32>,
+    mode: Res<RunMode>,
 ) {
     if run.phase != Phase::Loading {
         return;
@@ -649,8 +650,25 @@ fn loading(
     for e in &warm {
         commands.entity(e).despawn();
     }
+    if !page_started(&mode) {
+        return;
+    }
     run.phase = Phase::Playing;
     run.toast("Defend the tower!");
+}
+
+/// In the browser the round starts when the page's Play button is pressed
+/// (it sets `data-playing` on the body); elsewhere at once.
+fn page_started(mode: &RunMode) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    if !mode.bot() {
+        return web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.body())
+            .is_some_and(|b| b.has_attribute("data-playing"));
+    }
+    let _ = mode;
+    true
 }
 
 fn clear_intent(mut intent: ResMut<Intent>) {

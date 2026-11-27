@@ -41,6 +41,7 @@
       try { const p = fs.call(el); if (p && p.catch) p.catch(() => {}); } catch (e) {}
     }
     overlay.style.display = "none";
+    document.body.setAttribute("data-playing", "");
     document.getElementById("fx-canvas").focus();
   });
   if (!navigator.gpu) {
@@ -52,6 +53,8 @@
     const { default: init } = await import("./wizard_td.js");
     play.disabled = false;
     play.textContent = "Play";
+    // ?bot: the scripted player plays (attract mode, automated screenshots).
+    if (new URLSearchParams(location.search).has("bot")) overlay.style.display = "none";
     try {
       await init();
     } catch (e) {

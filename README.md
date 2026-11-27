@@ -11,6 +11,19 @@ A Niagara-style GPU particle system for [Bevy](https://bevyengine.org), with an 
 
 Effects live in [`effects/`](effects/README.md); benchmarks in [`bench/`](bench/README.md).
 
+## Play: Wizard TD
+
+**[Play Wizard TD in the browser](https://nub.github.io/bevy_niagara/wizard_td/)** (WebGPU: Safari 26+ on iPad and Mac, Chrome/Edge 113+).
+
+A first-person wizard defends a tower against waves of foxes ([`examples/wizard_td`](examples/wizard_td/src/main.rs)). Every spell is a particle effect spawned through the game API: fireballs with ribbon trails and pooled explosions, chain lightning, frost novas, turrets that cast on their own, and debris whose collisions spawn dust through particle events. Desktop: WASD, mouse look, click to cast, 1–4 to pick a spell. iPad: the left thumb moves, dragging on the right looks, and the spell buttons cast at the crosshair. Quality drops automatically to hold 60 fps.
+
+```sh
+cargo run --release -p wizard_td                                   # desktop window
+cargo run --release -p wizard_td -- --scripted --out DIR           # headless: a bot plays a minute, DIR/wizard_td.mp4
+sh examples/wizard_td/web/build.sh && sh examples/wizard_td/web/serve.sh   # browser build on localhost:8080
+sh examples/wizard_td/web/deploy.sh                                # publish to gh-pages/wizard_td/
+```
+
 ## Gallery
 
 All media is rendered headlessly with `fxpreview` (see `crates/fx_preview`).
@@ -53,4 +66,4 @@ Unreal, Unreal Engine and Niagara are trademarks of Epic Games, Inc. This projec
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. `effects/samples/models/Fox.glb` comes from the Bevy repository under its own license.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. `effects/samples/models/Fox.glb` and `examples/wizard_td/assets/models/Fox.glb` come from the Bevy repository under their own license.

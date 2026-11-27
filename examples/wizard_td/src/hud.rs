@@ -254,7 +254,7 @@ pub fn update_hud(
     }
     for mut t in &mut toast {
         t.0 = match run.phase {
-            Phase::Loading => "Loading spells...".into(),
+            Phase::Loading => String::new(),
             Phase::GameOver => format!(
                 "The tower has fallen\nWave {}, {} foxes, score {}\nPress Restart",
                 run.wave, run.kills, run.score
