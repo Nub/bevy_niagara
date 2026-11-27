@@ -65,17 +65,44 @@ fn raytracing_hit(input: RaytracingHitInput) -> RaytracingSurface {
         texel = sprite_texel(color, tex);
     }
 
-    surface.alpha = texel.a;
+    // Opacity is stochastic (as Solari's transparency pass treats blended
+    // surfaces): a hit is kept with probability `alpha`, so shadows,
+    // reflections, light samples and what shows behind a sprite match its
+    // blend on average (soft smoke shadows, no hard cut-out discs). The draw
+    // depends only on the hit point and the frame time, so the alpha test
+    // and the shading of one hit agree. (Solari's alpha test and its light
+    // sampling both call this with a zero view direction: no special case.)
+    // Additive sprites occlude too (by their alpha), unlike in raster: Solari
+    // stops shadow and path rays alike, so a surface reflections can see also
+    // casts shadows. (Kept 4x less often but 4x brighter, they doubled the
+    // per-frame noise for 3% more light past them.)
+    let a = clamp(texel.a, 0.0, 1.0);
+    let kept = a > 1.0 / 255.0 && hit_random(input.world_position, input.time) < a;
+    surface.alpha = select(0.0, 1.0, kept);
     if (flags & FLAG_EMISSIVE) != 0u {
-        // Sampled as a light (no view direction), alpha cuts nothing away:
-        // weight the emission by coverage so the soft edge emits less.
-        let as_light = all(input.view_direction == vec3<f32>(0.0));
-        let coverage = select(1.0, texel.a, (flags & FLAG_ADDITIVE) != 0u || as_light);
+        // Kept hits emit the full colour: on average colour x alpha, as the
+        // raster blend adds (additive) or covers (alpha) it.
         surface.base_color = vec3<f32>(0.0);
-        surface.emissive = texel.rgb * coverage * input.params[1].x;
+        surface.emissive = texel.rgb * input.params[1].x;
     } else {
         surface.base_color = texel.rgb;
         surface.emissive = vec3<f32>(0.0);
     }
     return surface;
+}
+
+// Uniform [0, 1) from the hit point (quantized to 0.5 mm) and the frame time.
+fn hit_random(p: vec3<f32>, time: f32) -> f32 {
+    let q = vec3<i32>(floor(p * 2000.0));
+    var h = (bitcast<u32>(q.x) * 0x8da6b343u) ^ (bitcast<u32>(q.y) * 0xd8163841u) ^ (bitcast<u32>(q.z) * 0xcb1ab31fu);
+    h ^= (bitcast<u32>(time) * 0x9e3779b9u);
+    h = pcg(h);
+    h = pcg(h);
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+fn pcg(v: u32) -> u32 {
+    let state = v * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
 }

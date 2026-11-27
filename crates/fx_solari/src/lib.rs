@@ -17,8 +17,17 @@
 //! - **Emissive sprites light the scene.** Unlit and additive sprites are
 //!   emissive surfaces, which Solari samples as lights. Light renderers'
 //!   `PointLight`s are Solari lights already.
-//! - **Shadows.** The sprite's opacity cuts the proxy (alpha mask at
-//!   [`ALPHA_CUTOFF`]): shadow rays are blocked where the sprite is opaque.
+//! - **Shadows.** The sprite's opacity is stochastic for rays: a hit is kept
+//!   with probability alpha (hashed from the hit point and frame time), so
+//!   shadows, reflections and what shows behind a sprite match its blend on
+//!   average: smoke casts soft, partial shadows (the fallback's alpha mask at
+//!   [`ALPHA_CUTOFF`] only makes the BLAS non-opaque). Additive sprites
+//!   occlude by their alpha too (Solari treats shadow and path rays alike),
+//!   so a light renderer's lights inside a dense fire are partly shadowed by
+//!   its own flames.
+//! - **Custom materials** (`material: "x.wesl"`, e.g. imported Unreal
+//!   materials) cannot run at ray hits: rays see the built-in soft sprite (or
+//!   ribbon edges) tinted by the particle colour.
 //!
 //! Seen directly, particles keep drawing in the raster transparent pass,
 //! which runs after Solari's lighting and is depth tested against its
@@ -323,7 +332,10 @@ fn sync_proxies(
                 CookedRenderer::Sprite(s) => {
                     let slots = max_particles.clamp(1, MAX_SLOTS);
                     let data = images.add(data_image(SPRITE_TEXELS * slots));
-                    let sprite = match &s.texture {
+                    // A custom material reads its texture its own way (imported
+                    // materials pack several into an atlas): rays see the
+                    // built-in soft sprite tinted by the particle colour instead.
+                    let sprite = match s.texture.as_ref().filter(|_| s.material.is_none()) {
                         Some(path) => asset_server.load::<Image>(path.clone()),
                         None => {
                             let key = (s.sub_image_size[0].max(1), s.sub_image_size[1].max(1));
@@ -350,7 +362,11 @@ fn sync_proxies(
                     let slots = ribbon_slots(max_particles, rb.tessellation_factor);
                     let data = images.add(data_image(RIBBON_TEXELS * slots));
                     let material = ParticleRtMaterial {
-                        sprite: rb.texture.as_ref().map(|path| asset_server.load::<Image>(path.clone())),
+                        sprite: rb
+                            .texture
+                            .as_ref()
+                            .filter(|_| rb.material.is_none())
+                            .map(|path| asset_server.load::<Image>(path.clone())),
                         data: data.clone(),
                         // Ribbons are unlit: they show (and emit) their colour.
                         emissive: true,

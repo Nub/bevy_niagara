@@ -12,6 +12,8 @@ fx_render = { path = "../fx_render" }
 bevy = { workspace = true, features = ["bevy_solari"] }
 bytemuck.workspace = true
 png = "0.17"
+serde.workspace = true
+ron.workspace = true
 
 [[bin]]
 name = "fxsolari"

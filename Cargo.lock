@@ -2603,6 +2603,8 @@ dependencies = [
  "fx_gpu",
  "fx_render",
  "png 0.17.16",
+ "ron",
+ "serde",
 ]
 
 [[package]]

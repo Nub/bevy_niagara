@@ -1,0 +1,25 @@
+// Solari verification scene for fxsolari (`fxsolari shot|clip|bench --scene effects/scenes/solari_test.scene.ron`).
+//
+// fxsolari builds the room: a polished floor (glossy reflections), a white
+// back wall with a mirror on its right, a left wall, two occluders (a pillar
+// between the fires, a crate by the wall) and a dim ceiling light. This file
+// places the effects; every sprite and ribbon renderer is ray traced in
+// `--mode on` (mesh renderers have no proxy yet, so none are used here).
+//
+// Paths are relative to the repository root. `optional` effects are skipped
+// when missing: NS_Fire_Big is the git-ignored Fab import
+// (`sh testdata/fab_assets.sh`, then `sh testdata/fab_render.sh perfect_fire`),
+// looked up in the main checkout when a worktree lacks it.
+(
+    camera: (from: (0.6, 2.1, 7.6), to: (-0.1, 1.1, -1.0)),
+    effects: [
+        // Imported Niagara fire (custom erosion materials, light renderer).
+        (file: "testdata/fab/_out/perfect_fire/NS_Fire_Big/NS_Fire_Big.fx.ron", at: (-2.9, 0.0, -1.6), optional: true),
+        // Library campfire: additive flames and embers, lit alpha smoke (shadows), light renderer.
+        (file: "effects/library/campfire.fx.ron", at: (0.2, 0.0, -1.0)),
+        // Ribbon: the sword trail, glowing on the floor and the wall.
+        (file: "crates/fx_solari/scenes/sword_trail_rt.fx.ron", at: (1.9, -0.25, 0.6)),
+        // Sparks behind the camera: seen only in the mirror and the floor.
+        (file: "crates/fx_solari/scenes/sparks_rt.fx.ron", at: (2.4, 0.0, 9.6), yaw: 180.0),
+    ],
+)
