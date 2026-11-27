@@ -29,7 +29,6 @@ mod controls;
 mod hud;
 #[cfg(not(target_arch = "wasm32"))]
 mod record;
-mod safari;
 mod world;
 
 use std::path::PathBuf;
@@ -510,7 +509,6 @@ fn main() {
         record::add(&mut app);
     }
     app.add_observer(play_fox_run);
-    safari::plugin(&mut app);
     app.run();
 }
 
