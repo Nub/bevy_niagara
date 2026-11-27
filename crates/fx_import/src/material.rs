@@ -217,7 +217,10 @@ fn undelta_rows(data: &[u8], w: u32, h: u32, format: &str) -> Result<Vec<u8>, St
 }
 
 pub fn read_texture(store: &mut Store, object_path: &str) -> Result<Image, String> {
-    let l = store.load(object_path).ok_or_else(|| format!("package of `{object_path}` not found"))?;
+    let l = store.load(object_path).ok_or_else(|| match store.resolve(object_path) {
+        Some(f) => format!("package of `{object_path}` unreadable ({})", Package::read(&std::fs::read(&f).unwrap_or_default()).err().map(|e| e.to_string()).unwrap_or_default()),
+        None => format!("package of `{object_path}` not found"),
+    })?;
     let (_, name) = split_object_path(object_path);
     let i = l.export(&name).ok_or("no texture export")?;
     let props = l.props(i);

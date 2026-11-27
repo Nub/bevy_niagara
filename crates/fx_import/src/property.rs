@@ -409,11 +409,33 @@ pub fn read_tagged_properties(r: &mut Reader, ctx: &mut Ctx, object: bool) -> Re
     Ok(props)
 }
 
+thread_local! {
+    /// Read FText's culture-invariant flag whatever the versions say.
+    static FORCE_TEXT_INVARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The value of a top-level tag, read from exactly its `size` bytes. A
 /// value that fails to decode is kept raw and recorded as a problem.
 fn top_value(r: &mut Reader, tag: &Tag, ctx: &mut Ctx) -> Value {
     let start = r.pos();
-    let res = (|| -> Result<Value> {
+    let first = top_value_once(r, tag, ctx, start);
+    let texty = tag.ty.name == "TextProperty" || (tag.ty.name == "ArrayProperty" && tag.ty.inner_name() == Some("TextProperty"));
+    if texty && first.is_err() && ctx.v.editor_object.is_none() && r.seek(start).is_ok() {
+        FORCE_TEXT_INVARIANT.with(|f| f.set(true));
+        let second = top_value_once(r, tag, ctx, start);
+        FORCE_TEXT_INVARIANT.with(|f| f.set(false));
+        if second.is_ok() {
+            return top_value_done(r, tag, ctx, start, second);
+        }
+        let _ = r.seek(start);
+        let first = top_value_once(r, tag, ctx, start);
+        return top_value_done(r, tag, ctx, start, first);
+    }
+    top_value_done(r, tag, ctx, start, first)
+}
+
+fn top_value_once(r: &mut Reader, tag: &Tag, ctx: &mut Ctx, _start: usize) -> Result<Value> {
+    (|| -> Result<Value> {
         if tag.skipped {
             return Ok(Value::Raw {
                 bytes: Vec::new(),
@@ -434,7 +456,10 @@ fn top_value(r: &mut Reader, tag: &Tag, ctx: &mut Ctx) -> Value {
             return Err(r.err(format!("{} bytes left after the value", r.remaining())));
         }
         Ok(v)
-    })();
+    })()
+}
+
+fn top_value_done(r: &mut Reader, tag: &Tag, ctx: &mut Ctx, start: usize, res: Result<Value>) -> Value {
     match res {
         Ok(v) => v,
         Err(e) => {
@@ -545,7 +570,10 @@ fn read_text(r: &mut Reader, ctx: &Ctx, owns_rest: bool) -> Result<Text> {
     let history = r.i8()?;
     Ok(match history {
         -1 => {
-            let invariant = if ctx.v.editor_object.unwrap_or(0) >= custom::EDITOR_CULTURE_INVARIANT_TEXT && r.bool32()? {
+            // Some UE 5.8 packages leave the EditorObject version out but
+            // still write the flag: `top_value` retries with it forced.
+            let has_flag = ctx.v.editor_object.unwrap_or(0) >= custom::EDITOR_CULTURE_INVARIANT_TEXT || FORCE_TEXT_INVARIANT.with(|f| f.get());
+            let invariant = if has_flag && r.bool32()? {
                 Some(r.fstring()?)
             } else {
                 None
