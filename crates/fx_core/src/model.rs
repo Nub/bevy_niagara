@@ -238,6 +238,13 @@ pub struct SpriteSource {
     /// Visible to Solari's rays (reflections, bounce light, shadows); emissive
     /// sprites light the scene. Off by default, as in Niagara.
     pub ray_tracing: bool,
+    /// Most particles of the emitter its rays see: past it an even subset
+    /// stands for them all (raised opacity), so rays cross fewer quads.
+    pub ray_tracing_max_particles: u32,
+    /// Solari also samples the emissive sprites as lights (sharper, less
+    /// noisy light; costs more). Off: they light the scene only where
+    /// bounce rays hit them, and light renderers give the direct light.
+    pub ray_tracing_lights: bool,
     /// Asset path; `None` uses the built-in soft round sprite.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -270,6 +277,8 @@ impl Default for SpriteSource {
             sort_mode: SortMode::default(),
             soft_particle_fade_distance: 0.0,
             ray_tracing: false,
+            ray_tracing_max_particles: 24,
+            ray_tracing_lights: false,
             texture: None,
             material: None,
             span: Span::default(),
@@ -293,6 +302,8 @@ pub struct RibbonSource {
     /// Visible to Solari's rays (reflections, bounce light, shadows); the
     /// (emissive) ribbon lights the scene. Off by default, as in Niagara.
     pub ray_tracing: bool,
+    /// Solari also samples the ribbon as a light (see the sprite setting).
+    pub ray_tracing_lights: bool,
     /// Asset path; `None` draws plain colour.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -320,6 +331,7 @@ impl Default for RibbonSource {
             link_order: RibbonLinkOrderMode::default(),
             tessellation_factor: 1,
             ray_tracing: false,
+            ray_tracing_lights: false,
             texture: None,
             material: None,
             span: Span::default(),

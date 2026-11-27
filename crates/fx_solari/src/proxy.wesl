@@ -69,13 +69,23 @@ fn write_texel(t: u32, value: vec4<f32>) {
 fn proxy(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = id.x;
     if k >= p.slots { return; }
+    // Ray-tracing LOD: past `p.slots` living particles, an even subset of
+    // them is traced (slot k takes every `weight`-th one). The hit function
+    // raises the subset's opacity to the coverage of `weight` layers and its
+    // emission to keep the light it gives, so shadows, reflections and light
+    // match on average while rays cross `weight` times fewer quads.
+    let alive = draw_args[1];
+    let used = min(alive, p.slots);
+    let weight = f32(alive) / f32(max(used, 1u));
     // Dead slots, and particles too faint to see (colour alpha under 2%):
     // every ray crossing a quad runs the alpha test, so skip what adds nothing.
     var faint = false;
-    if k < draw_args[1] {
-        faint = pw(9u, indices[k]) < 0.02;
+    var i = 0u;
+    if k < used {
+        i = indices[min(u32((f32(k) + 0.5) * weight), alive - 1u)];
+        faint = pw(9u, i) < 0.02;
     }
-    if k >= draw_args[1] || faint {
+    if k >= used || faint {
         // At the effect's origin, not the world's: keeps the BLAS bounds tight.
         let anchor = p.world_from_local[3].xyz;
         for (var v = 0u; v < 8u; v++) {
@@ -85,7 +95,6 @@ fn proxy(@builtin(global_invocation_id) id: vec3<u32>) {
         write_texel(2u * k + 1u, vec4<f32>(0.0));
         return;
     }
-    let i = indices[k];
     let m = p.world_from_local;
     let pos = (m * vec4<f32>(pw(0u, i), pw(1u, i), pw(2u, i), 1.0)).xyz;
     let vel = (m * vec4<f32>(pw(3u, i), pw(4u, i), pw(5u, i), 0.0)).xyz;
@@ -117,5 +126,5 @@ fn proxy(@builtin(global_invocation_id) id: vec3<u32>) {
         write_vertex(8u * k + 4u + c, corner.world - corner.normal * 0.002, -corner.normal, corner.right);
     }
     write_texel(2u * k, vec4<f32>(pw(6u, i), pw(7u, i), pw(8u, i), pw(9u, i)));
-    write_texel(2u * k + 1u, vec4<f32>(pw(16u, i), 0.0, 0.0, 0.0));
+    write_texel(2u * k + 1u, vec4<f32>(pw(16u, i), weight, 0.0, 0.0));
 }

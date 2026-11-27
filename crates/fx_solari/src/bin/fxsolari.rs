@@ -8,6 +8,8 @@
 //! fxsolari shot  --out FILE.png [--mode raster|off|on] [--size WxH] [--frames N] [--accumulate N]
 //!                [--effect FILE]   (another effect instead of the fire and sparks)
 //! fxsolari bench [--mode none|off|on] [--size WxH] [--frames N] [--copies N]
+//! (shot, clip and bench) [--rt-max N] [--rt-lights]: every sprite traces at most N
+//!   particles; every sprite and ribbon is also sampled as a Solari light
 //!
 //! Modes: `raster` no Solari; `none` Solari without `FxSolariPlugin`; `off`
 //! Solari with the plugin and every renderer's `ray_tracing` forced off; `on`
@@ -52,7 +54,7 @@ use fx_core::cook::{CookedRenderer, CookedSystem};
 use fx_render::{FxClock, FxPlugin, FxReady, ParticleEffect};
 use fx_solari::FxSolariPlugin;
 
-const USAGE: &str = "usage: fxsolari shot --out FILE.png [--mode raster|off|on] [--size WxH] [--frames N] [--accumulate N] [--effect FILE] [--scene FILE]\n       fxsolari clip --out DIR [--count N] [same options as shot]\n       fxsolari bench [--mode none|off|on] [--size WxH] [--frames N] [--copies N]";
+const USAGE: &str = "usage: fxsolari shot --out FILE.png [--mode raster|off|on] [--size WxH] [--frames N] [--accumulate N] [--effect FILE] [--scene FILE]\n       fxsolari clip --out DIR [--count N] [same options as shot]\n       fxsolari bench [--mode none|off|on] [--size WxH] [--frames N] [--copies N]\n       (all) [--rt-max N] [--rt-lights]";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
@@ -78,6 +80,10 @@ struct Options {
     copies: u32,
     /// Another effect instead of the fire and sparks.
     effect: Option<PathBuf>,
+    /// Overrides every sprite renderer's `ray_tracing_max_particles`.
+    rt_max: Option<u32>,
+    /// Turns `ray_tracing_lights` on for every sprite and ribbon renderer.
+    rt_lights: bool,
 }
 
 fn parse() -> Result<Options, String> {
@@ -101,6 +107,8 @@ fn parse() -> Result<Options, String> {
         accumulate: 1,
         copies: 1,
         effect: None,
+        rt_max: None,
+        rt_lights: false,
     };
     while let Some(a) = args.next() {
         let mut val = || args.next().ok_or(format!("{a} needs a value"));
@@ -127,6 +135,11 @@ fn parse() -> Result<Options, String> {
             "--scene" => o.scene = Some(PathBuf::from(val()?)),
             "--count" => o.clip = val()?.parse().map_err(|e| format!("--count: {e}"))?,
             "--copies" => o.copies = val()?.parse().map_err(|e| format!("--copies: {e}"))?,
+            "--rt-max" => {
+                let n: u32 = val()?.parse().map_err(|e| format!("--rt-max: {e}"))?;
+                o.rt_max = Some(n.max(1));
+            }
+            "--rt-lights" => o.rt_lights = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
         }
@@ -136,6 +149,9 @@ fn parse() -> Result<Options, String> {
     }
     Ok(o)
 }
+
+/// `--rt-max` and `--rt-lights`, applied to every effect loaded.
+static RT_OVERRIDE: std::sync::OnceLock<(Option<u32>, bool)> = std::sync::OnceLock::new();
 
 fn scenes_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes")
@@ -153,11 +169,21 @@ fn load_path(path: &Path, ray_tracing: bool) -> Result<CookedSystem, String> {
     let mut sys = checked
         .cooked
         .ok_or_else(|| format!("{} has errors", path.display()))?;
+    let rt = RT_OVERRIDE.get().copied().unwrap_or_default();
     for e in &mut sys.emitters {
         for r in &mut e.renderers {
             match r {
-                CookedRenderer::Sprite(s) => s.ray_tracing &= ray_tracing,
-                CookedRenderer::Ribbon(s) => s.ray_tracing &= ray_tracing,
+                CookedRenderer::Sprite(s) => {
+                    s.ray_tracing &= ray_tracing;
+                    s.ray_tracing_lights |= rt.1;
+                    if let Some(n) = rt.0 {
+                        s.ray_tracing_max_particles = n;
+                    }
+                }
+                CookedRenderer::Ribbon(s) => {
+                    s.ray_tracing &= ray_tracing;
+                    s.ray_tracing_lights |= rt.1;
+                }
                 _ => {}
             }
         }
@@ -306,6 +332,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    RT_OVERRIDE.set((o.rt_max, o.rt_lights)).ok();
     let rt = o.mode == Mode::On;
     let extra = match o.effect.as_deref().map(|p| load_path(p, rt)).transpose() {
         Ok(e) => e,

@@ -329,6 +329,19 @@ fn decode_sprite(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option
     if let Some(v) = f.take("ray_tracing") {
         s.ray_tracing = boolean(v, "ray_tracing", d).unwrap_or_default();
     }
+    if let Some(v) = f.take("ray_tracing_max_particles") {
+        s.ray_tracing_max_particles = whole_in_range(
+            v,
+            "ray_tracing_max_particles",
+            1..=16383,
+            "write e.g. `ray_tracing_max_particles: 24` (particles its rays see; more look closer to raster but cost more)",
+            d,
+        )
+        .unwrap_or(s.ray_tracing_max_particles);
+    }
+    if let Some(v) = f.take("ray_tracing_lights") {
+        s.ray_tracing_lights = boolean(v, "ray_tracing_lights", d).unwrap_or_default();
+    }
     if let Some(v) = f.take("texture") {
         s.texture = asset_path(
             v,
@@ -396,6 +409,9 @@ fn decode_ribbon(body: Option<&SValue>, whole: &SValue, d: &mut Diags) -> Option
     }
     if let Some(v) = f.take("ray_tracing") {
         r.ray_tracing = boolean(v, "ray_tracing", d).unwrap_or_default();
+    }
+    if let Some(v) = f.take("ray_tracing_lights") {
+        r.ray_tracing_lights = boolean(v, "ray_tracing_lights", d).unwrap_or_default();
     }
     if let Some(v) = f.take("texture") {
         r.texture = asset_path(

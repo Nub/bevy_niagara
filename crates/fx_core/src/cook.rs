@@ -285,6 +285,10 @@ pub struct CookedSprite {
     /// Visible to Solari's rays (reflections, bounce light, shadows); emissive
     /// sprites light the scene. Off by default, as in Niagara.
     pub ray_tracing: bool,
+    /// Most particles traced (an even subset stands for the rest).
+    pub ray_tracing_max_particles: u32,
+    /// Solari samples the emissive sprites as lights.
+    pub ray_tracing_lights: bool,
     /// Asset path; `None` uses the built-in soft round sprite.
     pub texture: Option<String>,
     /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
@@ -312,6 +316,8 @@ fn cook_sprite(s: &SpriteSource) -> CookedSprite {
         sort_mode: s.sort_mode,
         soft_particle_fade_distance: s.soft_particle_fade_distance,
         ray_tracing: s.ray_tracing,
+        ray_tracing_max_particles: s.ray_tracing_max_particles,
+        ray_tracing_lights: s.ray_tracing_lights,
         texture: s.texture.clone(),
         material: s.material.clone(),
     }
@@ -332,6 +338,8 @@ pub struct CookedRibbon {
     pub tessellation_factor: u32,
     /// In Solari's ray-traced scene (needs fx_solari).
     pub ray_tracing: bool,
+    /// Solari samples the ribbon as a light.
+    pub ray_tracing_lights: bool,
     /// Asset path; `None` draws plain colour.
     pub texture: Option<String>,
     /// Asset path of a custom WESL fragment shader; `None` uses the built-in one.
@@ -354,6 +362,7 @@ fn cook_ribbon(r: &RibbonSource) -> CookedRibbon {
         link_order: r.link_order,
         tessellation_factor: r.tessellation_factor,
         ray_tracing: r.ray_tracing,
+        ray_tracing_lights: r.ray_tracing_lights,
         texture: r.texture.clone(),
         material: r.material.clone(),
     }

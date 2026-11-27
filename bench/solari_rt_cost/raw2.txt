@@ -1,0 +1,125 @@
+== cap24
+render/auxiliary_views 0.0020
+render/bin_unpacking 0.0113
+render/blas_build 0.1833
+render/clustering 0.0932
+render/copy_deferred_lighting_id 0.0246
+render/early deferred prepass 0.0799
+render/early prepass 0.0184
+render/early_mesh_preprocessing 0.0123
+render/fx_cull_sort 0.0297
+render/fx_lights 0.0010
+render/fx_ribbon_build 0.0010
+render/fx_rt_proxy 0.0850
+render/fx_sim 0.1147
+render/light_selection 0.0410
+render/main_opaque_pass_3d 0.0020
+render/main_transparent_pass_3d 0.0287
+render/per_view_shadow_pass 0.0010
+render/setup_tlas_instances 0.0082
+render/solari_deform/blas_build 0.0338
+render/solari_deform/skinning 0.0072
+render/solari_lighting/lighting 1.3967
+render/solari_lighting/lighting/initial_path 1.3957
+render/solari_lighting/presample_light_tiles 0.0154
+render/solari_lighting/world_cache 0.1556
+render/solari_lighting/world_cache/decay_and_compact 0.0768
+render/solari_lighting/world_cache/update 0.0758
+render/tlas_build 0.0522
+render/tonemapping 0.0686
+render/uniform_allocation 0.0123
+render/upscaling 0.0317
+== cap32
+render/auxiliary_views 0.0020
+render/bin_unpacking 0.0113
+render/blas_build 0.1649
+render/clustering 0.0932
+render/copy_deferred_lighting_id 0.0246
+render/early deferred prepass 0.0799
+render/early prepass 0.0184
+render/early_mesh_preprocessing 0.0133
+render/fx_cull_sort 0.0297
+render/fx_lights 0.0010
+render/fx_ribbon_build 0.0010
+render/fx_rt_proxy 0.0870
+render/fx_sim 0.1116
+render/light_selection 0.0410
+render/main_opaque_pass_3d 0.0020
+render/main_transparent_pass_3d 0.0287
+render/per_view_shadow_pass 0.0010
+render/setup_tlas_instances 0.0082
+render/solari_deform/blas_build 0.0348
+render/solari_deform/skinning 0.0072
+render/solari_lighting/lighting 1.4643
+render/solari_lighting/lighting/initial_path 1.4633
+render/solari_lighting/presample_light_tiles 0.0154
+render/solari_lighting/world_cache 0.1556
+render/solari_lighting/world_cache/decay_and_compact 0.0768
+render/solari_lighting/world_cache/update 0.0758
+render/tlas_build 0.0522
+render/tonemapping 0.0686
+render/uniform_allocation 0.0123
+render/upscaling 0.0317
+== off2
+render/auxiliary_views 0.0010
+render/bin_unpacking 0.0113
+render/blas_build 0.1311
+render/clustering 0.0922
+render/copy_deferred_lighting_id 0.0246
+render/early deferred prepass 0.0799
+render/early prepass 0.0184
+render/early_mesh_preprocessing 0.0123
+render/fx_cull_sort 0.0287
+render/fx_lights 0.0020
+render/fx_ribbon_build 0.0010
+render/fx_sim 0.1116
+render/light_selection 0.0420
+render/main_opaque_pass_3d 0.0020
+render/main_transparent_pass_3d 0.0287
+render/per_view_shadow_pass 0.0010
+render/setup_tlas_instances 0.0072
+render/solari_lighting/lighting 1.0353
+render/solari_lighting/lighting/initial_path 1.0332
+render/solari_lighting/presample_light_tiles 0.0154
+render/solari_lighting/world_cache 0.1526
+render/solari_lighting/world_cache/decay_and_compact 0.0768
+render/solari_lighting/world_cache/update 0.0727
+render/tlas_build 0.0522
+render/tonemapping 0.0676
+render/uniform_allocation 0.0123
+render/upscaling 0.0317
+[2m2026-11-27T07:05:27.423538Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "NVIDIA GeForce RTX 3080", vendor: 4318, device: 8710, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "595.104.02", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[2m2026-11-27T07:05:27.608535Z[0m [32m INFO[0m [2mbevy_pbr::cluster[0m[2m:[0m GPU clustering is supported on this device.
+[2m2026-11-27T07:05:27.608556Z[0m [32m INFO[0m [2mbevy_render::batching::gpu_preprocessing[0m[2m:[0m GPU preprocessing is fully supported on this device.
+[2m2026-11-27T07:05:27.608869Z[0m [32m INFO[0m [2mbevy_solari::scene::micromap[0m[2m:[0m Solari micromaps: GPU reports opacity micromaps (VK_EXT_opacity_micromap): yes, displacement micromaps (VK_NV_displacement_micromap): no; enabled on the device: no / no. Opacity path: software (fully opaque pairs use the opaque BLAS, the rest the shader alpha test). Displacement path: software (pre-tessellated geometry).
+[2m2026-11-27T07:05:27.612479Z[0m [33m WARN[0m [2mbevy_light[0m[2m:[0m Point lights and/or spot lights are present, but no entity has `ShadowLodOrigin`, and no camera that renders to the window has been found. Consider using the `ShadowLodOrigin` component to set a LOD origin.
+[2m2026-11-27T07:05:27.631790Z[0m [33m WARN[0m [2mbevy_solari::scene::extract[0m[2m:[0m A RaytracingMesh3d entity has neither a MeshMaterial3d<StandardMaterial> nor a RaytracingMaterialProxy (register its material with SolariMaterialPlugin); it is left out of ray tracing
+[2m2026-11-27T07:05:27.752647Z[0m [32m INFO[0m [2mbevy_solari::realtime::node[0m[2m:[0m Solari: two-sided (leaf) lighting off
+[2m2026-11-27T07:05:27.833596Z[0m [32m INFO[0m [2mbevy_solari::realtime::node[0m[2m:[0m Solari: two-sided (leaf) lighting on
+/tmp/t34/v_before.png
+[2m2026-11-27T07:05:30.962888Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "NVIDIA GeForce RTX 3080", vendor: 4318, device: 8710, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "595.104.02", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[2m2026-11-27T07:05:31.107604Z[0m [32m INFO[0m [2mbevy_pbr::cluster[0m[2m:[0m GPU clustering is supported on this device.
+[2m2026-11-27T07:05:31.107630Z[0m [32m INFO[0m [2mbevy_render::batching::gpu_preprocessing[0m[2m:[0m GPU preprocessing is fully supported on this device.
+[2m2026-11-27T07:05:31.107910Z[0m [32m INFO[0m [2mbevy_solari::scene::micromap[0m[2m:[0m Solari micromaps: GPU reports opacity micromaps (VK_EXT_opacity_micromap): yes, displacement micromaps (VK_NV_displacement_micromap): no; enabled on the device: no / no. Opacity path: software (fully opaque pairs use the opaque BLAS, the rest the shader alpha test). Displacement path: software (pre-tessellated geometry).
+[2m2026-11-27T07:05:31.112520Z[0m [33m WARN[0m [2mbevy_light[0m[2m:[0m Point lights and/or spot lights are present, but no entity has `ShadowLodOrigin`, and no camera that renders to the window has been found. Consider using the `ShadowLodOrigin` component to set a LOD origin.
+[2m2026-11-27T07:05:31.132110Z[0m [33m WARN[0m [2mbevy_solari::scene::extract[0m[2m:[0m A RaytracingMesh3d entity has neither a MeshMaterial3d<StandardMaterial> nor a RaytracingMaterialProxy (register its material with SolariMaterialPlugin); it is left out of ray tracing
+[2m2026-11-27T07:05:31.170486Z[0m [33m WARN[0m [2mbevy_shader::shader_cache[0m[2m:[0m Shader `embedded://bevy_solari/realtime/presample_light_tiles.wesl` has an unresolved import:
+error: module not found: `bevy_solari::realtime::bindings` (no shader registered for this module path)
+ |
+ = note: in unknown module
+[2m2026-11-27T07:05:31.255515Z[0m [32m INFO[0m [2mbevy_solari::realtime::node[0m[2m:[0m Solari: two-sided (leaf) lighting off
+[2m2026-11-27T07:05:31.343681Z[0m [32m INFO[0m [2mbevy_solari::realtime::node[0m[2m:[0m Solari: two-sided (leaf) lighting on
+/tmp/t34/v_default.png
+[2m2026-11-27T07:05:34.290240Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "NVIDIA GeForce RTX 3080", vendor: 4318, device: 8710, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "595.104.02", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[2m2026-11-27T07:05:34.431703Z[0m [32m INFO[0m [2mbevy_pbr::cluster[0m[2m:[0m GPU clustering is supported on this device.
+[2m2026-11-27T07:05:34.431725Z[0m [32m INFO[0m [2mbevy_render::batching::gpu_preprocessing[0m[2m:[0m GPU preprocessing is fully supported on this device.
+[2m2026-11-27T07:05:34.432004Z[0m [32m INFO[0m [2mbevy_solari::scene::micromap[0m[2m:[0m Solari micromaps: GPU reports opacity micromaps (VK_EXT_opacity_micromap): yes, displacement micromaps (VK_NV_displacement_micromap): no; enabled on the device: no / no. Opacity path: software (fully opaque pairs use the opaque BLAS, the rest the shader alpha test). Displacement path: software (pre-tessellated geometry).
+[2m2026-11-27T07:05:34.437992Z[0m [33m WARN[0m [2mbevy_light[0m[2m:[0m Point lights and/or spot lights are present, but no entity has `ShadowLodOrigin`, and no camera that renders to the window has been found. Consider using the `ShadowLodOrigin` component to set a LOD origin.
+[2m2026-11-27T07:05:34.456735Z[0m [33m WARN[0m [2mbevy_solari::scene::extract[0m[2m:[0m A RaytracingMesh3d entity has neither a MeshMaterial3d<StandardMaterial> nor a RaytracingMaterialProxy (register its material with SolariMaterialPlugin); it is left out of ray tracing
+[2m2026-11-27T07:05:34.487616Z[0m [33m WARN[0m [2mbevy_shader::shader_cache[0m[2m:[0m Shader `embedded://bevy_solari/realtime/presample_light_tiles.wesl` has an unresolved import:
+error: module not found: `bevy_solari::scene::sampling` (no shader registered for this module path)
+ |
+ = note: in unknown module
+[2m2026-11-27T07:05:34.584920Z[0m [32m INFO[0m [2mbevy_solari::realtime::node[0m[2m:[0m Solari: two-sided (leaf) lighting off
+[2m2026-11-27T07:05:34.664622Z[0m [32m INFO[0m [2mbevy_solari::realtime::node[0m[2m:[0m Solari: two-sided (leaf) lighting on
+/tmp/t34/v_lights.png

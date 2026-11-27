@@ -43,6 +43,8 @@ fn raytracing_hit(input: RaytracingHitInput) -> RaytracingSurface {
     let flags = u32(input.params[0].w);
 
     var texel: vec4<f32>;
+    // LOD weight: how many particles this traced quad stands for (proxy.wesl).
+    var weight = 1.0;
     if (flags & FLAG_RIBBON) != 0u {
         let t = 3u * slot;
         let color = mix(texel_at(data_id, t, width), texel_at(data_id, t + 1u, width), quad_uv.x);
@@ -56,6 +58,7 @@ fn raytracing_hit(input: RaytracingHitInput) -> RaytracingSurface {
         let t = 2u * slot;
         let color = texel_at(data_id, t, width);
         let extra = texel_at(data_id, t + 1u, width);
+        weight = max(extra.y, 1.0);
         let frame = flipbook(extra.x, quad_uv, input.params[0].xy, input.params[0].z > 0.5);
         let tex = mix(
             sample_material_texture(input, 0u, frame.uv0),
@@ -76,14 +79,18 @@ fn raytracing_hit(input: RaytracingHitInput) -> RaytracingSurface {
     // stops shadow and path rays alike, so a surface reflections can see also
     // casts shadows. (Kept 4x less often but 4x brighter, they doubled the
     // per-frame noise for 3% more light past them.)
-    let a = clamp(texel.a, 0.0, 1.0);
+    let a1 = clamp(texel.a, 0.0, 1.0);
+    // A quad standing for `weight` particles covers as `weight` layers of
+    // them would, and emits `weight` times their light over that coverage.
+    let a = 1.0 - pow(1.0 - a1, weight);
+    let gain = select(1.0, weight * a1 / a, a > 0.0);
     let kept = a > 1.0 / 255.0 && hit_random(input.world_position, input.time) < a;
     surface.alpha = select(0.0, 1.0, kept);
     if (flags & FLAG_EMISSIVE) != 0u {
         // Kept hits emit the full colour: on average colour x alpha, as the
         // raster blend adds (additive) or covers (alpha) it.
         surface.base_color = vec3<f32>(0.0);
-        surface.emissive = texel.rgb * input.params[1].x;
+        surface.emissive = texel.rgb * (input.params[1].x * gain);
     } else {
         surface.base_color = texel.rgb;
         surface.emissive = vec3<f32>(0.0);

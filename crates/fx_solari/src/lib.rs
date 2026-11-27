@@ -15,8 +15,14 @@
 //!   colour and opacity with the raster shader's WGSL from the particle's
 //!   colour and age (a data texture the proxy pass writes) and its texture.
 //! - **Emissive sprites light the scene.** Unlit and additive sprites are
-//!   emissive surfaces, which Solari samples as lights. Light renderers'
-//!   `PointLight`s are Solari lights already.
+//!   emissive surfaces: bounce rays that hit them pick up their light. With
+//!   `ray_tracing_lights` Solari also samples them as lights (less noise,
+//!   about 0.5-1 ms more for a campfire). Light renderers' `PointLight`s are
+//!   Solari lights already.
+//! - **Ray-tracing LOD.** Each ray crossing a quad runs the hit function, so
+//!   a sprite emitter traces at most `ray_tracing_max_particles` (default 24):
+//!   an even subset whose opacity is raised to the coverage of the particles
+//!   it stands for, with emission scaled to keep their light.
 //! - **Shadows.** The sprite's opacity is stochastic for rays: a hit is kept
 //!   with probability alpha (hashed from the hit point and frame time), so
 //!   shadows, reflections and what shows behind a sprite match its blend on
@@ -135,6 +141,10 @@ pub struct ParticleRtMaterial {
     pub radiance_scale: f32,
     /// A ribbon proxy (`ribbon_proxy.wesl`) instead of sprites.
     pub ribbon: bool,
+    /// Emissive and listed as a Solari light (`ray_tracing_lights`): light
+    /// sampling aims rays at it. Otherwise it lights the scene only where
+    /// bounce rays hit it (unbiased, noisier, much cheaper).
+    pub lights: bool,
 }
 
 impl Material for ParticleRtMaterial {}
@@ -151,7 +161,7 @@ impl RaytracingMaterial for ParticleRtMaterial {
                 base_color: if self.emissive { Color::BLACK } else { Color::WHITE },
                 // Non-zero so Solari lists it as a light; the hit function
                 // gives the real emission.
-                emissive: if self.emissive {
+                emissive: if self.emissive && self.lights {
                     LinearRgba::rgb(0.1, 0.05, 0.02) * self.radiance_scale
                 } else {
                     LinearRgba::BLACK
@@ -330,7 +340,7 @@ fn sync_proxies(
             let max_particles = fx.system.emitters[ei].max_particles;
             let (slots, data, material, settings) = match r {
                 CookedRenderer::Sprite(s) => {
-                    let slots = max_particles.clamp(1, MAX_SLOTS);
+                    let slots = max_particles.clamp(1, MAX_SLOTS).min(s.ray_tracing_max_particles.max(1));
                     let data = images.add(data_image(SPRITE_TEXELS * slots));
                     // A custom material reads its texture its own way (imported
                     // materials pack several into an atlas): rays see the
@@ -355,6 +365,7 @@ fn sync_proxies(
                         sub_uv_blending: s.sub_uv_blending,
                         radiance_scale,
                         ribbon: false,
+                        lights: s.ray_tracing_lights,
                     };
                     (slots, data, material, ProxyRenderer::Sprite(s.clone()))
                 }
@@ -375,6 +386,7 @@ fn sync_proxies(
                         sub_uv_blending: false,
                         radiance_scale,
                         ribbon: true,
+                        lights: rb.ray_tracing_lights,
                     };
                     (slots, data, material, ProxyRenderer::Ribbon(rb.clone()))
                 }

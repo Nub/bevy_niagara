@@ -289,6 +289,18 @@ pub const SPRITE_FIELDS: &[RendererField] = &[
         doc: "Solari: seen in reflections and bounce light, casts shadows, emissive sprites light the scene (needs fx_solari)",
     },
     RendererField {
+        name: "ray_tracing_max_particles",
+        form: "1..=16383",
+        default: "24",
+        doc: "Solari: most particles rays see; an even subset with raised opacity stands for the rest",
+    },
+    RendererField {
+        name: "ray_tracing_lights",
+        form: "bool",
+        default: "false",
+        doc: "Solari: also sample emissive sprites as lights (less noise, costs more); off = they light only via bounce rays",
+    },
+    RendererField {
         name: "texture",
         form: "\"asset/path.png\"",
         default: "none",
@@ -351,6 +363,12 @@ pub const RIBBON_FIELDS: &[RendererField] = &[
         "bool",
         "false",
         "Solari: seen in reflections and bounce light, casts shadows, lights the scene (needs fx_solari)",
+    ),
+    field(
+        "ray_tracing_lights",
+        "bool",
+        "false",
+        "Solari: also sample the ribbon as a light (less noise, costs more); off = it lights only via bounce rays",
     ),
     field(
         "texture",
