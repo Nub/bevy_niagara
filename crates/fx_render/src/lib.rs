@@ -1700,6 +1700,8 @@ fn prepare_effects(
                     draw.world_space = !sys.emitters[rd.emitter].local_space;
                     let (tv, ts) = renderer_texture(wd, &queue, &mut state.builtin, loaded, &rd.settings);
                     let particles = batch.gpu.particles(rd.emitter);
+                    // Sorted sprites read the cull's payload at binding 5.
+                    let extra0 = draw.payload.as_ref().unwrap_or(extra0);
                     let bind_group = particle_bind_group(
                         wd,
                         &layout,
@@ -2296,6 +2298,7 @@ fn simulate(
             continue;
         }
         for rd in &mut batch.draws {
+            let mut payload = false;
             for view in &views {
                 if let Some(vs) = rd.views.get_mut(&view.retained_view_entity) {
                     let vp = local_view(view, &Mat4::IDENTITY);
@@ -2306,7 +2309,12 @@ fn simulate(
                         &batch.copies[rd.emitter],
                         &vp,
                     );
+                    payload |= vs.draw.payload_used(batch.copies[rd.emitter].len());
                 }
+            }
+            if payload {
+                // FxRenderer.payload (word 43; write_uniform leaves it 0).
+                queue.write_buffer(&rd.uniform, 43 * 4, &1u32.to_le_bytes());
             }
         }
     }

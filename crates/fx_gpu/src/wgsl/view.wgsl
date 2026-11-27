@@ -22,8 +22,16 @@ struct ViewParams {
     region_words: u32,           // batched: words between particle copies
     entry_count: u32,            // batched: instances drawn
     world_space: u32,            // batched: the emitter simulates in world space, slot transforms not applied
-    _pad2: u32,
+    radix: u32,                  // 1: radix passes are recorded after the bitonic ones (large views)
+    payload: u32,                // batched, one instance sorted: write the sprite payload
 }
+
+// Sort lengths above this use the radix sort (when recorded), below it the bitonic one.
+const RADIX_MIN: u32 = 16384u;
+const RADIX_TILE: u32 = 2048u;
+// Largest key a visible particle sorted by depth gets: below NONE in the top
+// 24 bits, which are all the radix sort looks at for depth keys.
+const DEPTH_KEY_MAX: u32 = 0xFFFFFEFFu;
 
 @group(0) @binding(0) var<uniform> vp: ViewParams;
 @group(0) @binding(1) var<storage, read> particles: array<f32>;
@@ -78,23 +86,46 @@ fn cull_prep() {
     }
     let p = sort_len();
     set_args(0u, p / WG);
-    set_sort_args(p);
+    set_sort_args(p, count());
 }
 
-// Dispatch args of the sort passes (slots 1..) for sort length p.
-fn set_sort_args(p: u32) {
+// Dispatch args of the sort passes (slots 1..) for sort length p (a power
+// of two) holding n keys to sort ([n, p) are NONE).
+fn set_sort_args(p: u32, n: u32) {
+    let radix = vp.radix != 0u && n > RADIX_MIN;
+    let bp = select(p / BLOCK, 0u, radix);
     // Same pass order as fx_gpu::view::sort_passes.
     var slot = 1u;
-    set_args(slot, p / BLOCK);   // local sort
+    set_args(slot, bp);   // local sort
     slot += 1u;
     for (var k = BLOCK * 2u; k <= vp.max_pow2; k = k * 2u) {
         for (var j = k / 2u; j >= BLOCK; j = j / 2u) {
-            set_args(slot, select(0u, p / BLOCK, k <= p));
+            set_args(slot, select(0u, bp, k <= p));
             slot += 1u;
         }
-        set_args(slot, select(0u, p / BLOCK, k <= p));   // local merge
+        set_args(slot, select(0u, bp, k <= p));   // local merge
         slot += 1u;
     }
+    if (vp.radix == 0u) {
+        return;
+    }
+    // Radix passes q = 0..8 (4 bits each): tiles, then the per-digit scan.
+    // Depth keys only sort their top 24 bits (passes 2..8; relative depth
+    // precision 2^-15), every other key all 32.
+    let first = select(0u, 2u, vp.sort_mode == 1u || vp.sort_mode == 2u);
+    let tiles = (n + RADIX_TILE - 1u) / RADIX_TILE;
+    for (var q = 0u; q < 8u; q++) {
+        let on = radix && q >= first;
+        set_args(slot, select(0u, tiles, on));
+        args[slot * 4u + 3u] = n;
+        set_args(slot + 1u, select(0u, 16u, on));
+        slot += 2u;
+    }
+}
+
+// The sort key of a visible particle for depth modes, clamped below NONE.
+fn depth_key(dist: f32) -> u32 {
+    return min(0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0)), DEPTH_KEY_MAX);
 }
 
 // ---- cull: visibility and sort keys ----
@@ -143,7 +174,7 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
             dist = length(d);
         }
         // Far first: larger distance → smaller key. Non-negative floats order as their bits.
-        key = 0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0));
+        key = depth_key(dist);
         if (vp.sort_mode == 3u) {
             // Deterministic order (headless preview): by UniqueID, independent
             // of the slot order atomic compaction produced.
@@ -290,7 +321,7 @@ fn batch_prep(@builtin(local_invocation_index) t: u32) {
             // The sort length of the living particles, all keyed by the cull.
             let p = sort_len_of(atomicLoad(&most));
             args[at] = p / WG;
-            set_sort_args(p);
+            set_sort_args(p, atomicLoad(&most));
         } else {
             args[at] = (atomicLoad(&most) + WG - 1u) / WG;
         }
@@ -304,6 +335,9 @@ fn batch_prep(@builtin(local_invocation_index) t: u32) {
 fn single_sorted() -> bool {
     return vp.entry_count == 1u && vp.sort_mode != 0u;
 }
+
+// Sorted sprites drawn once: 4 vec4 per particle position (fx_gpu::view::BatchDraw::payload).
+@group(1) @binding(2) var<storage, read_write> payload: array<vec4<f32>>;
 
 @compute @workgroup_size(WG)
 fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
@@ -353,12 +387,21 @@ fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_
         if (vp.sort_mode == 2u) {
             dist = length(d);
         }
-        key = 0xFFFFFFFEu - bitcast<u32>(max(dist, 0.0));
+        key = depth_key(dist);
         if (vp.sort_mode == 3u) {
             key = min(bitcast<u32>(particles[base + 27u * cap + i]), 0xFFFFFFFEu);
         }
     }
     if (single) {
+        if (vp.payload != 0u && shown) {
+            // What sprite.wesl reads, contiguous (fx_gpu::view::PAYLOAD_BYTES):
+            // position + normalized age, velocity + rotation, size + colour rg, colour ba.
+            let w = particles[base + 16u * cap + i];
+            payload[i * 4u] = vec4<f32>(particles[base + i], particles[base + cap + i], particles[base + 2u * cap + i], w);
+            payload[i * 4u + 1u] = vec4<f32>(particles[base + 3u * cap + i], particles[base + 4u * cap + i], particles[base + 5u * cap + i], particles[base + 12u * cap + i]);
+            payload[i * 4u + 2u] = vec4<f32>(particles[base + 10u * cap + i], particles[base + 11u * cap + i], particles[base + 6u * cap + i], particles[base + 7u * cap + i]);
+            payload[i * 4u + 3u] = vec4<f32>(particles[base + 8u * cap + i], particles[base + 9u * cap + i], 0.0, 0.0);
+        }
         keys[i] = select(NONE, key, shown);
         vals[i] = r * cap + i;
         if (shown) {
@@ -378,9 +421,10 @@ fn cull_batch(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_
 
 @compute @workgroup_size(1)
 fn sort_prep() {
-    let p = sort_len_of(atomicLoad(&draw[1]));
+    let n = atomicLoad(&draw[1]);
+    let p = sort_len_of(n);
     set_args(0u, p / WG);
-    set_sort_args(p);
+    set_sort_args(p, n);
 }
 
 // The sort length's tail past the visible particles sorts last.

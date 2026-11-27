@@ -6,6 +6,8 @@
 //! ```text
 //! fx_bench [run] [--scenes a,b] [--frames N] [--warm N] [--size WxH]
 //!                [--out FILE] [--base FILE] [--no-compare]
+//! fx_bench run --scenes-dir DIR --out FILE [--scenes a,b] [--base FILE]
+//!     (opt-in local effects, e.g. git-ignored imports: scene show_<stem> per *.fx.ron)
 //! fx_bench compare BASE.json NEW.json
 //! fx_bench dashboard [--dir bench/results]
 //! fx_bench list
@@ -467,21 +469,62 @@ fn scene_def(name: &str) -> Result<&'static SceneDef, String> {
         .ok_or_else(|| format!("unknown scene {name} (fx_bench list)"))
 }
 
+/// Opt-in scenes from local effect files (`--scenes-dir`, e.g. git-ignored
+/// imports): one scene `show_<stem>` per `*.fx.ron` under `dir`, seen from a
+/// few metres. Never in the default run, so committed results never depend
+/// on files outside the repository.
+fn dir_scene(file: &Path) -> &'static SceneDef {
+    let stem = file
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_suffix(".fx.ron"))
+        .unwrap_or("effect");
+    Box::leak(Box::new(SceneDef {
+        name: Box::leak(format!("show_{stem}").into_boxed_str()),
+        file: Box::leak(file.to_string_lossy().into_owned().into_boxed_str()),
+        camera: [0.0, 2.0, 6.0],
+        target: [0.0, 1.0, 0.0],
+        budget_gpu_ms: None,
+    }))
+}
+
+fn dir_scenes(dir: &Path, out: &mut Vec<&'static SceneDef>) -> Result<(), String> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            dir_scenes(&p, out)?;
+        } else if p.to_string_lossy().ends_with(".fx.ron") {
+            let abs = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
+            out.push(dir_scene(&abs));
+        }
+    }
+    Ok(())
+}
+
 /// Child process: one scene, result on stdout after [`RESULT_TAG`].
 fn run_scene(args: &[String]) -> Result<u8, String> {
     let name = args.first().ok_or("scene NAME")?;
-    let def = scene_def(name)?;
+    let mut def = None;
     let (mut frames, mut warm, mut size) = (300, 180, (1920, 1080));
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         let v = it.next().ok_or(format!("{a} needs a value"))?;
         match a.as_str() {
+            "--file" => def = Some(dir_scene(Path::new(v))),
             "--frames" => frames = v.parse().map_err(|e| format!("{e}"))?,
             "--warm" => warm = v.parse().map_err(|e| format!("{e}"))?,
             "--size" => size = parse_size(v)?,
             _ => return Err(format!("unknown option {a}")),
         }
     }
+    let def = match def {
+        Some(d) => d,
+        None => scene_def(name)?,
+    };
     let r = scene::run(def, frames, warm, size);
     println!("{RESULT_TAG}{}", serde_json::to_string(&r).unwrap());
     Ok(0)
@@ -498,6 +541,8 @@ fn run(args: &[String]) -> Result<u8, String> {
         compare: true,
     };
     let mut it = args.iter();
+    let mut extra: Vec<&'static SceneDef> = Vec::new();
+    let mut named = false;
     while let Some(a) = it.next() {
         if a == "--no-compare" {
             o.compare = false;
@@ -505,7 +550,11 @@ fn run(args: &[String]) -> Result<u8, String> {
         }
         let v = it.next().ok_or(format!("{a} needs a value"))?;
         match a.as_str() {
-            "--scenes" => o.scenes = v.split(',').map(str::to_string).collect(),
+            "--scenes" => {
+                named = true;
+                o.scenes = v.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect()
+            }
+            "--scenes-dir" => dir_scenes(Path::new(v), &mut extra)?,
             "--frames" => o.frames = v.parse().map_err(|e| format!("{e}"))?,
             "--warm" => o.warm = v.parse().map_err(|e| format!("{e}"))?,
             "--size" => o.size = parse_size(v)?,
@@ -514,16 +563,33 @@ fn run(args: &[String]) -> Result<u8, String> {
             _ => return Err(format!("unknown option {a}")),
         }
     }
-    for s in &o.scenes {
-        scene_def(s)?;
+    if !extra.is_empty() && !named {
+        // --scenes-dir alone runs only the directory's scenes.
+        o.scenes.clear();
     }
+    let mut defs: Vec<&'static SceneDef> = Vec::new();
+    for s in &o.scenes {
+        defs.push(scene_def(s)?);
+    }
+    let local = !extra.is_empty();
+    if local && o.out.is_none() {
+        // Results of local files stay out of bench/results (the dashboard's history).
+        return Err("--scenes-dir needs --out FILE".into());
+    }
+    if local && o.base.is_none() {
+        o.compare = false;
+    }
+    defs.extend(extra);
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut scenes = Vec::new();
-    for name in &o.scenes {
+    for def in defs {
+        let name = def.name;
         eprintln!("fx_bench: running {name} ...");
+        let file: Vec<&str> = if name.starts_with("show_") { vec!["--file", def.file] } else { vec![] };
         let out = Command::new(&exe)
             .args(["scene", name, "--frames", &o.frames.to_string(), "--warm", &o.warm.to_string()])
+            .args(&file)
             .args(["--size", &format!("{}x{}", o.size.0, o.size.1)])
             .stderr(Stdio::inherit())
             .output()

@@ -11,16 +11,55 @@ import fx_render::particle_io::{
 };
 import fx_render::particle_surface::{sprite_corner, sprite_texel};
 
+// Sorted sprites of one instance: the cull's contiguous copy of what this
+// shader reads (fx_gpu::view::BatchDraw::payload), indexed by slot. Sprites
+// leave binding 5 (mesh vertices) free otherwise.
+@group(1) @binding(5) var<storage, read> payload: array<vec4<f32>>;
+
+struct SpriteAttrs {
+    local: vec3<f32>,
+    nage: f32,
+    vel: vec3<f32>,
+    rotation: f32,
+    size: vec2<f32>,
+    color: vec4<f32>,
+}
+
+fn sprite_attrs(i: u32) -> SpriteAttrs {
+    var a: SpriteAttrs;
+    if (fx.payload != 0u) {
+        let p = (i % fx.capacity) * 4u;
+        let v0 = payload[p];
+        let v1 = payload[p + 1u];
+        let v2 = payload[p + 2u];
+        let v3 = payload[p + 3u];
+        a.local = v0.xyz;
+        a.nage = v0.w;
+        a.vel = v1.xyz;
+        a.rotation = v1.w;
+        a.size = v2.xy;
+        a.color = vec4<f32>(v2.zw, v3.xy);
+        return a;
+    }
+    a.local = vec3<f32>(pw(0u, i), pw(1u, i), pw(2u, i));
+    a.nage = pw(16u, i);
+    a.vel = vec3<f32>(pw(3u, i), pw(4u, i), pw(5u, i));
+    a.rotation = pw(12u, i);
+    a.size = vec2<f32>(pw(10u, i), pw(11u, i));
+    a.color = particle_color(i);
+    return a;
+}
+
 @vertex
 fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FxVertexOutput {
     let i = indices[ii];
     let m = particle_world_from_local(i);
-    let local = vec3<f32>(pw(0u, i), pw(1u, i), pw(2u, i));
-    let pos = camera_offset((m * vec4<f32>(local, 1.0)).xyz, i);
-    let vel = (m * vec4<f32>(pw(3u, i), pw(4u, i), pw(5u, i), 0.0)).xyz;
-    let size = vec2<f32>(pw(10u, i), pw(11u, i));
-    let rotation = radians(pw(12u, i));
-    let nage = pw(16u, i);
+    let a = sprite_attrs(i);
+    let pos = camera_offset((m * vec4<f32>(a.local, 1.0)).xyz, i);
+    let vel = (m * vec4<f32>(a.vel, 0.0)).xyz;
+    let size = a.size;
+    let rotation = radians(a.rotation);
+    let nage = a.nage;
 
     // Quad corner: two triangles, uv (0,0) top left.
     var corners = array<vec2<f32>, 6>(
@@ -39,7 +78,7 @@ fn vertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> F
 
     var out: FxVertexOutput;
     out.position = view.clip_from_world * vec4<f32>(corner.world, 1.0);
-    out.color = particle_color(i);
+    out.color = a.color;
     out.normal = corner.normal;
     out.world_position = corner.world;
     out.dynamic_param = particle_dynamic_param(i);

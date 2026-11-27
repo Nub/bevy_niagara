@@ -41,7 +41,7 @@ struct FxRenderer {
     batched: u32,               // indices are batch references r * capacity + i (fx_gpu::view::BatchDraw)
     region_words: u32,          // batched: words between particle copies
     world_space: u32,           // 1: the emitter simulates in world space (local_space: false): drawn without the effect transform
-    _pad1: u32,
+    payload: u32,               // sprite: position, velocity, colour, size, rotation and age come from the cull's payload (fx_gpu::view::BatchDraw::payload_used)
 }
 
 @group(1) @binding(0) var<uniform> fx: FxRenderer;

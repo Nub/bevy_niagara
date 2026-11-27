@@ -13,7 +13,16 @@ use std::borrow::Cow;
 use crate::GpuEmitter;
 
 const VIEW_WGSL: &str = include_str!("wgsl/view.wgsl");
+const RADIX_WGSL: &str = include_str!("wgsl/radix.wgsl");
 const BLOCK: u32 = 512;
+/// Views whose sort length can exceed view.wgsl's `RADIX_MIN` (16384) also
+/// record the radix sort; the GPU picks bitonic or radix from the count.
+const RADIX_MIN_POW2: u32 = 32768;
+const RADIX_TILE: u64 = 2048;
+/// Radix passes (4 bits each), two dispatch slots per pass.
+const RADIX_PASSES: usize = 8;
+/// Bytes per particle of the sorted sprite payload (four vec4<f32>).
+pub const PAYLOAD_BYTES: u64 = 64;
 const PARAMS_BYTES: usize = 6 * 16 + 16 + 16 + 16 + 16 + 16;
 /// Bytes of `draw_args`: room for `draw_indexed_indirect`'s five words.
 pub const DRAW_ARGS_BYTES: u64 = 20;
@@ -119,8 +128,134 @@ pub struct ViewPipelines {
     cull_batch: wgpu::ComputePipeline,
     sort_prep: wgpu::ComputePipeline,
     pad: wgpu::ComputePipeline,
+    payload_layout: wgpu::BindGroupLayout,
+    radix_layout: wgpu::BindGroupLayout,
+    radix_hist: wgpu::ComputePipeline,
+    radix_scan: wgpu::ComputePipeline,
+    radix_scatter: wgpu::ComputePipeline,
     /// Bound to the batched-only bindings of unbatched draws.
     dummy: wgpu::Buffer,
+}
+
+/// A view's radix sort state: the ping-pong buffers, tile histograms and
+/// the bind groups of the two directions.
+struct Radix {
+    /// First args slot of the radix passes (two per pass).
+    base_slot: u32,
+    /// Index of the first radix entry in the pass uniform.
+    first_pass: usize,
+    bind_groups: [wgpu::BindGroup; 2],
+}
+
+impl Radix {
+    fn new(
+        device: &wgpu::Device,
+        pipelines: &ViewPipelines,
+        keys: &wgpu::Buffer,
+        vals: &wgpu::Buffer,
+        args: &wgpu::Buffer,
+        len: u64,
+        base_slot: u32,
+        first_pass: usize,
+    ) -> Self {
+        let buf = |label: &str, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let keys_alt = buf("fx view keys alt", len * 4);
+        let vals_alt = buf("fx view indices alt", len * 4);
+        let hist = buf("fx view radix hist", 4 * (16 + 16 * len.div_ceil(RADIX_TILE)));
+        let group = |sk: &wgpu::Buffer, sv: &wgpu::Buffer, dk: &wgpu::Buffer, dv: &wgpu::Buffer| {
+            fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+                wgpu::BindGroupEntry {
+                    binding,
+                    resource: b.as_entire_binding(),
+                }
+            }
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fx view radix"),
+                layout: &pipelines.radix_layout,
+                entries: &[e(0, sk), e(1, sv), e(2, dk), e(3, dv), e(4, &hist), e(5, args)],
+            })
+        };
+        Radix {
+            base_slot,
+            first_pass,
+            bind_groups: [
+                group(keys, vals, &keys_alt, &vals_alt),
+                group(&keys_alt, &vals_alt, keys, vals),
+            ],
+        }
+    }
+
+    /// Records the radix passes; each gets its dispatch sizes (zero when
+    /// skipped) from the prep kernel's `set_sort_args`.
+    fn record(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        pipelines: &ViewPipelines,
+        pass_bind_group: &wgpu::BindGroup,
+        args: &wgpu::Buffer,
+    ) {
+        for q in 0..RADIX_PASSES {
+            let tiles = 16 * (self.base_slot as u64 + 2 * q as u64);
+            pass.set_bind_group(0, &self.bind_groups[q % 2], &[]);
+            pass.set_bind_group(
+                1,
+                pass_bind_group,
+                &[((self.first_pass + q) as u64 * PASS_STRIDE) as u32],
+            );
+            pass.set_pipeline(&pipelines.radix_hist);
+            pass.dispatch_workgroups_indirect(args, tiles);
+            pass.set_pipeline(&pipelines.radix_scan);
+            pass.dispatch_workgroups_indirect(args, tiles + 16);
+            pass.set_pipeline(&pipelines.radix_scatter);
+            pass.dispatch_workgroups_indirect(args, tiles);
+        }
+    }
+}
+
+/// The per-pass uniform (bitonic `(k, j)`, then radix `(shift, slot)`), one
+/// dynamic-offset slot each, and the radix pass count to append.
+fn pass_uniform(
+    device: &wgpu::Device,
+    label: &str,
+    passes: &[PassKind],
+    radix_base_slot: Option<u32>,
+) -> wgpu::Buffer {
+    let radix = if radix_base_slot.is_some() { RADIX_PASSES } else { 0 };
+    let n = passes.len() + radix;
+    let mut data = vec![0u8; (PASS_STRIDE as usize) * n.max(1)];
+    let mut put = |i: usize, a: u32, b: u32| {
+        let o = i * PASS_STRIDE as usize;
+        data[o..o + 4].copy_from_slice(&a.to_le_bytes());
+        data[o + 4..o + 8].copy_from_slice(&b.to_le_bytes());
+    };
+    for (i, p) in passes.iter().enumerate() {
+        let (k, j) = match *p {
+            PassKind::Local => (0, 0),
+            PassKind::MergeGlobal { k, j } => (k, j),
+            PassKind::MergeLocal { k } => (k, 0),
+        };
+        put(i, k, j);
+    }
+    if let Some(base) = radix_base_slot {
+        for q in 0..RADIX_PASSES {
+            put(passes.len() + q, 4 * q as u32, base + 2 * q as u32);
+        }
+    }
+    wgpu::util::DeviceExt::create_buffer_init(
+        device,
+        &wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: &data,
+            usage: wgpu::BufferUsages::UNIFORM,
+        },
+    )
 }
 
 fn buffer_entry(
@@ -175,19 +310,43 @@ impl ViewPipelines {
                 immediate_size: 0,
             })
         };
+        // The sprite payload (cull_batch only; 8 storage buffers with group 0,
+        // WebGPU's guaranteed per-stage limit).
+        let payload_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx view payload"),
+            entries: &[buffer_entry(2, Storage { read_only: false }, false)],
+        });
+        let radix_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx view radix"),
+            entries: &[
+                buffer_entry(0, Storage { read_only: true }, false),
+                buffer_entry(1, Storage { read_only: true }, false),
+                buffer_entry(2, Storage { read_only: false }, false),
+                buffer_entry(3, Storage { read_only: false }, false),
+                buffer_entry(4, Storage { read_only: false }, false),
+                buffer_entry(5, Storage { read_only: true }, false),
+            ],
+        });
+        let radix_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fx view radix"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(RADIX_WGSL)),
+        });
         let plain = make_layout(&[Some(&layout)]);
         let with_args = make_layout(&[Some(&layout), Some(&args_layout)]);
         let with_pass = make_layout(&[Some(&layout), Some(&pass_layout)]);
-        let pipe = |entry: &str, pl: &wgpu::PipelineLayout| {
+        let with_payload = make_layout(&[Some(&layout), Some(&payload_layout)]);
+        let radix_pl = make_layout(&[Some(&radix_layout), Some(&pass_layout)]);
+        let pipe_in = |module: &wgpu::ShaderModule, entry: &str, pl: &wgpu::PipelineLayout| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(pl),
-                module: &module,
+                module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
                 cache: None,
             })
         };
+        let pipe = |entry: &str, pl: &wgpu::PipelineLayout| pipe_in(&module, entry, pl);
         ViewPipelines {
             cull_prep: pipe("cull_prep", &with_args),
             cull: pipe("cull", &plain),
@@ -195,9 +354,14 @@ impl ViewPipelines {
             sort_merge_local: pipe("sort_merge_local", &with_pass),
             sort_merge_global: pipe("sort_merge_global", &with_pass),
             batch_prep: pipe("batch_prep", &with_args),
-            cull_batch: pipe("cull_batch", &plain),
+            cull_batch: pipe("cull_batch", &with_payload),
             sort_prep: pipe("sort_prep", &with_args),
             pad: pipe("pad", &plain),
+            radix_hist: pipe_in(&radix_module, "radix_hist", &radix_pl),
+            radix_scan: pipe_in(&radix_module, "radix_scan", &radix_pl),
+            radix_scatter: pipe_in(&radix_module, "radix_scatter", &radix_pl),
+            payload_layout,
+            radix_layout,
             dummy: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("fx view dummy"),
                 size: 64,
@@ -218,6 +382,7 @@ pub struct ViewDraw {
     capacity: u32,
     max_pow2: u32,
     passes: Vec<PassKind>,
+    radix: Option<Radix>,
     params: wgpu::Buffer,
     /// Visible particle slots (`array<u32>`), sorted when sorting.
     pub indices: wgpu::Buffer,
@@ -282,31 +447,15 @@ impl ViewDraw {
         } else {
             Vec::new()
         };
+        let radix_slot = (sorted && max_pow2 >= RADIX_MIN_POW2).then_some(1 + passes.len() as u32);
+        let radix_slots = if radix_slot.is_some() { 2 * RADIX_PASSES as u64 } else { 0 };
         let args = buf(
             "fx view dispatch args",
-            16 * (1 + passes.len() as u64),
+            16 * (1 + passes.len() as u64 + radix_slots),
             U::STORAGE | U::INDIRECT,
         );
-        // Static per-pass (k, j), one dynamic-offset slot each.
-        let mut pass_data = vec![0u8; (PASS_STRIDE as usize) * passes.len().max(1)];
-        for (i, p) in passes.iter().enumerate() {
-            let (k, j) = match *p {
-                PassKind::Local => (0, 0),
-                PassKind::MergeGlobal { k, j } => (k, j),
-                PassKind::MergeLocal { k } => (k, 0),
-            };
-            let o = i * PASS_STRIDE as usize;
-            pass_data[o..o + 4].copy_from_slice(&k.to_le_bytes());
-            pass_data[o + 4..o + 8].copy_from_slice(&j.to_le_bytes());
-        }
-        let pass_ubo = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("fx view sort passes"),
-                contents: &pass_data,
-                usage: U::UNIFORM,
-            },
-        );
+        let pass_ubo = pass_uniform(device, "fx view sort passes", &passes, radix_slot);
+        let radix = radix_slot.map(|s| Radix::new(device, pipelines, &keys, &indices, &args, len, s, passes.len()));
         let bind_group = |s: usize| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fx view"),
@@ -374,6 +523,7 @@ impl ViewDraw {
             capacity,
             max_pow2,
             passes,
+            radix,
             params,
             indices,
             draw_args,
@@ -396,6 +546,7 @@ impl ViewDraw {
         view: &ViewParams,
     ) {
         write_params(&mut self.scratch, view, self.capacity, self.sort_mode, self.max_pow2, &self.config, 0, 0);
+        put_word(&mut self.scratch, 42, self.radix.is_some() as u32);
         queue.write_buffer(&self.params, 0, &self.scratch);
 
         let bg = &self.bind_groups[emitter.current];
@@ -439,12 +590,19 @@ impl ViewDraw {
             }
             pass.dispatch_workgroups_indirect(&self.args, args_offset);
         }
+        if let Some(r) = &self.radix {
+            r.record(&mut pass, pipelines, &self.pass_bind_group, &self.args);
+        }
     }
 
     /// Number of recorded sort passes (0 when not sorting).
     pub fn sort_pass_count(&self) -> usize {
         self.passes.len()
     }
+}
+
+fn put_word(s: &mut [u8; PARAMS_BYTES], w: usize, v: u32) {
+    s[w * 4..w * 4 + 4].copy_from_slice(&v.to_le_bytes());
 }
 
 /// The `ViewParams` uniform of view.wgsl.
@@ -511,6 +669,10 @@ pub struct BatchDraw {
     region_words: u32,
     max_pow2: u32,
     passes: Vec<PassKind>,
+    radix: Option<Radix>,
+    /// Sorted sprites: 64 bytes per particle position (see `payload_used`).
+    pub payload: Option<wgpu::Buffer>,
+    payload_bind_group: wgpu::BindGroup,
     params: wgpu::Buffer,
     entries: wgpu::Buffer,
     /// Visible particle references (`array<u32>`), sorted when sorting.
@@ -556,26 +718,30 @@ impl BatchDraw {
         let draw_args = buf("fx batch view draw args", DRAW_ARGS_BYTES, U::STORAGE | U::INDIRECT | U::COPY_SRC);
         let passes = if sorted { sort_passes(max_pow2) } else { Vec::new() };
         // Slot 0: pad; 1..: sort passes; last: the cull.
-        let args = buf("fx batch view dispatch args", 16 * (2 + passes.len() as u64), U::STORAGE | U::INDIRECT);
-        let mut pass_data = vec![0u8; (PASS_STRIDE as usize) * passes.len().max(1)];
-        for (i, p) in passes.iter().enumerate() {
-            let (k, j) = match *p {
-                PassKind::Local => (0, 0),
-                PassKind::MergeGlobal { k, j } => (k, j),
-                PassKind::MergeLocal { k } => (k, 0),
-            };
-            let o = i * PASS_STRIDE as usize;
-            pass_data[o..o + 4].copy_from_slice(&k.to_le_bytes());
-            pass_data[o + 4..o + 8].copy_from_slice(&j.to_le_bytes());
-        }
-        let pass_ubo = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("fx batch view sort passes"),
-                contents: &pass_data,
-                usage: U::UNIFORM,
-            },
+        // Slot 0: pad; 1..: sort passes; then the radix passes; last: the cull.
+        let radix_slot = (sorted && max_pow2 >= RADIX_MIN_POW2).then_some(1 + passes.len() as u32);
+        let radix_slots = if radix_slot.is_some() { 2 * RADIX_PASSES as u64 } else { 0 };
+        let args = buf(
+            "fx batch view dispatch args",
+            16 * (2 + passes.len() as u64 + radix_slots),
+            U::STORAGE | U::INDIRECT,
         );
+        let pass_ubo = pass_uniform(device, "fx batch view sort passes", &passes, radix_slot);
+        let radix = radix_slot.map(|s| Radix::new(device, pipelines, &keys, &indices, &args, len, s, passes.len()));
+        // Sorted sprites: the cull writes what the sprite vertex shader reads
+        // (one instance drawn) as 64 contiguous bytes per particle, so the
+        // sorted draw reads two cache sectors per particle instead of
+        // fourteen scattered words.
+        let payload = (sorted && config.vertex_count == 6 && config.cull == CullRadius::SpriteSize)
+            .then(|| buf("fx batch view sprite payload", capacity as u64 * PAYLOAD_BYTES, U::STORAGE));
+        let payload_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx batch view payload"),
+            layout: &pipelines.payload_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 2,
+                resource: payload.as_ref().unwrap_or(&pipelines.dummy).as_entire_binding(),
+            }],
+        });
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry {
                 binding,
@@ -620,6 +786,9 @@ impl BatchDraw {
             region_words: batch.region_words(emitter),
             max_pow2,
             passes,
+            radix,
+            payload,
+            payload_bind_group,
             params,
             entries,
             indices,
@@ -655,6 +824,9 @@ impl BatchDraw {
             copies.len() as u32,
         );
         self.scratch[41 * 4..42 * 4].copy_from_slice(&(self.world_space as u32).to_le_bytes());
+        let payload = self.payload_used(copies.len());
+        put_word(&mut self.scratch, 42, self.radix.is_some() as u32);
+        put_word(&mut self.scratch, 43, payload as u32);
         queue.write_buffer(&self.params, 0, &self.scratch);
         self.entry_bytes.clear();
         for c in copies {
@@ -686,11 +858,12 @@ impl BatchDraw {
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
         }
+        pass.set_bind_group(1, &self.payload_bind_group, &[]);
         pass.set_pipeline(&pipelines.cull_batch);
         if direct {
             pass.dispatch_workgroups(self.capacity.div_ceil(BLOCK / 2), copies.len() as u32, 1);
         } else {
-            pass.dispatch_workgroups_indirect(&self.args, 16 * (1 + self.passes.len() as u64));
+            pass.dispatch_workgroups_indirect(&self.args, self.args.size() - 16);
         }
         if !sorted {
             return;
@@ -736,6 +909,19 @@ impl BatchDraw {
             }
             pass.dispatch_workgroups_indirect(&self.args, args_offset);
         }
+        if let Some(r) = &self.radix
+            && limit > RADIX_MIN_POW2 as u64 / 2
+        {
+            r.record(&mut pass, pipelines, &self.pass_bind_group, &self.args);
+        }
+    }
+
+    /// Whether the cull writes the sprite payload for `copies` instances
+    /// drawn (sorted sprites, one instance): then the sprite vertex shader
+    /// reads particle `i`'s position, velocity, colour, size, rotation and
+    /// age from `payload[i % capacity]`.
+    pub fn payload_used(&self, copies: usize) -> bool {
+        self.payload.is_some() && copies == 1
     }
 }
 
