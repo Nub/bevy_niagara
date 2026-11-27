@@ -297,6 +297,41 @@ pub struct GpuBatch {
 }
 
 /// One emitter's buffers in a batch.
+/// The kernels of one sim step, in order (one compute pass each).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimStage {
+    Begin,
+    Update,
+    SpawnPrep,
+    EventRank,
+    /// Spawn, then finish.
+    Spawn,
+    /// Simulation stages (custom grid/particle passes).
+    Stages,
+}
+
+impl SimStage {
+    const ALL: [SimStage; 6] = [
+        SimStage::Begin,
+        SimStage::Update,
+        SimStage::SpawnPrep,
+        SimStage::EventRank,
+        SimStage::Spawn,
+        SimStage::Stages,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SimStage::Begin => "fx sim",
+            SimStage::Update => "fx sim update",
+            SimStage::SpawnPrep => "fx sim spawn prep",
+            SimStage::EventRank => "fx sim event rank",
+            SimStage::Spawn => "fx sim spawn",
+            SimStage::Stages => "fx sim stages",
+        }
+    }
+}
+
 struct BatchEmitter {
     particles: wgpu::Buffer,
     state: wgpu::Buffer,
@@ -1168,78 +1203,114 @@ impl GpuBatch {
             }
             queue.write_buffer(&be.frames, offset, &be.scratch[..n as usize * FRAME_BYTES]);
         }
-        for be in &self.emitters {
-            let p = &be.pipelines;
-            let bg = &be.bind_group;
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx sim"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, bg, &[offset as u32, 0]);
-            pass.set_bind_group(1, &be.args_bind_group, &[]);
-            pass.set_pipeline(&p.begin);
-            pass.dispatch_workgroups(inst_groups, 1, 1);
-            drop(pass);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx sim update"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, bg, &[offset as u32, 0]);
-            match (&p.update_rt, &self.ray_tracing_scene) {
-                (Some(update_rt), Some(rt)) => {
-                    pass.set_bind_group(1, &self.data.bind_group, &[]);
-                    pass.set_bind_group(2, &self.scene.bind_group, &[]);
-                    pass.set_bind_group(3, rt, &[]);
-                    pass.set_pipeline(update_rt);
+        if self.program.uses_events {
+            // Events tie emitters together (a reader spawns from what earlier
+            // emitters wrote this step): each emitter's whole step in turn.
+            for be in &self.emitters {
+                for stage in SimStage::ALL {
+                    if !self.stage_used(be, stage) {
+                        continue;
+                    }
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some(stage.label()),
+                        timestamp_writes: None,
+                    });
+                    self.record_stage(&mut pass, be, stage, offset, inst_groups, n);
                 }
-                _ => {
-                    if p.uses_scene {
+            }
+        } else {
+            // Independent emitters (own particles, state, args and frames):
+            // one pass per kernel for all of them, so their small dispatches
+            // overlap on the GPU instead of each waiting behind the last.
+            for stage in SimStage::ALL {
+                if !self.emitters.iter().any(|be| self.stage_used(be, stage)) {
+                    continue;
+                }
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(stage.label()),
+                    timestamp_writes: None,
+                });
+                for be in &self.emitters {
+                    if self.stage_used(be, stage) {
+                        self.record_stage(&mut pass, be, stage, offset, inst_groups, n);
+                    }
+                }
+            }
+        }
+    }
+
+    fn stage_used(&self, be: &BatchEmitter, stage: SimStage) -> bool {
+        match stage {
+            SimStage::EventRank => be.pipelines.event_rank.is_some(),
+            SimStage::Stages => !be.pipelines.stages.is_empty(),
+            _ => true,
+        }
+    }
+
+    /// One emitter's dispatches of `stage` (one step of `n` instances).
+    fn record_stage(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        be: &BatchEmitter,
+        stage: SimStage,
+        offset: u64,
+        inst_groups: u32,
+        n: u32,
+    ) {
+        let p = &be.pipelines;
+        let bg = &be.bind_group;
+        match stage {
+            SimStage::Begin => {
+                pass.set_bind_group(0, bg, &[offset as u32, 0]);
+                pass.set_bind_group(1, &be.args_bind_group, &[]);
+                pass.set_pipeline(&p.begin);
+                pass.dispatch_workgroups(inst_groups, 1, 1);
+            }
+            SimStage::Update => {
+                pass.set_bind_group(0, bg, &[offset as u32, 0]);
+                match (&p.update_rt, &self.ray_tracing_scene) {
+                    (Some(update_rt), Some(rt)) => {
                         pass.set_bind_group(1, &self.data.bind_group, &[]);
                         pass.set_bind_group(2, &self.scene.bind_group, &[]);
+                        pass.set_bind_group(3, rt, &[]);
+                        pass.set_pipeline(update_rt);
                     }
-                    pass.set_pipeline(&p.update);
+                    _ => {
+                        if p.uses_scene {
+                            pass.set_bind_group(1, &self.data.bind_group, &[]);
+                            pass.set_bind_group(2, &self.scene.bind_group, &[]);
+                        }
+                        pass.set_pipeline(&p.update);
+                    }
+                }
+                pass.dispatch_workgroups_indirect(&be.args, 0);
+            }
+            SimStage::SpawnPrep => {
+                pass.set_bind_group(0, bg, &[offset as u32, 0]);
+                pass.set_bind_group(1, &be.args_bind_group, &[]);
+                pass.set_pipeline(&p.spawn_prep);
+                pass.dispatch_workgroups(inst_groups, 1, 1);
+            }
+            SimStage::EventRank => {
+                if let Some(rank) = &p.event_rank {
+                    pass.set_bind_group(0, bg, &[offset as u32, 0]);
+                    pass.set_pipeline(rank);
+                    pass.dispatch_workgroups_indirect(&be.args, 32);
                 }
             }
-            pass.dispatch_workgroups_indirect(&be.args, 0);
-            drop(pass);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx sim spawn prep"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, bg, &[offset as u32, 0]);
-            pass.set_bind_group(1, &be.args_bind_group, &[]);
-            pass.set_pipeline(&p.spawn_prep);
-            pass.dispatch_workgroups(inst_groups, 1, 1);
-            drop(pass);
-            if let Some(rank) = &p.event_rank {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("fx sim event rank"),
-                    timestamp_writes: None,
-                });
+            SimStage::Spawn => {
                 pass.set_bind_group(0, bg, &[offset as u32, 0]);
-                pass.set_pipeline(rank);
-                pass.dispatch_workgroups_indirect(&be.args, 32);
+                if p.uses_scene {
+                    pass.set_bind_group(1, &self.data.bind_group, &[]);
+                    pass.set_bind_group(2, &self.scene.bind_group, &[]);
+                }
+                pass.set_pipeline(&p.spawn);
+                pass.dispatch_workgroups_indirect(&be.args, 16);
+                pass.set_bind_group(1, &be.args_bind_group, &[]);
+                pass.set_pipeline(&p.finish);
+                pass.dispatch_workgroups(inst_groups, 1, 1);
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fx sim spawn"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, bg, &[offset as u32, 0]);
-            if p.uses_scene {
-                pass.set_bind_group(1, &self.data.bind_group, &[]);
-                pass.set_bind_group(2, &self.scene.bind_group, &[]);
-            }
-            pass.set_pipeline(&p.spawn);
-            pass.dispatch_workgroups_indirect(&be.args, 16);
-            pass.set_bind_group(1, &be.args_bind_group, &[]);
-            pass.set_pipeline(&p.finish);
-            pass.dispatch_workgroups(inst_groups, 1, 1);
-            drop(pass);
-            if !p.stages.is_empty() {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("fx sim stages"),
-                    timestamp_writes: None,
-                });
+            SimStage::Stages => {
                 if p.uses_scene {
                     pass.set_bind_group(1, &self.data.bind_group, &[]);
                     pass.set_bind_group(2, &self.scene.bind_group, &[]);
