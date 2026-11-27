@@ -74,6 +74,24 @@ pub fn split_object_path(path: &str) -> (String, String) {
     }
 }
 
+/// `base/rel` matching each component of `rel` without regard to case.
+fn find_ci(base: &Path, rel: &str) -> Option<PathBuf> {
+    let mut cur = base.to_path_buf();
+    for part in rel.split('/').filter(|p| !p.is_empty()) {
+        let exact = cur.join(part);
+        if exact.exists() {
+            cur = exact;
+            continue;
+        }
+        let found = std::fs::read_dir(&cur)
+            .ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(part))?;
+        cur = found.path();
+    }
+    cur.is_file().then_some(cur)
+}
+
 impl Store {
     pub fn new(roots: Vec<PathBuf>) -> Self {
         Store { roots, content_roots: Vec::new(), cache: HashMap::new() }
@@ -106,11 +124,19 @@ impl Store {
             return None;
         }
         let game = rel.strip_prefix("Game/").map(|r| (r, &self.content_roots));
-        self.roots
+        let candidates: Vec<(PathBuf, String)> = self
+            .roots
             .iter()
-            .map(|r| r.join(format!("{rel}.uasset")))
-            .chain(game.into_iter().flat_map(|(r, cs)| cs.iter().map(move |c| c.join(format!("{r}.uasset")))))
+            .map(|r| (r.clone(), format!("{rel}.uasset")))
+            .chain(game.into_iter().flat_map(|(r, cs)| cs.iter().map(move |c| (c.clone(), format!("{r}.uasset")))))
+            .collect();
+        candidates
+            .iter()
+            .map(|(b, r)| b.join(r))
             .find(|f| f.is_file())
+            // Unreal paths are case-insensitive; packs saved on Windows can
+            // name a folder `materials` that their objects call `Materials`.
+            .or_else(|| candidates.iter().find_map(|(b, r)| find_ci(b, r)))
     }
 
     /// The object's package, read once.
@@ -175,8 +201,16 @@ fn undelta_rows(data: &[u8], w: u32, h: u32, format: &str) -> Result<Vec<u8>, St
         }
         let (prev, cur) = out.split_at_mut(y * row);
         let prev = &prev[(y - 1) * row..];
-        for (c, p) in cur[..row].iter_mut().zip(prev) {
-            *c = c.wrapping_add(*p);
+        if bpc == 2 {
+            // 16-bit channels: byte-wise deltas stored + 0x80 (a delta row
+            // of a flat area reads 0x80 in every byte).
+            for (c, p) in cur[..row].iter_mut().zip(prev) {
+                *c = c.wrapping_sub(0x80).wrapping_add(*p);
+            }
+        } else {
+            for (c, p) in cur[..row].iter_mut().zip(prev) {
+                *c = c.wrapping_add(*p);
+            }
         }
     }
     Ok(out)
@@ -993,6 +1027,12 @@ impl<'a> Gen<'a> {
                 let x = arg(self, "In", v("0.0", 1), 1);
                 let k = arg(self, "Contrast", v("0.0", 1), 1);
                 v(format!("saturate(mix(0.0 - ({0}), 1.0 + ({0}), {1}))", k.code, x.code), 1)
+            }
+            // Temporal dithering of a masked opacity: the threshold as is
+            // (no dither pattern; TAA blends it to about this).
+            "DitherTemporalAA" => {
+                let a = ["Alpha Threshold", "AlphaThreshold", "Alpha"].iter().find_map(|n| self.call_arg(e, n));
+                cast(&a.unwrap_or(v("0.5", 1)), 1)
             }
             "MakeFloat2" | "MakeFloat3" | "MakeFloat4" => {
                 let n = name.as_bytes()[9] - b'0';

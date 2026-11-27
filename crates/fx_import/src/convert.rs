@@ -995,6 +995,19 @@ impl<'a> Cx<'a> {
     // ---- inputs ----
 
     /// The user parameter's value, by full name.
+    /// A Float input's typical value: a constant, a user parameter's default,
+    /// or the middle of a random range of those.
+    fn mean_float(&self, i: Option<&NInput>) -> Option<f32> {
+        match i? {
+            NInput::Value(v) => v.floats().and_then(|f| f.first().copied()),
+            NInput::Link(l) => self.user(l).and_then(|v| v.floats()).and_then(|f| f.first().copied()),
+            NInput::Dynamic(d) if d.script_name().contains("RandomRangeFloat") || d.script_name().contains("UniformRangedFloat") => {
+                Some((self.mean_float(d.input("Minimum"))? + self.mean_float(d.input("Maximum"))?) * 0.5)
+            }
+            _ => None,
+        }
+    }
+
     fn user(&self, name: &str) -> Option<&'a NValue> {
         if let Some(v) = self.user_overrides.get(name) {
             return Some(*v);
@@ -1263,9 +1276,57 @@ impl<'a> Cx<'a> {
                     vec![("X".into(), comp("R")), ("Y".into(), comp("G")), ("Z".into(), comp("B"))],
                 ))
             }
+            "ClampFloat" => {
+                let x = get(self, "Float", unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0)));
+                let lo = get(self, "Min", unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0)));
+                let hi = get(self, "Max", unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(1.0)));
+                if let (Fx::Lit(Lit::Float(x)), Fx::Lit(Lit::Float(a)), Fx::Lit(Lit::Float(b))) = (&x, &lo, &hi) {
+                    return Ok(Fx::Lit(Lit::Float(x.max(*a).min(*b))));
+                }
+                Ok(Fx::Dyn("Clamp Float".into(), vec![("Value".into(), x), ("Minimum".into(), lo), ("Maximum".into(), hi)]))
+            }
+            "MakeFloatFromVector" | "MakeFloatFromVector2d" => {
+                // Niagara takes the X component.
+                let ty = if name == "MakeFloatFromVector" { Ty::Vec3 } else { Ty::Vec2 };
+                match d.input("Vector") {
+                    // The component's scale: 1 here (effects are not scaled).
+                    Some(NInput::Link(l)) if l.contains("Owner.Scale") => Ok(Fx::Lit(Lit::Float(1.0))),
+                    _ => match get(self, "Vector", Unit::None, ty)?.unwrap_or(Fx::Lit(Lit::from_floats(ty, &[0.0]))) {
+                        Fx::Lit(v) => Ok(Fx::Lit(Lit::Float(v.floats()[0]))),
+                        v => Ok(Fx::Dyn(
+                            format!("Break {}", ty.name()),
+                            vec![("Value".into(), v), ("Component".into(), Fx::Choice("X".into()))],
+                        )),
+                    },
+                }
+            }
             "Abs_Float" => {
                 // Constants and non-negative ranges fold; there is no Abs here.
                 let key = ["Float", "A", "Value"].into_iter().find(|k| d.has(k)).unwrap_or("Float");
+                // |S sin θ| (a twinkle): S/2 - S/2 cos 2θ has the same period,
+                // peaks and zeros, as a Sine over Time at twice the frequency.
+                if let Some(NInput::Dynamic(s)) = d.input(key) {
+                    if s.script_name() == "Sine" && lit_f(s.input("Bias")).unwrap_or(0.0) == 0.0 && !s.has("Normalized Angle") && !s.has("Angle") {
+                        let scale = match s.input("Scale") {
+                            Some(i) => self.conv(e, i, unit, Ty::Float)?,
+                            None => Fx::Lit(Lit::Float(1.0)),
+                        };
+                        let half = match scale {
+                            Fx::Lit(Lit::Float(v)) => Fx::Lit(Lit::Float(v.abs() * 0.5)),
+                            v => Fx::Dyn("Multiply Float".into(), vec![("A".into(), v), ("B".into(), Fx::Lit(Lit::Float(0.5)))]),
+                        };
+                        let period = self.mean_float(s.input("Period")).unwrap_or(1.0);
+                        return Ok(Fx::Dyn(
+                            "Sine over Time".into(),
+                            vec![
+                                ("Amplitude".into(), half.clone()),
+                                ("Frequency".into(), Fx::Lit(Lit::Float(if period != 0.0 { 2.0 / period } else { 0.0 }))),
+                                ("Phase".into(), Fx::Lit(Lit::Float(-0.25))),
+                                ("Offset".into(), half),
+                            ],
+                        ));
+                    }
+                }
                 match get(self, key, unit, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(0.0))) {
                     Fx::Lit(Lit::Float(x)) => Ok(Fx::Lit(Lit::Float(x.abs()))),
                     Fx::Range(Lit::Float(a), Lit::Float(b)) if a >= 0.0 && b >= 0.0 => Ok(Fx::Range(Lit::Float(a), Lit::Float(b))),
@@ -1274,8 +1335,8 @@ impl<'a> Cx<'a> {
                 }
             }
             "MakeLinearColorFromVectorAndFloat" => {
-                let rgb_key = ["Vector", "RGB", "Color"].into_iter().find(|k| d.has(k)).unwrap_or("Vector");
-                let a_key = ["Float", "Alpha", "A"].into_iter().find(|k| d.has(k)).unwrap_or("Float");
+                let rgb_key = ["Vector (RGB)", "Vector", "RGB", "Color"].into_iter().find(|k| d.has(k)).unwrap_or("Vector (RGB)");
+                let a_key = ["Float (Alpha)", "Float", "Alpha", "A"].into_iter().find(|k| d.has(k)).unwrap_or("Float (Alpha)");
                 let rgb = get(self, rgb_key, Unit::None, Ty::Vec3)?.unwrap_or(Fx::Lit(Lit::Vec3([1.0; 3])));
                 let a = get(self, a_key, Unit::None, Ty::Float)?.unwrap_or(Fx::Lit(Lit::Float(1.0)));
                 if let (Fx::Lit(Lit::Vec3(c)), Fx::Lit(Lit::Float(a))) = (&rgb, &a) {
