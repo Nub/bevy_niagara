@@ -1,0 +1,103 @@
+// Sparks burst: an impact throws out a shower of hot, fast,
+// velocity-aligned sparks that arc down under gravity, cool and shrink,
+// plus a brief additive flash. Fires every second.
+//
+// Niagara tutorial recipe ("Sparks" / "Create a sparks burst": Simple Sprite
+// Burst template):
+//  1. Spawn Burst Instantaneous (one burst per impact) in Emitter Update.
+//  2. Initialize Particle: short random Lifetime, HDR orange-white Color,
+//     thin tall Sprite Size, random Mass.
+//  3. Add Velocity in Cone: the template's cone velocity, wide angle, random
+//     strength.
+//  4. Gravity Force and Drag, then Solve Forces and Velocity.
+//  5. Scale Color over age (white-hot -> orange -> dark red) and Scale Sprite
+//     Size over age (shrink).
+//  6. Sprite renderer: Additive, Alignment = Velocity Aligned, the
+//     tutorial's stretched-spark step.
+//  7. Flash emitter: one big short-lived sprite at the impact.
+// Not available yet: Collision (sparks pass through the floor) and emitter
+// looping (the burst is repeated as one Spawn Burst per second, 0..9 s).
+(
+    name: "Sparks Burst",
+    emitters: [
+        (
+            name: "Sparks",
+            sim_target: Gpu,
+            max_particles: 512,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(1.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(2.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(3.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(4.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(5.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(6.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(7.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(8.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(180), "Spawn Time": Float(9.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.4), Float(0.95)),
+                    "Position": RandomRange(Vec3((-0.03, 0.97, -0.03)), Vec3((0.03, 1.03, 0.03))),
+                    "Color": RandomRange(Color((5.0, 3.0, 1.2, 1.0)), Color((7.0, 5.0, 2.5, 1.0))),
+                    "Sprite Size": RandomRange(Vec2((0.012, 0.06)), Vec2((0.02, 0.12))),
+                    "Mass": RandomRange(Float(0.5), Float(1.5)),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(70.0),
+                    "Velocity Strength": RandomRange(Float(2.0), Float(6.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(1.5) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.0, 1.0, 1.0)), (0.5, (1.0, 0.45, 0.12)), (1.0, (0.35, 0.04, 0.0))])),
+                }),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (1.0, 1.0)), (1.0, (0.3, 0.4))])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+        (
+            name: "Flash",
+            sim_target: Gpu,
+            max_particles: 4,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(1.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(2.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(3.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(4.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(5.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(6.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(7.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(8.0) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(9.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.15),
+                    "Position": Vec3((0.0, 1.0, 0.0)),
+                    "Color": Color((6.0, 4.0, 2.0, 1.0)),
+                    "Sprite Size": Vec2((0.6, 0.6)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Color", inputs: {
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (1.0, 0.0)])),
+                }),
+                (module: "Scale Sprite Size", inputs: {
+                    "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (1.0, (1.3, 1.3))])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive))],
+        ),
+    ],
+)

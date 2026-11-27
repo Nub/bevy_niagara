@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link rel="icon" href="data:,">
+<title>animatey: particles in the browser</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #050508; color: #ccc; font: 14px system-ui, sans-serif; overflow: hidden; }
+  #fx-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 2em; pointer-events: none; }
+  #hint { position: fixed; left: 12px; bottom: 10px; opacity: .6; pointer-events: none; }
+  #diag-btn { position: fixed; right: 10px; bottom: 8px; font: 12px system-ui, sans-serif; color: #aaa; background: #222a; border: 1px solid #555; border-radius: 4px; padding: 3px 8px; }
+  #diag { position: fixed; inset: 8px 8px 40px 8px; display: none; overflow: auto; -webkit-overflow-scrolling: touch;
+          background: #0b0b10ee; border: 1px solid #444; border-radius: 6px; padding: 10px 12px;
+          font: 12px/1.35 ui-monospace, Menlo, monospace; color: #ddd; white-space: pre-wrap; word-break: break-word; }
+  #diag.open { display: block; }
+  #diag .err { color: #ff7b72; }
+  #diag .warn { color: #e3b341; }
+  #diag .ok { color: #7ee787; }
+  #diag h3 { margin: 0 0 6px; font: bold 14px system-ui, sans-serif; color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="fx-canvas"></canvas>
+<div id="msg">Loading…</div>
+<div id="hint">Campfire and sparks · drag to orbit · pinch or scroll to zoom</div>
+<button id="diag-btn" type="button">diagnostics</button>
+<div id="diag"></div>
+<script>
+// Diagnostics overlay: records WebGPU setup (adapter info, limits, features,
+// device request), uncaptured WebGPU errors, shader compile errors, wasm
+// panics (Bevy's console_error_panic_hook logs to console.error), JS errors
+// and the number of frames submitted, and opens itself on the first error so
+// a screenshot names the cause. `?diag` keeps it open; `?fail=adapter|device|
+// shader|panic` forces a failure to test it.
+(() => {
+  const params = new URLSearchParams(location.search);
+  const fail = params.get("fail") || "";
+  const box = document.getElementById("diag");
+  const btn = document.getElementById("diag-btn");
+  const t0 = performance.now();
+  const lines = [];
+  let errors = 0, submits = 0, render = null;
+  const stamp = () => ((performance.now() - t0) / 1000).toFixed(1).padStart(5) + "s ";
+  const D = window.fxDiag = {
+    log(kind, text) {
+      lines.push({ kind, text: stamp() + text });
+      if (lines.length > 400) lines.splice(5, 1);
+      if (kind === "err") { errors++; D.open(); }
+      D.draw();
+    },
+    open() { box.classList.add("open"); D.draw(); },
+    draw() {
+      if (!box.classList.contains("open")) return;
+      if (render) return;
+      render = requestAnimationFrame(() => {
+        render = null;
+        const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+        const head = `<h3>Diagnostics: ${errors ? `<span class="err">${errors} error(s)</span>` : '<span class="ok">no errors</span>'} · frames submitted: ${submits}</h3>`;
+        box.innerHTML = head + lines.map((l) => `<div class="${l.kind}">${esc(l.text)}</div>`).join("");
+      });
+    },
+    get submits() { return submits; },
+    fail,
+  };
+  btn.onclick = () => { box.classList.toggle("open"); D.draw(); };
+  if (params.has("diag")) D.open();
+
+  D.log("info", `page: ${location.href}`);
+  D.log("info", `userAgent: ${navigator.userAgent}`);
+  D.log("info", `screen: ${screen.width}x${screen.height} dpr ${devicePixelRatio} · window ${innerWidth}x${innerHeight}` +
+    (navigator.deviceMemory ? ` · deviceMemory ${navigator.deviceMemory} GB` : ""));
+  D.log(navigator.gpu ? "ok" : "err", `navigator.gpu: ${navigator.gpu ? "present" : "MISSING"}` +
+    (navigator.gpu?.wgslLanguageFeatures ? ` · WGSL features: ${[...navigator.gpu.wgslLanguageFeatures].join(", ") || "none"}` : ""));
+  if (navigator.gpu?.getPreferredCanvasFormat) D.log("info", `preferred canvas format: ${navigator.gpu.getPreferredCanvasFormat()}`);
+
+  const msgOf = (e) => (e && (e.stack && !String(e.stack).includes(String(e.message)) ? `${e}\n${e.stack}` : e.stack || e.message)) || String(e);
+  addEventListener("error", (e) => D.log("err", `JS error: ${e.message} (${e.filename}:${e.lineno})${e.error?.stack ? "\n" + e.error.stack : ""}`));
+  addEventListener("unhandledrejection", (e) => {
+    if (String(e.reason).includes("Using exceptions for control flow")) return;
+    D.log("err", `unhandled rejection: ${msgOf(e.reason)}`);
+  });
+  for (const level of ["error", "warn"]) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      orig(...args);
+      const text = args.map((a) => typeof a === "string" ? a : a instanceof Error ? msgOf(a) : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()).join(" ")
+        .replace(/%c/g, "").replace(/(color|font-weight|background)[^;]*;?/g, "");
+      if (text.includes("Using exceptions for control flow")) return;
+      D.log(level === "error" ? "err" : "warn", (level === "error" ? "console.error: " : "console.warn: ") + text);
+    };
+  }
+
+  if (!navigator.gpu) return;
+  const LIMITS = ["maxTextureDimension2D", "maxTextureDimension3D", "maxTextureArrayLayers", "maxBindGroups", "maxBindGroupsPlusVertexBuffers",
+    "maxBindingsPerBindGroup", "maxDynamicUniformBuffersPerPipelineLayout", "maxDynamicStorageBuffersPerPipelineLayout",
+    "maxSampledTexturesPerShaderStage", "maxSamplersPerShaderStage", "maxStorageBuffersPerShaderStage", "maxStorageBuffersInVertexStage",
+    "maxStorageBuffersInFragmentStage", "maxStorageTexturesPerShaderStage", "maxStorageTexturesInFragmentStage", "maxUniformBuffersPerShaderStage",
+    "maxUniformBufferBindingSize", "maxStorageBufferBindingSize", "maxBufferSize", "maxVertexBuffers", "maxVertexAttributes",
+    "maxInterStageShaderVariables", "maxColorAttachments", "maxColorAttachmentBytesPerSample", "maxComputeWorkgroupStorageSize",
+    "maxComputeInvocationsPerWorkgroup", "maxComputeWorkgroupSizeX", "maxComputeWorkgroupsPerDimension"];
+  const limitsText = (l) => LIMITS.filter((k) => l[k] !== undefined).map((k) => `${k}=${l[k]}`).join(" ");
+
+  const gpuProto = Object.getPrototypeOf(navigator.gpu);
+  const requestAdapter = gpuProto.requestAdapter;
+  let adapterCalls = 0;
+  gpuProto.requestAdapter = async function (opts) {
+    adapterCalls++;
+    if (fail === "adapter") { D.log("err", "requestAdapter: forced null (?fail=adapter)"); return null; }
+    try {
+      const a = await requestAdapter.call(this, opts);
+      if (!a) { D.log(adapterCalls < 3 ? "warn" : "err", `requestAdapter(${JSON.stringify(opts ?? {})}) returned null (call ${adapterCalls})`); return a; }
+      if (adapterCalls === 1 || !D.adapterLogged) {
+        D.adapterLogged = true;
+        const i = a.info ?? {};
+        D.log("ok", `adapter: vendor=${i.vendor || "?"} arch=${i.architecture || "?"} device=${i.device || "?"} desc=${i.description || "?"}` +
+          ` fallback=${a.isFallbackAdapter ?? i.isFallbackAdapter ?? "?"}`);
+        D.log("info", `adapter features: ${[...a.features].sort().join(" ") || "none"}`);
+        D.log("info", `adapter limits: ${limitsText(a.limits)}`);
+      }
+      return a;
+    } catch (e) { D.log("err", `requestAdapter threw: ${msgOf(e)}`); throw e; }
+  };
+
+  const AdapterProto = globalThis.GPUAdapter?.prototype;
+  if (AdapterProto) {
+    const requestDevice = AdapterProto.requestDevice;
+    AdapterProto.requestDevice = async function (desc) {
+      const req = desc?.requiredLimits ?? {};
+      const unknown = Object.keys(req).filter((k) => req[k] !== undefined && !(k in this.limits));
+      const over = Object.keys(req).filter((k) => k in this.limits && typeof req[k] === "number" &&
+        (k.startsWith("min") ? req[k] < this.limits[k] : req[k] > this.limits[k]));
+      D.log("info", `requestDevice: features [${[...(desc?.requiredFeatures ?? [])].join(" ")}]` +
+        (unknown.length ? ` · limits this browser does not know: ${unknown.join(" ")}` : "") +
+        (over.length ? ` · limits above the adapter's: ${over.map((k) => `${k}=${req[k]}>${this.limits[k]}`).join(" ")}` : ""));
+      if (fail === "device") { D.log("err", "requestDevice: forced failure (?fail=device)"); throw new Error("forced requestDevice failure (?fail=device)"); }
+      let dev;
+      try { dev = await requestDevice.call(this, desc); }
+      catch (e) { D.log("err", `requestDevice failed: ${msgOf(e)}`); throw e; }
+      D.log("ok", "device created");
+      dev.addEventListener("uncapturederror", (ev) => D.log("err", `WebGPU error (${ev.error?.constructor?.name ?? "error"}): ${ev.error?.message ?? ev.error}`));
+      dev.lost?.then((info) => D.log("err", `device lost (${info.reason}): ${info.message}`));
+      return dev;
+    };
+  }
+
+  const DeviceProto = globalThis.GPUDevice?.prototype;
+  if (DeviceProto) {
+    const createShaderModule = DeviceProto.createShaderModule;
+    DeviceProto.createShaderModule = function (desc) {
+      if (fail === "shader" && !D.failedShader) { D.failedShader = true; desc = { ...desc, code: desc.code + "\nfn forced_failure( {" }; }
+      const m = createShaderModule.call(this, desc);
+      m.getCompilationInfo?.().then((info) => {
+        const msgs = info.messages.filter((x) => x.type === "error" || x.type === "warning");
+        if (!msgs.length) return;
+        const src = String(desc.code ?? "").split("\n");
+        D.log(msgs.some((x) => x.type === "error") ? "err" : "warn",
+          `shader "${desc.label ?? "?"}":\n` + msgs.slice(0, 8).map((x) =>
+            `  ${x.type} at ${x.lineNum}:${x.linePos}: ${x.message}\n    | ${(src[x.lineNum - 1] ?? "").trim().slice(0, 160)}`).join("\n"));
+      }).catch(() => {});
+      return m;
+    };
+  }
+
+  const QueueProto = globalThis.GPUQueue?.prototype;
+  if (QueueProto) {
+    const submit = QueueProto.submit;
+    QueueProto.submit = function (bufs) {
+      if (submits++ === 0) D.log("ok", "first command buffer submitted");
+      if (submits % 30 === 0) D.draw();
+      return submit.call(this, bufs);
+    };
+  }
+
+  const CtxProto = globalThis.GPUCanvasContext?.prototype;
+  if (CtxProto) {
+    const configure = CtxProto.configure;
+    let configures = 0;
+    CtxProto.configure = function (cfg) {
+      const c = this.canvas;
+      if (configures++ < 4) D.log("info", `canvas configure: format=${cfg.format} alphaMode=${cfg.alphaMode ?? "opaque"} usage=${cfg.usage} size=${c.width}x${c.height}`);
+      if (!c.width || !c.height) D.log("warn", "canvas has size 0 at configure");
+      try { return configure.call(this, cfg); }
+      catch (e) { D.log("err", `canvas configure failed: ${msgOf(e)}`); throw e; }
+    };
+  }
+
+  // Started but never drew: say so (with what was logged so far).
+  setTimeout(() => {
+    if (submits === 0) D.log("err", "nothing submitted to the GPU after 15 s (the app did not start rendering)");
+    D.draw();
+  }, 15000);
+})();
+</script>
+<script type="module">
+  const msg = document.getElementById("msg");
+  const D = window.fxDiag;
+  if (!navigator.gpu) {
+    msg.textContent = "This page needs WebGPU (Chrome/Edge 113+, Safari 26+ on iPad and Mac), served over HTTPS or localhost. " +
+      "On iPadOS 18 enable it in Settings › Apps › Safari › Advanced › Feature Flags › WebGPU.";
+  } else {
+    try {
+      // Ask for an adapter once before Bevy does: Chromium sometimes answers the
+      // first request of a page with null ("A valid external Instance reference
+      // no longer exists"), and Bevy has no retry.
+      let adapter = null;
+      for (let i = 0; i < 3 && !adapter; i++) adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+      if (!adapter) throw new Error("no WebGPU adapter (navigator.gpu.requestAdapter returned null 3 times)");
+      msg.textContent = "Loading wasm…";
+      const { default: init } = await import("./fx_web.js");
+      msg.textContent = "";
+      try {
+        await init();
+      } catch (e) {
+        // Bevy's winit loop hands control back to the browser by throwing; that one is expected.
+        if (!String(e).includes("Using exceptions for control flow")) throw e;
+      }
+    } catch (e) {
+      msg.textContent = "Failed to start: " + (e?.message ?? e);
+      D.log("err", "start failed: " + (e?.stack ?? e));
+    }
+  }
+</script>
+</body>
+</html>

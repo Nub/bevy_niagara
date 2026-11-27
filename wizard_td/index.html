@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="data:,">
+<title>Wizard TD · animatey</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #10131a; color: #ddd; font: 16px system-ui, sans-serif; overflow: hidden;
+    overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  #fx-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center;
+    text-align: center; padding: 2em; background: rgba(8, 10, 18, .82); }
+  #overlay h1 { margin: 0; font-size: 42px; color: #ffd9a0; letter-spacing: .02em; }
+  #overlay p { margin: 0; max-width: 34em; line-height: 1.45; opacity: .85; }
+  #play { font: inherit; font-size: 22px; padding: 14px 34px; border-radius: 14px; border: 2px solid #ffd9a0; background: #3b2a5c; color: #fff; }
+  #play:disabled { opacity: .5; }
+</style>
+</head>
+<body>
+<canvas id="fx-canvas"></canvas>
+<div id="overlay">
+  <h1>Wizard TD</h1>
+  <p>Defend the tower from the foxes. Every spell is a GPU particle effect.</p>
+  <p id="controls">Desktop: WASD move, mouse look, click to cast, 1–4 pick a spell.<br>
+     Touch: left thumb moves, drag on the right to look, tap a spell to cast it at the crosshair.</p>
+  <button id="play" disabled>Loading…</button>
+  <p id="msg"></p>
+</div>
+<script type="module">
+  const msg = document.getElementById("msg");
+  const play = document.getElementById("play");
+  const overlay = document.getElementById("overlay");
+  play.addEventListener("click", () => {
+    const el = document.documentElement;
+    const fs = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fs && !new URLSearchParams(location.search).has("nofs")) {
+      try { const p = fs.call(el); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    }
+    overlay.style.display = "none";
+    document.body.setAttribute("data-playing", "");
+    document.getElementById("fx-canvas").focus();
+  });
+  if (!navigator.gpu) {
+    play.textContent = "WebGPU needed";
+    msg.textContent = "This page needs WebGPU (Safari 26+ on iPad and Mac, Chrome/Edge 113+), over HTTPS or localhost.";
+  } else {
+    // Chromium sometimes answers a page's first adapter request with null; ask first.
+    for (let i = 0; i < 3 && !(await navigator.gpu.requestAdapter({ powerPreference: "high-performance" })); i++) {}
+    const { default: init } = await import("./wizard_td.js");
+    play.disabled = false;
+    play.textContent = "Play";
+    // ?bot: the scripted player plays (attract mode, automated screenshots).
+    if (new URLSearchParams(location.search).has("bot")) overlay.style.display = "none";
+    try {
+      await init();
+    } catch (e) {
+      // Bevy's winit loop hands control back to the browser by throwing; that one is expected.
+      if (!String(e).includes("Using exceptions for control flow")) {
+        overlay.style.display = "";
+        play.disabled = true;
+        msg.textContent = "Failed to start: " + e;
+        throw e;
+      }
+    }
+  }
+</script>
+</body>
+</html>

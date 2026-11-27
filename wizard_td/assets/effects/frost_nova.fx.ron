@@ -1,0 +1,188 @@
+// Frost nova: one-shot (~3 s) placed on the ground (+Y up). An icy blue ring
+// races out over the ground to User.Radius in ~0.4 s (flat glow plus an
+// upright frosty rim), ice shard sparks are flung outward and bounce on the
+// ground, a cold flash and light pop at the centre, and a low mist fills the
+// circle and fades over ~3 s. No textures or custom materials.
+// User parameters:
+//   User.Radius  Float  ring radius in metres (default 6.0)
+(
+    name: "Frost Nova",
+    user_parameters: { "User.Radius": Float(6.0) },
+    scalability: (
+        max_distance: 100.0,
+        spawn_count_scale_by_distance: [(20.0, 1.0), (70.0, 0.5)],
+        bounds_radius: 8.0,
+        max_instances: 16,
+        quality: (
+            Low: (spawn_count_scale: 0.5, max_instances: 6),
+            Medium: (spawn_count_scale: 0.75, max_instances: 10),
+        ),
+    ),
+    emitters: [
+        (
+            // Flat ground ring: starts on a small circle, pushed out at
+            // 8 * Radius m/s with Drag 8, so it settles at ~Radius by 0.4 s.
+            name: "Ring",
+            max_particles: 96,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(90), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.8), Float(1.0)),
+                    "Color": Color((0.12, 0.45, 1.4, 0.8)),
+                    "Sprite Size": RandomRange(Vec2((0.8, 0.8)), Vec2((1.1, 1.1))),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Ring, "Ring Radius": Float(0.2), "Offset": Vec3((0.0, 0.05, 0.0)) }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Origin": Vec3((0.0, 0.05, 0.0)),
+                    "Velocity Scale": Vec3((1.0, 0.0, 1.0)),
+                    "Velocity Strength": Dynamic("Multiply Float", { "A": Link(Float, "User.Radius"), "B": Float(8.0) }),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(8.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.4, 0.4)), (0.4, (1.0, 1.0)), (1.0, (1.3, 1.3))])) }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (2.5, 1.8, 1.3)), (0.4, (1.0, 1.0, 1.0)), (1.0, (0.6, 0.7, 0.9))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.45, 0.9), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, facing_mode: CustomFacingVector, custom_facing_vector: (0.0, 1.0, 0.0)))],
+        ),
+        (
+            // Upright frosty rim riding the ring's edge.
+            name: "Rim",
+            max_particles: 72,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(64), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.6), Float(0.9)),
+                    "Color": Color((0.3, 0.7, 1.6, 0.9)),
+                    "Sprite Size": RandomRange(Vec2((0.25, 0.6)), Vec2((0.4, 1.0))),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Ring, "Ring Radius": Float(0.2), "Offset": Vec3((0.0, 0.3, 0.0)) }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Origin": Vec3((0.0, 0.3, 0.0)),
+                    "Velocity Scale": Vec3((1.0, 0.0, 1.0)),
+                    "Velocity Strength": Dynamic("Multiply Float", { "A": Link(Float, "User.Radius"), "B": Float(8.0) }),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Drag", inputs: { "Drag": Float(8.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (1.0, 0.3)), (0.3, (1.0, 1.0)), (1.0, (0.6, 0.2))])) }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.8, 1.6, 1.4)), (1.0, (0.7, 0.8, 1.0))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.5, 0.8), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: CustomAlignment, custom_alignment_vector: (0.0, 1.0, 0.0)))],
+        ),
+        (
+            name: "Flash",
+            max_particles: 2,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.4),
+                    "Position": Vec3((0.0, 0.6, 0.0)),
+                    "Color": Color((0.5, 0.9, 1.8, 1.0)),
+                    "Sprite Size": Vec2((2.2, 2.2)),
+                }),
+                (module: "Initialize Light", inputs: { "Light Radius": Float(9.0) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (0.3, (1.0, 1.0)), (1.0, (1.2, 1.2))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.3, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [
+                Sprite((blend_mode: Additive)),
+                Light((max_lights: 1, intensity: 20000.0)),
+            ],
+        ),
+        (
+            name: "Shards",
+            max_particles: 48,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(40), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.7), Float(1.3)),
+                    "Position": Vec3((0.0, 0.3, 0.0)),
+                    "Color": Color((0.7, 1.1, 1.8, 1.0)),
+                    "Sprite Size": RandomRange(Vec2((0.05, 0.16)), Vec2((0.08, 0.3))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(80.0),
+                    "Inner Cone Angle": Float(35.0),
+                    "Velocity Strength": RandomRange(Float(4.0), Float(9.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(1.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": Plane,
+                    "Particle Radius": Float(0.03),
+                    "Restitution": Float(0.3),
+                    "Friction": Float(0.5),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.8, 1.6, 1.4)), (1.0, (0.8, 0.9, 1.0))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.75, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+        (
+            // Low cold mist over the whole disc, drifting slowly, gone by ~3 s.
+            name: "Mist",
+            max_particles: 48,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(22), "Spawn Time": Float(0.1) }),
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(22), "Spawn Time": Float(0.3) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(2.2), Float(2.8)),
+                    "Color": Color((0.45, 0.7, 1.0, 0.24)),
+                    "Sprite Size": RandomRange(Vec2((2.8, 2.8)), Vec2((3.8, 3.8))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Shape Location", inputs: {
+                    "Shape Primitive": Ring,
+                    "Ring Radius": Dynamic("Multiply Float", { "A": Link(Float, "User.Radius"), "B": Float(0.85) }),
+                    "Disc Coverage": Float(1.0),
+                    "Offset": Vec3((0.0, 0.12, 0.0)),
+                }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Scale": Vec3((1.0, 0.0, 1.0)),
+                    "Velocity Strength": RandomRange(Float(0.2), Float(0.6)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Curl Noise Force", inputs: { "Noise Strength": Float(0.6), "Noise Frequency": Float(0.3) }),
+                (module: "Drag", inputs: { "Drag": Float(0.8) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sprite Rotation Rate", inputs: { "Rotation Rate": Float(12.0) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (1.0, (1.3, 1.3))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.6, 0.7), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, sort_mode: ViewDepth, facing_mode: CustomFacingVector, custom_facing_vector: (0.0, 1.0, 0.0)))],
+        ),
+    ],
+)

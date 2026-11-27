@@ -1,0 +1,150 @@
+// Explosion: one-shot fireball impact (~1.5 s, bursts only). A bright flash
+// and point-light flash, expanding fire puffs, fiery sparks thrown out under
+// gravity (bouncing on the ground plane y = 0) and dark smoke rising. Place
+// it at the impact point (+Y up). No textures or custom materials.
+// User parameters:
+//   User.Tint  Color  fire colour (default orange (1.0, 0.45, 0.12, 1.0))
+(
+    name: "Explosion",
+    user_parameters: { "User.Tint": Color((1.0, 0.45, 0.12, 1.0)) },
+    scalability: (
+        max_distance: 90.0,
+        spawn_count_scale_by_distance: [(15.0, 1.0), (60.0, 0.4)],
+        bounds_radius: 4.0,
+        max_instances: 32,
+        quality: (
+            Low: (spawn_count_scale: 0.5, max_instances: 10),
+            Medium: (spawn_count_scale: 0.75, max_instances: 20),
+        ),
+    ),
+    emitters: [
+        (
+            name: "Flash",
+            max_particles: 2,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(1), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": Float(0.35),
+                    "Position": Vec3((0.0, 0.8, 0.0)),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": Vec2((2.4, 2.4)),
+                }),
+                (module: "Initialize Light", inputs: { "Light Radius": Float(9.0) }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.4, 0.4)), (0.25, (1.0, 1.0)), (1.0, (1.1, 1.1))])) }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (2.2, 2.0, 1.8)), (0.3, (1.3, 1.0, 0.9)), (1.0, (0.8, 0.4, 0.3))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.3, 0.6), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [
+                Sprite((blend_mode: Additive)),
+                Light((max_lights: 1, intensity: 30000.0)),
+            ],
+        ),
+        (
+            name: "Fire",
+            max_particles: 20,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(16), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.6), Float(1.0)),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": RandomRange(Vec2((0.7, 0.7)), Vec2((1.1, 1.1))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Sphere, "Sphere Radius": Float(0.35), "Offset": Vec3((0.0, 0.8, 0.0)) }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Origin": Vec3((0.0, 0.3, 0.0)),
+                    "Velocity Strength": RandomRange(Float(3.0), Float(6.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Acceleration Force", inputs: { "Acceleration": Vec3((0.0, 3.0, 0.0)) }),
+                (module: "Drag", inputs: { "Drag": Float(5.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sprite Rotation Rate", inputs: { "Rotation Rate": Float(60.0) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.5, 0.5)), (0.4, (1.3, 1.3)), (1.0, (1.7, 1.7))])) }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (1.8, 1.5, 1.2)), (0.3, (1.3, 0.8, 0.5)), (0.7, (0.8, 0.3, 0.15)), (1.0, (0.3, 0.06, 0.03))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.6, 0.8), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, soft_particle_fade_distance: 0.4))],
+        ),
+        (
+            name: "Sparks",
+            max_particles: 48,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(40), "Spawn Time": Float(0.0) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(0.6), Float(1.3)),
+                    "Position": Vec3((0.0, 0.4, 0.0)),
+                    "Color": Link(Color, "User.Tint"),
+                    "Sprite Size": RandomRange(Vec2((0.04, 0.14)), Vec2((0.06, 0.26))),
+                }),
+                (module: "Add Velocity in Cone", inputs: {
+                    "Cone Axis": Vec3((0.0, 1.0, 0.0)),
+                    "Cone Angle": Float(85.0),
+                    "Velocity Strength": RandomRange(Float(4.0), Float(10.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Gravity Force"),
+                (module: "Drag", inputs: { "Drag": Float(1.2) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Collision", inputs: {
+                    "Collision Type": Plane,
+                    "Particle Radius": Float(0.02),
+                    "Restitution": Float(0.35),
+                    "Friction": Float(0.3),
+                }),
+                (module: "Scale Color", inputs: {
+                    "Scale RGB": CurveOverAge(Vec3([(0.0, (2.5, 2.2, 2.0)), (0.4, (1.6, 1.0, 0.8)), (1.0, (0.6, 0.15, 0.05))])),
+                    "Scale Alpha": CurveOverAge(Float([(0.0, 1.0), (0.8, 1.0), (1.0, 0.0)])),
+                }),
+            ],
+            renderers: [Sprite((blend_mode: Additive, alignment: VelocityAligned))],
+        ),
+        (
+            name: "Smoke",
+            max_particles: 12,
+            emitter_update: [
+                (module: "Spawn Burst Instantaneous", inputs: { "Spawn Count": Int(9), "Spawn Time": Float(0.2) }),
+            ],
+            particle_spawn: [
+                (module: "Initialize Particle", inputs: {
+                    "Lifetime": RandomRange(Float(1.1), Float(1.4)),
+                    "Color": Color((0.025, 0.022, 0.02, 0.75)),
+                    "Sprite Size": RandomRange(Vec2((0.8, 0.8)), Vec2((1.2, 1.2))),
+                    "Sprite Rotation": RandomRange(Float(0.0), Float(360.0)),
+                }),
+                (module: "Shape Location", inputs: { "Shape Primitive": Sphere, "Sphere Radius": Float(0.5), "Offset": Vec3((0.0, 0.7, 0.0)) }),
+                (module: "Add Velocity from Point", inputs: {
+                    "Velocity Origin": Vec3((0.0, 0.2, 0.0)),
+                    "Velocity Strength": RandomRange(Float(1.5), Float(3.0)),
+                }),
+            ],
+            particle_update: [
+                (module: "Particle State"),
+                (module: "Acceleration Force", inputs: { "Acceleration": Vec3((0.0, 2.2, 0.0)) }),
+                (module: "Drag", inputs: { "Drag": Float(3.0) }),
+                (module: "Solve Forces and Velocity"),
+                (module: "Sprite Rotation Rate", inputs: { "Rotation Rate": Float(30.0) }),
+                (module: "Scale Sprite Size", inputs: { "Scale Factor": CurveOverAge(Vec2([(0.0, (0.6, 0.6)), (1.0, (2.4, 2.4))])) }),
+                (module: "Scale Color", inputs: { "Scale Alpha": CurveOverAge(Float([(0.0, 0.0), (0.2, 1.0), (0.6, 0.6), (1.0, 0.0)])) }),
+            ],
+            renderers: [Sprite((blend_mode: Alpha, sort_mode: ViewDepth, soft_particle_fade_distance: 0.4))],
+        ),
+    ],
+)
